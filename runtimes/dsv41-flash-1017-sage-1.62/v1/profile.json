@@ -1,0 +1,56 @@
+{
+ "schema": "rexl3.runtime-profile.v1",
+ "state": "final",
+ "runtime_id": "dsv41-flash-1017-sage-1.62",
+ "source": {
+  "repository": "REXL3/REXL3-dev",
+  "commit": "0205fff17a00e875875386eb317f18dfb1105890",
+  "path": "docs/examples/cluster.dsv41-sage-single.json",
+  "sha256": "1b338e245804ece5ee9b299405daa854dd4db65cf22d7d76e355dc9284f3c115"
+ },
+ "target_repo": "vcruz305/DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw",
+ "default_profile": "dsv41-single",
+ "profiles": {
+  "dsv41-single": {
+   "kind": "single",
+   "site_fields": ["http_host", "http_port"],
+   "argv": [
+    "--model", "@MODEL_DIR@",
+    "--host", "@HTTP_HOST@",
+    "--port", "@HTTP_PORT@",
+    "--slots", "1",
+    "--max-model-len", "32768",
+    "--kv-dtype", "q4",
+    "--no-vision",
+    "--spec", "auto",
+    "--prefix-cache", "on",
+    "--served-model-name", "DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw"
+   ],
+   "env": {
+    "REXL3_DSV41_KV": "q4",
+    "REXL3_DSV41_FAST_MOE": "1",
+    "REXL3_DSV41_SPEC_LEARN": "1"
+   },
+   "files": {},
+   "capabilities": {
+    "text": true,
+    "sse": true,
+    "reasoning": true,
+    "tools": true,
+    "images": false,
+    "video": false,
+    "audio": false,
+    "json_schema": false,
+    "prefix_cache": true
+   },
+   "readiness_timeout_s": 300,
+   "http_port": 8940,
+   "http_host": "127.0.0.1",
+   "smoke_request": {
+    "model": "DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw",
+    "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
+    "max_tokens": 64
+   }
+  }
+ }
+}

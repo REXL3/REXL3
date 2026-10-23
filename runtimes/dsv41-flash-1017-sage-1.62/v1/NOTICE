@@ -1,0 +1,30 @@
+REXL3 (gb10-engine)
+Copyright (C) 2026 The REXL3 authors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License, version 3, as published by the Free Software Foundation.
+See LICENSE for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+Affero General Public License for more details.
+
+Scope. This licence covers the project's own work: the engine and its crates, the runtime template
+and bundle scripts, the serve profiles under runtimes/models/, the evaluation harnesses, the model
+packaging tools, the documentation and the dashboard. Model weights are not part of this repository
+and are not relicensed here: each profile's model.lock.json names the pack it fetches and that
+pack's own LICENSE governs the weights. Code ported or transcribed from other projects keeps its
+own licence, reproduced in THIRD_PARTY_NOTICES.md.
+
+The browser dashboard and monitoring configuration are project-authored and covered by the same
+licence. Optional Prometheus/Grafana services are external and unmodified; no Grafana code or
+assets are included.
+
+This product includes software ported or transcribed from the MIT-licensed projects listed in
+THIRD_PARTY_NOTICES.md (TensorFold, ExLlamaV3, z-lab/dflash) and a re-expression of image resize code from PyTorch
+(BSD-3-Clause, `crates/vision/src/torch_resample.rs`). Their copyright notices and license texts are
+reproduced there and must be kept with any redistribution.
+
+Decision option-name case folding uses native project code with official Unicode 9.0
+data (Copyright 2016 Unicode, Inc.). The verified input, provenance and Unicode
+permission notice are bundled under third_party/unicode9 (runtime documentation: unicode9/).

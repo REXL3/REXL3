@@ -1,0 +1,105 @@
+{
+ "schema": "rexl3.model-lock.v1",
+ "packs": {
+  "target": {
+   "repo": "vcruz305/DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw",
+   "revision": "c852150e06f5e5ee8c4c14f9cd1a9afc6bb21960",
+   "fingerprint": "sha256:23d204ab2c22293805f4c3f09bcfcff3c7e09ea1055b4a071bc314bdd76b08ec",
+   "license": "see the upstream model card and LICENSE in the pack",
+   "files": {
+    "chat_template.jinja": {
+     "sha256": "adaa16cddf2ed5415bb2518e72b514b9c8dbb750bcb8aa0b6a0de9c8e6b616b9",
+     "bytes": 4015
+    },
+    "config.json": {
+     "sha256": "25882944c203b1970a9187dc47334ebafbb7e95ffda888fd86c8181af9e15867",
+     "bytes": 3170
+    },
+    "engram_token_map.u32": {
+     "sha256": "c60a86322ec17b4142bfef3c57a8d81fb428550cdf487f88a4320cb59fe46481",
+     "bytes": 517120
+    },
+    "model-00001-of-00017.safetensors": {
+     "sha256": "ac51ca7efe935e1566d86be2ffabf2ab6df0083c38116315908e3ec8a9f34e8a",
+     "bytes": 8295145608
+    },
+    "model-00002-of-00017.safetensors": {
+     "sha256": "272fc820c126affafe9dcc8a681038883df95d961a8a2171943327583691e084",
+     "bytes": 8300673580
+    },
+    "model-00003-of-00017.safetensors": {
+     "sha256": "94f9f3822ebcdc36d52fe1f857ab8ab20f1974226d8d4e7c8694b7f45bee55a4",
+     "bytes": 8300799044
+    },
+    "model-00004-of-00017.safetensors": {
+     "sha256": "01b3dc66064724819df25cd178abb25dcfa22dd00c567df26ce289fd5dfc3daa",
+     "bytes": 8297590736
+    },
+    "model-00005-of-00017.safetensors": {
+     "sha256": "dfe1970998f68ca9fcd39cf649d403a1e918f48a87c7d13087ccb01a041f6afd",
+     "bytes": 8301345004
+    },
+    "model-00006-of-00017.safetensors": {
+     "sha256": "e215bfb496c9f73c3d83f19054c22b2bff14f54a33c8bfb8174c4738f89e2801",
+     "bytes": 8299988556
+    },
+    "model-00007-of-00017.safetensors": {
+     "sha256": "e08d5d61cffd5f0bcdfd7327f77ded6200aaaa924470fd93fba831a83c6adaaa",
+     "bytes": 8300835552
+    },
+    "model-00008-of-00017.safetensors": {
+     "sha256": "13d9071eaedd9ebf3224c40bd9730ed7e1a76abaacd61289a60c9847dbab9a29",
+     "bytes": 8299401632
+    },
+    "model-00009-of-00017.safetensors": {
+     "sha256": "9d766562049a4d2990a5d72439403db00d87f983c05e9e395deee98a4ff525e0",
+     "bytes": 8301110600
+    },
+    "model-00010-of-00017.safetensors": {
+     "sha256": "cd48078a47acfc8c4501be4cf5dd2200addccd3f5cc3a30788df1c20f06427a0",
+     "bytes": 8298765916
+    },
+    "model-00011-of-00017.safetensors": {
+     "sha256": "512060b23fe2f1142a8c097fb3dab548bdf81dc3214dc64666796028f7bc3b75",
+     "bytes": 8300276688
+    },
+    "model-00012-of-00017.safetensors": {
+     "sha256": "45ab31bd41e4c6bb9fe774825688beec791a197e977040ced56cce9913da5d11",
+     "bytes": 8299458932
+    },
+    "model-00013-of-00017.safetensors": {
+     "sha256": "8e21d07bd569f8fa3bbb566cd5034b0a8bda0b53bb168c93691334bc4d7465f2",
+     "bytes": 8299591900
+    },
+    "model-00014-of-00017.safetensors": {
+     "sha256": "dda9dbaab1a1de9179d7cc4f5fde6933f613718568492bccc649e82d2901c998",
+     "bytes": 8300764172
+    },
+    "model-00015-of-00017.safetensors": {
+     "sha256": "e1ec37b0da1605cc304c8039fa47a24155e3adbdb37da060659488d7bade9bf2",
+     "bytes": 7300427020
+    },
+    "model-00016-of-00017.safetensors": {
+     "sha256": "76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5",
+     "bytes": 101535150936
+    },
+    "model-00017-of-00017.safetensors": {
+     "sha256": "9dc51433e195bc78b5ad846b68643cc0351d3b174e5e4309222d3b7402c83afd",
+     "bytes": 101537926640
+    },
+    "model.safetensors.index.json": {
+     "sha256": "80f31f1eee3e100d170744d6a5f2287c7c14ed1e7dc34dcc4a0b8eaaf2a810b1",
+     "bytes": 14589080
+    },
+    "tokenizer.json": {
+     "sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+     "bytes": 6367257
+    },
+    "tokenizer_config.json": {
+     "sha256": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+     "bytes": 801
+    }
+   }
+  }
+ }
+}

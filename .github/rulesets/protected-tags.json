@@ -1,0 +1,8 @@
+{
+  "name": "protected-tags",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/tags/prod/*/*"], "exclude": [] } },
+  "bypass_actors": [],
+  "rules": [{ "type": "deletion" }, { "type": "update" }]
+}

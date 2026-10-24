@@ -1,131 +1,124 @@
 #!/usr/bin/env python3
-"""Verify production runtime trees against the approvals that sealed them.
+"""Verify production trees using protected code and independently anchored dev assets.
 
-Production holds only approved trees. For every ``runtimes/<id>/v<N>/`` this checks that
-``approval.json`` is present and well formed, that the template version it names is on the
-repository's approved list, and that every file matches ``source.manifest.json`` byte for byte —
-no extra file, no missing file, no edited file. Exit 1 with a named reason per problem.
-
-CLI: python3 tools/verify_runtime_tree.py --root .
+The candidate's manifest cannot authenticate itself. --trusted-approvals-sha256
+must come from a maintainer-reviewed immutable mapping/protected workflow input.
+Legacy mode verifies exact pinned history only; it never authorizes promotion.
 """
 import argparse
-import hashlib
-import json
 import os
+from pathlib import Path
+import re
 import sys
+try:
+    from . import release_evidence as e
+except ImportError:
+    import release_evidence as e
 
-SCHEMA = "rexl3.profile-approval.v1"
-IGNORED = {"approval.json", "source.manifest.json", "LATEST"}
-REQUIRED_GATES = ("doctor", "exactness", "capability")
-
-
-def sha256_file(path):
-    hasher = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+SCHEMA = e.SCHEMA
+sha256_file = e.sha256_file
 
 
-def verify_tree(tree, approved_templates):
-    """Every problem with ``tree``; an empty list means it matches its approval exactly."""
-    problems = []
-    approval_path = os.path.join(tree, "approval.json")
-    manifest_path = os.path.join(tree, "source.manifest.json")
-    for path in (approval_path, manifest_path):
-        if not os.path.isfile(path):
-            return [f"{tree}: missing {os.path.basename(path)}"]
-    try:
-        with open(approval_path, encoding="utf-8") as handle:
-            approval = json.load(handle)
-        with open(manifest_path, encoding="utf-8") as handle:
-            manifest = json.load(handle)
-    except (OSError, ValueError) as error:
-        return [f"{tree}: unreadable approval or manifest: {error}"]
-    if approval.get("schema") != SCHEMA:
-        problems.append(f"{tree}: approval schema is {approval.get('schema')}, expected {SCHEMA}")
-    missing_gates = [g for g in REQUIRED_GATES if not (approval.get("gates") or {}).get(g)]
-    if missing_gates:
-        problems.append(f"{tree}: approval is missing gate results: {', '.join(missing_gates)}")
-    bundle = approval.get("bundle") or {}
-    for field in ("archive", "sha256", "bytes", "files"):
-        if not bundle.get(field):
-            problems.append(f"{tree}: approval bundle.{field} is missing")
-    template = approval.get("template") or {}
-    expected = approved_templates.get(template.get("version"))
-    if expected is None:
-        problems.append(f"{tree}: template version {template.get('version')} is not approved")
-    elif expected != template.get("digest"):
-        problems.append(f"{tree}: template digest {template.get('digest')} is not the approved {expected}")
-    manifest_template = (manifest.get("template") or {})
-    if manifest_template.get("digest") != template.get("digest"):
-        problems.append(
-            f"{tree}: source manifest names template {manifest_template.get('digest')}, "
-            f"the approval names {template.get('digest')}"
-        )
-    files = manifest.get("files") or {}
-    if not files:
-        problems.append(f"{tree}: source manifest lists no files")
-    on_disk = {}
+def tree_inventory(tree):
+    tree = e.checked_path(tree)
+    e.require(tree.is_dir(), 'runtime tree missing')
+    files = {}
     for base, dirs, names in os.walk(tree):
-        dirs[:] = sorted(dirs)
-        for name in sorted(names):
-            rel = os.path.relpath(os.path.join(base, name), tree).replace(os.sep, "/")
-            if rel in IGNORED:
-                continue
-            on_disk[rel] = sha256_file(os.path.join(base, name))
-    for rel, record in sorted(files.items()):
-        if rel not in on_disk:
-            problems.append(f"{tree}: {rel} is listed but missing")
-        elif on_disk[rel] != record.get("sha256"):
-            problems.append(f"{tree}: {rel} sha256 {on_disk[rel]} != approved {record.get('sha256')}")
-    for rel in sorted(on_disk):
-        if rel not in files:
-            problems.append(f"{tree}: {rel} is not in the approved manifest")
-    return problems
+        for name in dirs:
+            e.checked_path(Path(base) / name)
+        for name in names:
+            path = Path(base) / name
+            rel = e.relative_path(path.relative_to(tree).as_posix())
+            files[rel] = e.record(e.safe_file(tree, rel))
+    return files
+
+
+def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, allow_legacy=False):
+    """Return named problems (empty means PASS). All inputs are read-only."""
+    try:
+        tree = e.checked_path(tree)
+        version = re.fullmatch(r'v([1-9][0-9]*)', tree.name)
+        e.require(version is not None, 'invalid runtime version directory')
+        runtime_id, number = tree.parent.name, int(version[1])
+        key = f'{runtime_id}/v{number}'
+        approval_path = e.safe_file(tree, 'approval.json')
+        doc = e.load_json(approval_path)
+        e.require(doc.get('runtime_id') == runtime_id, 'runtime path identity mismatch')
+        e.require(isinstance(trusted_approvals, dict) and trusted_approvals.get('schema') == 'rexl3.approval-registry.v1',
+                  'independently trusted approval registry required')
+        actual = tree_inventory(tree)
+        if doc.get('schema') == 'rexl3.profile-approval.v1':
+            e.require(allow_legacy, 'LEGACY history requires explicit --allow-legacy; never promotion')
+            entry = trusted_approvals.get('legacy', {}).get(key)
+            e.require(isinstance(entry, dict), 'LEGACY history has no trusted anchor')
+            e.require(e.sha256_file(approval_path) == e.full_hash(entry.get('approval_sha256')), 'LEGACY approval hash drift')
+            e.require(all(doc.get(k) == entry.get(k) and e.HEX40.fullmatch(str(doc.get(k))) for k in ('source_commit', 'source_tree')),
+                      'LEGACY source identity drift')
+            expected = entry.get('files')
+            e.require(isinstance(expected, dict) and expected, 'LEGACY exact inventory required')
+            for rel, item in expected.items():
+                e.relative_path(rel)
+                e.validate_record(item)
+            e.require(actual == expected, 'LEGACY tree hash/bytes/mode/inventory drift')
+            return []
+        e.require(assets_dir is not None, 'authenticated dev assets directory required')
+        asset_approval = e.safe_file(assets_dir, 'approval.json')
+        e.require(approval_path.read_bytes() == asset_approval.read_bytes(), 'tree/asset approval inequality')
+        approved, _ = e.verify_assets(asset_approval, registry=trusted_approvals, approved_templates=approved_templates)
+        e.require(approved['version'] == number, 'runtime path version mismatch')
+        expected = dict(approved['source_asset']['members'])
+        expected['approval.json'] = dict(e.record(approval_path), mode=0o644)
+        for rel in sorted(set(expected) | set(actual)):
+            e.require(rel in actual, rel + ' is listed but missing')
+            e.require(rel in expected, rel + ' is not in the approved inventory')
+            e.require(actual[rel] == expected[rel], rel + ': hash/bytes/mode != approved')
+        return []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        return [str(tree) + ': ' + str(error)]
 
 
 def discover(root):
-    """Every runtimes/<id>/v<N>/ tree under root."""
-    runtimes = os.path.join(root, "runtimes")
+    runtimes = e.checked_path(Path(root) / 'runtimes')
+    if not runtimes.exists():
+        return []
     trees = []
-    if not os.path.isdir(runtimes):
-        return trees
-    for name in sorted(os.listdir(runtimes)):
-        base = os.path.join(runtimes, name)
-        if name in ("templates", "template-v1") or not os.path.isdir(base):
+    for base in sorted(runtimes.iterdir()):
+        e.checked_path(base)
+        if base.name in ('templates', 'template-v1', 'models') or not base.is_dir():
             continue
-        for version in sorted(os.listdir(base)):
-            candidate = os.path.join(base, version)
-            if version.startswith("v") and os.path.isdir(candidate):
-                trees.append(candidate)
+        for version in sorted(base.iterdir()):
+            e.checked_path(version)
+            if re.fullmatch(r'v[1-9][0-9]*', version.name) and version.is_dir():
+                trees.append(version)
     return trees
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--approved", default=None,
-                        help="approved templates JSON (default runtimes/templates/APPROVED.json)")
+    parser.add_argument('--root', default='.')
+    parser.add_argument('--approved', required=True, help='protected template allow-list JSON')
+    parser.add_argument('--trusted-approvals', required=True)
+    parser.add_argument('--trusted-approvals-sha256', required=True)
+    parser.add_argument('--assets-dir', required=True, help='asset root containing <runtime-id>/v<N>/approval.json')
+    parser.add_argument('--allow-legacy', action='store_true')
     args = parser.parse_args(argv)
-    approved_path = args.approved or os.path.join(args.root, "runtimes", "templates", "APPROVED.json")
-    if not os.path.isfile(approved_path):
-        print(f"no approved template list: {approved_path}", file=sys.stderr)
+    try:
+        registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
+        approved = e.load_json(args.approved)['templates']
+        trees = discover(args.root)
+        e.require(trees, 'no runtime trees found')
+        problems = []
+        for tree in trees:
+            problems.extend(verify_tree(tree, approved, trusted_approvals=registry,
+                assets_dir=Path(args.assets_dir) / tree.parent.name / tree.name, allow_legacy=args.allow_legacy))
+        for problem in problems:
+            print(problem)
+        print(f'{len(trees)} tree(s), {len(problems)} problem(s); legacy allowed={args.allow_legacy}')
+        return 1 if problems else 0
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        print('TREE_REFUSED: ' + str(error), file=sys.stderr)
         return 2
-    with open(approved_path, encoding="utf-8") as handle:
-        approved = json.load(handle)["templates"]
-    trees = discover(args.root)
-    if not trees:
-        print("no runtime trees found")
-        return 0
-    problems = []
-    for tree in trees:
-        problems.extend(verify_tree(tree, approved))
-    for problem in problems:
-        print(problem)
-    print(f"{len(trees)} tree(s), {len(problems)} problem(s)")
-    return 1 if problems else 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

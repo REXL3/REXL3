@@ -1,38 +1,84 @@
 name: verify
+# The production gate. It runs in the context of the protected base revision (pull_request_target):
+#   - the verifier, the tests, the template allow-list and the approval registry are read from the
+#     base checkout (`base/`), never from the pull request;
+#   - the pull request head is checked out as inert data (`candidate/`). Nothing from it is executed,
+#     imported, sourced or used as a working directory, and python runs with the base tools directory
+#     as the only import path;
+#   - the token is read-only and no secret is used.
+# A change to this file, to tools/ or to runtimes/templates/ cannot approve itself: it is read only after
+# it has been merged, and CODEOWNERS (two maintainers) must approve the merge. A pull request that adds
+# a runtime tree is verified against the registry on the base, so the registry entry is merged first.
+# Nothing in this repository merges a pull request; a maintainer does, by hand.
 on:
-  pull_request:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: verify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+env:
+  # sha256 of runtimes/templates/APPROVALS.json on the protected base. The verifier refuses a registry
+  # whose bytes differ, so changing the registry means changing this line in the same reviewed commit.
+  # tools/test_verify_mutations.py fails if the two disagree.
+  TRUSTED_APPROVALS_SHA256: b507d70095989f9dcfd6e53db9a46e90ceca5ac0eddd4192ebb6a05c21708c0f
 jobs:
   verify:
     name: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Protected revision: the tip of the base branch for a pull request, the pushed commit otherwise.
+      - name: Check out the protected base (tools and policy)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.12"
-      - name: Every tree matches its approval
-        run: python3 tools/verify_runtime_tree.py --root .
-      - name: The verifier's own tests
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
-
-  # A private repository on this plan cannot use rulesets, so auto-merge is unavailable; the merge
-  # happens here, after the gate, and only for a promotion branch.
-  merge:
-    name: merge
-    needs: verify
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'promote/')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Merge the promotion pull request
+          ref: ${{ github.sha }}
+          path: base
+          persist-credentials: false
+      # Untrusted data. Never executed.
+      - name: Check out the candidate (data only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      # Every tree under runtimes/ must match an anchor in the protected registry. The v1 tree is
+      # checked in legacy mode against its pinned inventory. A v2 tree needs its authenticated dev
+      # release assets (<assets>/<runtime-id>/v<N>/approval.json and the four archives), which only a
+      # token that can read the private REXL3-dev release could download. This repository's token cannot,
+      # and no secret is added for it, so the assets directory is empty and a v2 tree fails closed.
+      - name: Verify every runtime tree against the protected registry
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --rebase --delete-branch
+          ASSETS_DIR: ${{ runner.temp }}/dev-assets
+        run: |
+          set -uo pipefail
+          umask 022
+          mkdir -p "$ASSETS_DIR"
+          python3 -B -E -s base/tools/verify_runtime_tree.py \
+            --root candidate \
+            --approved base/runtimes/templates/APPROVED.json \
+            --trusted-approvals base/runtimes/templates/APPROVALS.json \
+            --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256" \
+            --assets-dir "$ASSETS_DIR" \
+            --allow-legacy
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Verification failed (exit $status). A tree that is not in runtimes/templates/APPROVALS.json on the base, or a v2 tree (this workflow has no authenticated dev release assets), is refused by design. See docs/PROMOTION.md."
+          fi
+          exit "$status"
+      # The verifier's own tests and the mutation tests, from the protected base only.
+      - name: Verifier and mutation tests (base code, base tree)
+        working-directory: base
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          umask 022
+          python3 -m unittest discover -s tools -p 'test_*.py'

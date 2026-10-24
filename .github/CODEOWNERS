@@ -1,0 +1,9 @@
+# The maintainers review every change; GitHub requests the review automatically on pull requests.
+# Each later pattern repeats both owners on purpose: the last matching pattern wins, so a narrower
+# line must never drop one. These paths decide what production accepts.
+* @am423 @vcruz305
+/.github/ @am423 @vcruz305
+/tools/ @am423 @vcruz305
+/runtimes/templates/ @am423 @vcruz305
+/runtimes/ @am423 @vcruz305
+/docs/ @am423 @vcruz305

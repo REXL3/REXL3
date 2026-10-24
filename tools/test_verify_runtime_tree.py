@@ -1,77 +1,79 @@
-"""Tests for the production tree verifier.
-
-Run: python3 -m unittest tools.test_verify_runtime_tree
-"""
-import hashlib
-import json
-import os
-import sys
+"""Offline production verifier contracts; fixtures are synthetic, never qualification."""
+import copy
 import tempfile
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import verify_runtime_tree as v
-
-TEMPLATE_DIGEST = "sha256:" + "c" * 64
-
-
-def write(path, data=b"x"):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as handle:
-        handle.write(data)
-    return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+from pathlib import Path
+from tools import verify_runtime_tree as v
+from tools import release_evidence as e
+from tools.test_approve_profile import SyntheticSeal
+from tools.test_release_evidence import encoded, write, sha
 
 
 class VerifyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = self.tmp.name
-        self.tree = os.path.join(self.root, "runtimes", "demo", "v1")
-        files = {
-            "profile.json": write(os.path.join(self.tree, "profile.json"), b"{}"),
-            "LICENSE": write(os.path.join(self.tree, "LICENSE"), b"agpl"),
-        }
-        write(os.path.join(self.tree, "source.manifest.json"),
-              json.dumps({"files": files, "template": {"version": "v1", "digest": TEMPLATE_DIGEST}}).encode())
-        write(os.path.join(self.tree, "approval.json"), json.dumps({
-            "schema": "rexl3.profile-approval.v1", "runtime_id": "demo",
-            "source_commit": "a" * 40, "source_tree": "b" * 40,
-            "template": {"version": "v1", "digest": TEMPLATE_DIGEST},
-            "profile_digest": "sha256:" + "d" * 64,
-            "bundle": {"archive": "a.tar.gz", "sha256": "e" * 64, "bytes": 1, "files": 2},
-            "gates": {"doctor": "PASS", "exactness": "15/15", "capability": "8/8"},
-            "approved_by": "r0b0tlab", "approved_at": "2026-10-23T00:00:00Z"}).encode())
-        self.approved = {"v1": TEMPLATE_DIGEST}
+        self.f = SyntheticSeal(self.tmp.name)
+        self.approval, self.doc, self.registry = self.f.published_fixture()
+        self.tree = Path(self.tmp.name) / 'prod/runtimes/synthetic-demo/v1'
+        for name, data in self.f.source.items():
+            p = write(self.tree, name, data)
+            p.chmod(self.doc['source_asset']['members'][name]['mode'])
+        write(self.tree, 'approval.json', self.approval.read_bytes())
 
-    def test_clean_tree_passes(self):
-        self.assertEqual(v.verify_tree(self.tree, self.approved), [])
+    def verify(self, **kwargs):
+        return v.verify_tree(self.tree, self.f.approved, trusted_approvals=self.registry,
+                             assets_dir=self.f.assets, **kwargs)
 
-    def test_tampered_file_is_named_with_both_hashes(self):
-        write(os.path.join(self.tree, "LICENSE"), b"mit")
-        problems = v.verify_tree(self.tree, self.approved)
-        self.assertTrue(any("LICENSE" in p and "approved" in p for p in problems), problems)
+    def test_clean_authenticated_tree_passes(self):
+        self.assertEqual(self.verify(), [])
 
-    def test_extra_file_is_refused(self):
-        write(os.path.join(self.tree, "extra.txt"), b"hi")
-        self.assertTrue(any("extra.txt" in p for p in v.verify_tree(self.tree, self.approved)))
+    def test_no_registry_is_not_authorized(self):
+        self.assertTrue(v.verify_tree(self.tree, self.f.approved))
 
-    def test_missing_file_is_refused(self):
-        os.unlink(os.path.join(self.tree, "LICENSE"))
-        self.assertTrue(any("LICENSE" in p and "missing" in p for p in v.verify_tree(self.tree, self.approved)))
+    def test_edited_manifest_and_rehashed_file_is_not_self_authorized(self):
+        write(self.tree, 'launch.sh', b'forged')
+        manifest = e.load_json(self.tree / 'source.manifest.json')
+        manifest['files']['launch.sh']['sha256'] = sha(b'forged')
+        write(self.tree, 'source.manifest.json', encoded(manifest))
+        self.assertTrue(self.verify())
 
-    def test_unapproved_template_is_refused(self):
-        problems = v.verify_tree(self.tree, {"v1": "sha256:" + "f" * 64})
-        self.assertTrue(any("template" in p for p in problems), problems)
+    def test_modes_and_extra_missing_symlink_files_rejected(self):
+        p = self.tree / 'launch.sh'
+        p.chmod(0o644)
+        self.assertTrue(self.verify())
+        p.chmod(0o755)
+        extra = write(self.tree, 'extra.txt', b'extra')
+        self.assertTrue(self.verify())
+        extra.unlink()
+        p.unlink()
+        self.assertTrue(self.verify())
+        p.symlink_to(self.f.template / 'launch.sh')
+        self.assertTrue(self.verify())
 
-    def test_unknown_template_version_is_refused(self):
-        problems = v.verify_tree(self.tree, {})
-        self.assertTrue(any("not approved" in p for p in problems), problems)
+    def test_tampered_receipt_file_fails(self):
+        self.f.receipt_path.write_bytes(b'{}')
+        self.assertTrue(self.verify())
 
-    def test_missing_approval_is_refused(self):
-        os.unlink(os.path.join(self.tree, "approval.json"))
-        self.assertTrue(any("approval.json" in p for p in v.verify_tree(self.tree, self.approved)))
+    def test_runtime_path_version_identity(self):
+        other = self.tree.with_name('v2')
+        self.tree.rename(other)
+        self.tree = other
+        self.assertTrue(self.verify())
+
+    def test_v1_history_is_explicit_and_exact_hash_anchored(self):
+        legacy = copy.deepcopy(self.doc)
+        legacy.update(schema='rexl3.profile-approval.v1', gates={'doctor': 'PASS'})
+        legacy.pop('version')
+        write(self.tree, 'approval.json', encoded(legacy))
+        files = {p.relative_to(self.tree).as_posix(): e.record(p) for p in self.tree.rglob('*') if p.is_file()}
+        self.registry['legacy'] = {'synthetic-demo/v1': {'approval_sha256': sha(encoded(legacy)),
+            'source_commit': self.f.commit, 'source_tree': self.f.tree, 'files': files}}
+        self.assertTrue(self.verify())
+        self.assertEqual(self.verify(allow_legacy=True), [])
+        write(self.tree, 'source.manifest.json', b'{}')
+        self.assertTrue(self.verify(allow_legacy=True))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

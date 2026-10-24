@@ -86,8 +86,9 @@ author; it must be a noreply identity.
 
 ### 2. Review and merge
 
-A code owner who is not the author reviews the diff, the registry entry from step 0 and the tool
-output, and merges with **squash**. Nothing merges the pull request automatically, and the `promote/`
+The other maintainer reviews the diff, the registry entry from step 0 and the tool output, and merges
+with **squash**; that is standard practice because a promotion changes what testers install. If only
+one maintainer is available, that maintainer may merge the promotion they prepared once `verify` is green. Nothing merges the pull request automatically, and the `promote/`
 branch prefix grants no privilege.
 
 ### 3. Publish the release

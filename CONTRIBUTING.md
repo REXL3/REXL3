@@ -11,7 +11,7 @@ This file is the single source of truth for humans and agents. Agents must also 
 | 1 | Never push to `main`: not directly, not by merge, not by force-push. Every change lands through a pull request. |
 | 2 | One purpose per PR. If you cannot state it in one sentence without "and", split the PR. |
 | 3 | Every PR title is `TYPE: Past-tense summary` (section 3). |
-| 4 | Never merge your own PR. A code owner who is not the author approves and merges, squash only. |
+| 4 | Standard practice: the other maintainer (`@am423`, `@vcruz305`) reviews every PR before it merges. If only one maintainer is available, that maintainer may merge their own PR once `verify` is green and review threads are resolved. A PR from anyone else needs a maintainer's approval. An AI agent merges only a PR that the maintainer it works for has told it to merge. |
 | 5 | **Never hand-edit `runtimes/<id>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
 | 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer (`docs/PROMOTION.md`). |
 | 7 | Never weaken a test, a gate or the verifier in the same PR as the change it gates. That goes in its own TEST PR. |
@@ -105,7 +105,7 @@ CI runs the same checks as the required `verify` job from the protected base rev
 Agents (AI coding assistants) must:
 
 1. Read this file and `AGENTS.md` in full before any change.
-2. Work on a `<type>/<kebab-slug>` branch and open a PR. Never push to `main`, force-push a shared branch, merge your own PR, bypass hooks, or write to the GitHub API except to open or update your own PR.
+2. Work on a `<type>/<kebab-slug>` branch and open a PR. Never push to `main`, force-push a shared branch, bypass hooks, or write to the GitHub API except to open or update your own PR. Merge a PR only when the maintainer you work for has told you to merge that PR.
 3. Report evidence, not ticks: the command, the head SHA it ran on and its output.
 4. Answer in the PR description: Can the purpose be stated in one sentence without "and"? Does the diff contain anything the title does not describe? Did the checks run on this head SHA? Did any test or threshold change, and is that in its own TEST PR?
 5. Never touch `runtimes/*/v*/`, never create or edit a registry entry, a template digest or an approval, and never run `tools/promote_runtime.py`. Those are maintainer actions.
@@ -115,7 +115,7 @@ Stop and ask a maintainer when the intent is unclear, requirements conflict, the
 ## 10. Review and merge
 
 - `.github/CODEOWNERS` is `* @am423 @vcruz305`. Both are requested on every PR.
-- Merging needs one approving review from a code owner who is not the author. Stale approvals are dismissed on push.
+- Standard practice is that the other maintainer reviews the PR before it merges, and that review is expected for a promotion PR that adds a runtime version. It is acceptable for a maintainer to merge their own PR when the other maintainer is not available, once the required check (`verify`) is green and review threads are resolved; GitHub does not enforce a review so that either of the two maintainers can always merge. A PR from a non-maintainer needs a maintainer's approval. Stale approvals are dismissed on push.
 - Squash-merge only, so the PR title is the commit subject on `main`. No force-push to `main`; linear history.
 - Nothing merges a pull request automatically. The old `merge` job and the `gh pr merge --auto` step are gone.
 - `.github/rulesets/` holds ruleset proposals for the maintainers to apply on GitHub. Contributors never call the settings API.

@@ -8,7 +8,7 @@ This repository is production: sealed, data-only runtime trees under `runtimes/`
 
 The rules agents break most often:
 
-1. **Never push to `main`.** Don't force-push a shared branch, merge your own PR, or bypass hooks. Work on a `<type>/<kebab-slug>` branch, for example `docs/prod-contributor-rules-and-tester-readme`.
+1. **Never push to `main`.** Don't force-push a shared branch or bypass hooks, and merge only a PR that the maintainer you work for has told you to merge. Work on a `<type>/<kebab-slug>` branch, for example `docs/prod-contributor-rules-and-tester-readme`.
 2. **One purpose per PR**, with a title of the form `TYPE: Past-tense summary`. TYPE is one of FIX, FEAT, BUILD, CI, TEST, BUMP or DOCS, and the title is at most 90 characters. If you need "and" to describe the PR, split it.
 3. **Never edit `runtimes/*/v*/`.** A sealed tree is data with a hash-pinned inventory; any edit fails `verify`, and fixing the hash is forbidden. A pack changes only by a new promoted version, made by a maintainer with `tools/promote_runtime.py` after the dev repository's approval. Never create or edit a registry entry (`runtimes/templates/APPROVALS.json`), a template digest (`APPROVED.json`) or an `approval.json`, and never run the promoter.
 4. **Never weaken the verifier, a test or the workflow's safety rules in the same PR as the change they guard.** The workflow reads the verifier, the policy files and the tests from the protected base revision and never executes pull-request code; keep it that way.

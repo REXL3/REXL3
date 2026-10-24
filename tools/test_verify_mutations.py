@@ -330,11 +330,20 @@ class WorkflowPolicy(unittest.TestCase):
 
     def test_no_merge_and_no_write_permission_anywhere(self):
         for forbidden in ('gh pr merge', '--auto', 'auto-merge', 'merge:', 'contents: write', 'pull-requests: write',
-                          'secrets.', 'workflow_dispatch', 'github.head_ref'):
+                          'workflow_dispatch', 'github.head_ref'):
             self.assertNotIn(forbidden, self.text)
         self.assertFalse((ROOT / '.github/workflows/promote.yml').exists())
         for path in (ROOT / '.github/workflows').glob('*.y*ml'):
             self.assertNotIn('gh pr merge', path.read_text(), path.name)
+
+    def test_the_only_secret_is_the_dev_read_token_on_the_download_step(self):
+        self.assertEqual(re.findall(r'secrets\.[A-Za-z0-9_]+', self.text), ['secrets.DEV_ASSETS_TOKEN'])
+        steps = re.split(r'(?m)^      - name: ', self.text)[1:]
+        holders = [step.splitlines()[0] for step in steps if 'secrets.' in step]
+        self.assertEqual(holders, ['Download the authenticated dev release assets for v2 trees'])
+        download = next(step for step in steps if step.startswith('Download the authenticated'))
+        self.assertIn('base/tools/fetch_dev_assets.py', download)
+        self.assertNotIn('candidate/', download.replace('--root candidate', ''))
 
     def test_runs_in_the_base_context_and_never_executes_candidate_code(self):
         self.assertRegex(self.text, r'(?m)^\s+pull_request_target:')

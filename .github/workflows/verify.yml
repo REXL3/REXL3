@@ -5,7 +5,7 @@ name: verify
 #   - the pull request head is checked out as inert data (`candidate/`). Nothing from it is executed,
 #     imported, sourced or used as a working directory, and python runs with the base tools directory
 #     as the only import path;
-#   - the token is read-only and no secret is used.
+#   - the workflow token is read-only; one secret (DEV_ASSETS_TOKEN, read access to the dev repo's contents) is used by one step.
 # A change to this file, to tools/ or to runtimes/templates/ cannot approve itself: it is read only after
 # it has been merged, and CODEOWNERS (two maintainers) must approve the merge. A pull request that adds
 # a runtime tree is verified against the registry on the base, so the registry entry is merged first.
@@ -50,11 +50,28 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
-      # Every tree under runtimes/ must match an anchor in the protected registry. The v1 tree is
-      # checked in legacy mode against its pinned inventory. A v2 tree needs its authenticated dev
-      # release assets (<assets>/<runtime-id>/v<N>/approval.json and the four archives), which only a
-      # token that can read the private REXL3-dev release could download. This repository's token cannot,
-      # and no secret is added for it, so the assets directory is empty and a v2 tree fails closed.
+      # A v2 tree is checked against its authenticated dev release (<assets>/<runtime-id>/v<N>/approval.json and the
+      # four archives). Those live in the private REXL3-dev repository, so one step downloads them with
+      # DEV_ASSETS_TOKEN, a fine-grained token that can read that one repository's contents and nothing else. The step
+      # runs only base code (tools/fetch_dev_assets.py), takes the runtime id and version from directory names, derives
+      # the release tag from them, and promote_runtime.download_release refuses any archive the pinned registry does not
+      # name. The secret is set on this step alone; the verification step below has no secret.
+      - name: Download the authenticated dev release assets for v2 trees
+        env:
+          GH_TOKEN: ${{ secrets.DEV_ASSETS_TOKEN }}
+          ASSETS_DIR: ${{ runner.temp }}/dev-assets
+        run: |
+          set -uo pipefail
+          umask 022
+          mkdir -p "$ASSETS_DIR"
+          python3 -B -E -s base/tools/fetch_dev_assets.py \
+            --root candidate \
+            --approved base/runtimes/templates/APPROVED.json \
+            --trusted-approvals base/runtimes/templates/APPROVALS.json \
+            --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256"  \
+            --assets-dir "$ASSETS_DIR"
+      # Every tree under runtimes/ must match an anchor in the protected registry. The v1 tree is checked in legacy
+      # mode against its pinned inventory; a v2 tree is checked against the assets downloaded above.
       - name: Verify every runtime tree against the protected registry
         env:
           ASSETS_DIR: ${{ runner.temp }}/dev-assets
@@ -71,7 +88,7 @@ jobs:
             --allow-legacy
           status=$?
           if [ "$status" -ne 0 ]; then
-            echo "::error::Verification failed (exit $status). A tree that is not in runtimes/templates/APPROVALS.json on the base, or a v2 tree (this workflow has no authenticated dev release assets), is refused by design. See docs/PROMOTION.md."
+            echo "::error::Verification failed (exit $status). A tree that is not in runtimes/templates/APPROVALS.json on the base, or whose dev release assets differ from the registry, is refused by design. See docs/PROMOTION.md."
           fi
           exit "$status"
       # The verifier's own tests and the mutation tests, from the protected base only.

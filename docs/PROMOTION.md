@@ -26,7 +26,7 @@ only if all of these hold:
 5. The tree equals the wrapper projection plus the original `approval.json`, byte for byte: no missing,
    extra, edited, linked or mode-changed file.
 
-No paid service, signing key or new secret is part of this. There is no auto-merge anywhere.
+No paid service or signing key is part of this. One secret, `DEV_ASSETS_TOKEN`, lets `verify` read the private dev release (see "Verification in production"). There is no auto-merge anywhere.
 
 ## Release assets
 
@@ -122,15 +122,18 @@ The tools never write `LATEST`. After step 3 succeeds, open a separate pull requ
 
 - It checks out the protected base into `base/` and the pull request head into `candidate/` as data
   only, runs `base/tools/verify_runtime_tree.py` over `candidate/`, then runs the unit tests from
-  `base/`. It uses a read-only token, no secret, and actions pinned by commit SHA. There is no `merge`
-  job.
+  `base/`. The workflow token is read-only and actions are pinned by commit SHA. The one secret,
+  `DEV_ASSETS_TOKEN`, is passed only to the step that downloads dev release assets; the verification and
+  test steps have none. There is no `merge` job.
 - A tree whose approval is `rexl3.profile-approval.v1` passes only in `--allow-legacy` mode and only
   if the registry's `legacy` entry matches its approval hash, source commit and tree, and complete
   file inventory.
 - A v2 tree needs its authenticated assets in `<assets>/<id>/v<N>/`. They are in the private
-  `REXL3/REXL3-dev` release, which this repository's token cannot read, and no secret has been added
-  for it. CI passes an empty assets directory, so **a v2 tree fails `verify` by design** until a
-  maintainer-approved way to supply the assets exists. See the open items.
+  `REXL3/REXL3-dev` release. The step before verification runs `base/tools/fetch_dev_assets.py` with
+  `DEV_ASSETS_TOKEN` (a fine-grained token that reads that one repository's contents): it takes the id
+  and version from the directory names, derives the tag `approve-<id>-<N>`, and downloads through
+  `promote_runtime.download_release`, which refuses any archive the pinned registry does not name. A
+  candidate cannot choose its own tag. A v1 tree needs no download.
 - Because the verifier, tests and policy come from `base/`, a pull request's own changes to `tools/`,
   the tests, the registry or the pin are **not** exercised by its `verify` run; the first CI run of
   them is the push to `main` after the merge. For those pull requests the author's pasted local run
@@ -177,16 +180,14 @@ and point `runtimes/<id>/LATEST` at the previous version in a pull request. Neve
 
 ## Open items
 
-- **No v2 promotion can merge yet.** `verify` walks every tree under `runtimes/`, and a v2 tree needs
-  assets CI cannot read. So a pull request that adds a v2 tree fails `verify`, and once such a tree is
-  on `main`, the push run on `main` and every later pull request (documentation-only ones included)
-  fail too. With `verify` required and no bypass actor, that merge is impossible, and merging it
-  anyway would leave the repository red. Decide the asset source first. Options: a read-only token for
-  the dev release (a secret the owner must create and scope), or reading the five assets from this
-  repository's own `prod/<id>/v<N>` release, which the workflow's read-only token can download and
-  which the verifier authenticates through the registry. The second option fixes the cascade for
-  published versions, but not the promotion pull request itself, because that release exists only
-  after the merge.
+- **The asset download has not yet met a real v2 release.** `fetch_dev_assets.py` and the secret are in
+  place and tested with mocks only. The first v2 promotion pull request is the first real run. Because
+  `verify` downloads the assets of every v2 tree on every run, two things follow: a run is as slow as the
+  download, and once a v2 tree is on `main`, an expired or revoked `DEV_ASSETS_TOKEN` turns `verify` red
+  for every later pull request. The token is created with a 90-day expiry; rotate it before day 80 (create
+  a new token, update the secret, delete the old token). If `verify` is red because of the token and a fix
+  must land, the owner can temporarily edit the `main-guard` ruleset, merge, and restore it; write the
+  reason in the pull request.
 - **Corresponding source for v1.** The v1 release has no `engine_source_asset`. Its binaries were built
   from `source_commit` in `approval.json` in the private dev repository. Decide how that source is
   provided.

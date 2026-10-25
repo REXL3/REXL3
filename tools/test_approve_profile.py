@@ -15,11 +15,12 @@ from tools import approve_profile as a
 from tools import release_evidence as e
 from tools import runtime_template_digest as td
 from tools import build_corresponding_source as exporter
-from tools.test_release_evidence import GATES, encoded, sha, write
+from tools.test_release_evidence import GATES, encoded, refusal_detail, sha, write
 
 
 class SyntheticSeal:
-    def __init__(self, root, tp2=False):
+    def __init__(self, root, tp2=False, images=True):
+        self.images = images
         self.root = Path(root)
         self.repo = self.root / 'repo'
         self.repo.mkdir()
@@ -80,13 +81,16 @@ class SyntheticSeal:
         self.profile = dict(schema='rexl3.runtime-profile.v1', state='final', runtime_id='synthetic-demo',
             source={'repository': 'REXL3/REXL3-dev', 'commit': upstream, 'path': 'example.json', 'sha256': sha(config)},
             target_repo='synthetic/model', default_profile='single', profiles={'single': {
-                'kind': 'single', 'argv': ['--max-model-len', '1048576'], 'env': {}, 'files': {},
+                'kind': 'single', 'argv': ['--max-model-len', '1048576'] + ([] if images else ['--no-vision']),
+                'env': {}, 'files': {},
                 'capabilities': {key: key != 'audio' for key in ('text', 'sse', 'reasoning', 'tools', 'images', 'video', 'audio', 'json_schema', 'prefix_cache')}}})
+        self.profile['profiles']['single']['capabilities']['images'] = images
         if tp2:
             from tools.test_release_profile_contract import native_tp2_fixture
-            tp_choice, native_cluster, tp_observation = native_tp2_fixture()
-            cluster = (Path(__file__).resolve().parents[1] / 'runtimes/models/dsv41-flash-1017-sage-1.62' /
-                       tp_choice['cluster_file']).read_bytes()
+            tp_choice, native_cluster, tp_observation = native_tp2_fixture(images)
+            # The explicit vision state may differ from the tracked cluster file: bind the exact bytes used.
+            cluster = encoded(native_cluster)
+            tp_choice['files'] = {tp_choice['cluster_file']: sha(cluster)}
             self.profile['profiles']['tp2'] = tp_choice
         self.models = dict(schema='rexl3.model-lock.v1', packs={'target': {'repo': 'synthetic/model',
             'revision': 'a' * 40, 'fingerprint': 'sha256:' + 'b' * 64, 'files': {'config.json': {'sha256': sha(config), 'bytes': len(config)}}}})
@@ -114,11 +118,11 @@ class SyntheticSeal:
         if tp2:
             self.bundle['bin/rexl3-cluster'] = self.bundle['bin/rexl3-serve']
         self.release = dict(schema='rexl3.release.v1', runtime_id='synthetic-demo', target_repo='synthetic/model',
-            production_commit=self.commit, production_tree=self.tree, version='1',
+            production_commit=self.commit, production_tree=self.tree, version='0.1.2',
             platform={'system': 'Linux', 'machine': 'aarch64', 'gpu_compute_capability': '12.1'},
-            native_version_fields={'commit': self.commit, 'version': 'synthetic', 'system_fingerprint': 'synthetic',
-                'nvcc': 'synthetic', 'cuda_arch': 'sm_121', 'kernel_hash': '1' * 16, 'cudart': 'synthetic',
-                'cuda_driver': 'synthetic', 'cublas': 'synthetic'},
+            native_version_fields={'commit': self.commit, 'version': '0.1.2', 'system_fingerprint': 'fp_synthetic_test',
+                'nvcc': '13.0.88', 'cuda_arch': 'sm_121', 'kernel_hash': '1' * 16, 'cudart': '13.0',
+                'cuda_driver': '13.0', 'cublas': '13.1.1'},
             files=self.inventory(self.bundle), profile_sha256=sha(self.source['profile.json']),
             model_lock_sha256=sha(self.source['model.lock.json']))
         self.bundle['release.lock.json'] = encoded(self.release)
@@ -126,7 +130,7 @@ class SyntheticSeal:
         self.tar(self.archive, self.bundle)
         caps = self.profile['profiles']['single']['capabilities']
         self.resolved = {'max_context': 1048576, 'capabilities': caps, 'ranks': [
-            {'rank': 0, 'argv': ['synthetic-serve', '--max-model-len', '1048576'], 'env': {}}]}
+            {'rank': 0, 'argv': ['synthetic-serve', '--max-model-len', '1048576'] + ([] if images else ['--no-vision']), 'env': {}}]}
         identity = dict(runtime_id='synthetic-demo', profile='single', engine_commit=self.commit, engine_tree=self.tree,
             binary_sha256=sha(self.bundle['bin/rexl3-serve']), profile_sha256=sha(self.source['profile.json']),
             model_lock_sha256=sha(self.source['model.lock.json']), release_lock_sha256=sha(self.bundle['release.lock.json']),
@@ -139,11 +143,16 @@ class SyntheticSeal:
         write(self.assets, 'identity.json', encoded(observation))
         self.receipt = dict(schema=e.RECEIPT_SCHEMA, **identity, gates={}, identity_receipt={'path': 'identity.json', 'sha256': sha(encoded(observation))})
         for gate in GATES:
-            raw = dict(schema='rexl3.gate-evidence.v1', gate=gate, **identity, cases=[
-                {'name': 'synthetic', 'status': 'PASS', 'modality': 'image' if gate == 'vision' else 'system', 'expectation': 'supported'}])
+            case = {'name': 'synthetic', 'status': 'PASS', 'modality': 'image' if gate == 'vision' else 'system', 'expectation': 'supported'}
+            extra = []
+            if gate == 'vision' and not images:
+                detail = write(self.assets, 'vision-detail.json', encoded(refusal_detail()))
+                extra = [{'path': detail.name, 'sha256': sha(detail.read_bytes())}]
+                case.update(name='image_refused', expectation='refused', result=extra[0])
+            raw = dict(schema='rexl3.gate-evidence.v1', gate=gate, **identity, cases=[case])
             write(self.assets, gate + '.json', encoded(raw))
             self.receipt['gates'][gate] = dict(status='PASS', passed=1, total=1, failed=0, skipped=0,
-                evidence=[{'path': gate + '.json', 'sha256': sha(encoded(raw))}])
+                evidence=[{'path': gate + '.json', 'sha256': sha(encoded(raw))}, *extra])
         self.receipt_path = write(self.assets, 'qualification.json', encoded(self.receipt))
         self.kwargs = dict(runtime_id='synthetic-demo', commit=self.commit, tree=self.tree, template_dir=self.template,
             archive=self.archive, source_asset=self.source_asset, engine_source_asset=self.engine_source_asset,
@@ -163,8 +172,13 @@ class SyntheticSeal:
             for gate in GATES:
                 raw = e.load_json(self.assets / (gate + '.json'))
                 raw.update(identity)
+                extra = []
+                if raw['cases'][0].get('result'):  # vision-off refusal detail travels with the tp2 receipt
+                    detail = write(self.assets, 'tp2/vision-detail.json', (self.assets / 'vision-detail.json').read_bytes())
+                    extra = [{'path': 'tp2/vision-detail.json', 'sha256': sha(detail.read_bytes())}]
+                    raw['cases'][0]['result'] = extra[0]
                 path = write(self.assets, 'tp2/' + gate + '.json', encoded(raw))
-                second['gates'][gate]['evidence'] = [{'path': 'tp2/' + gate + '.json', 'sha256': sha(path.read_bytes())}]
+                second['gates'][gate]['evidence'] = [{'path': 'tp2/' + gate + '.json', 'sha256': sha(path.read_bytes())}, *extra]
             self.kwargs['receipts'].append(write(self.assets, 'tp2/qualification.json', encoded(second)))
         self.approved = {'v1': digest}
 
@@ -250,6 +264,28 @@ class ApprovalTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.f.seal()
 
+    def _reseal_with_release(self, **changes):
+        release = copy.deepcopy(self.f.release)
+        native = changes.pop('native', {})
+        release.update(changes)
+        release['native_version_fields'].update(native)
+        bundle = copy.deepcopy(self.f.bundle)
+        bundle['release.lock.json'] = encoded(release)
+        self.f.tar(self.f.archive, bundle)
+        return release
+
+    def test_release_version_must_be_the_native_engine_version_not_the_promotion_number(self):
+        # The promotion number (1 for approve-<id>-1) used to be demanded here, while the tester's installer
+        # demands release.version == native engine version: no release could pass both.
+        self._reseal_with_release(version='1')
+        with self.assertRaisesRegex(ValueError, 'native engine version'):
+            self.f.seal()
+
+    def test_release_version_that_differs_from_the_native_version_is_refused(self):
+        self._reseal_with_release(version='0.1.2', native={'version': '0.1.3'})
+        with self.assertRaisesRegex(ValueError, 'native engine version'):
+            self.f.seal()
+
     def test_trusted_registry_is_not_self_authorized(self):
         path, doc, registry = self.f.published_fixture()
         self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=self.f.approved)[0], doc)
@@ -296,5 +332,45 @@ class ApprovalTest(unittest.TestCase):
             e.verify_assets(path, registry=registry, approved_templates=self.f.approved)
 
 
-if __name__ == '__main__':
-    unittest.main()
+class VisionOffApprovalTest(unittest.TestCase):
+    """Sealing and trusted verification for a release that ships with images=false."""
+
+    def fixture(self, images=False, **kwargs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return SyntheticSeal(tmp.name, images=images, **kwargs)
+
+    def test_vision_off_seal_and_trusted_verification_need_refusal_evidence(self):
+        fixture = self.fixture()
+        path, doc, registry = fixture.published_fixture()
+        self.assertIs(doc['profiles']['single']['identity']['capabilities']['images'], False)
+        self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=fixture.approved)[0], doc)
+
+    def test_vision_off_seal_rejects_positive_or_missing_image_evidence(self):
+        for mode in ('supported_case', 'text_only', 'unmeasured_refusal'):
+            fixture = self.fixture()
+            raw_path = fixture.assets / 'vision.json'
+            raw = e.load_json(raw_path)
+            if mode == 'supported_case':
+                raw['cases'][0].update(expectation='supported')
+            elif mode == 'text_only':
+                raw['cases'][0].update(modality='text')
+            else:
+                raw['cases'][0].pop('result')
+            raw_path.write_bytes(encoded(raw))
+            fixture.receipt['gates']['vision']['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+            fixture.receipt_path.write_bytes(encoded(fixture.receipt))
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                fixture.seal()
+
+    def test_vision_off_receipt_for_a_vision_on_profile_is_rejected(self):
+        # Refusal-only evidence cannot seal a profile that claims images=true.
+        fixture = self.fixture(images=True)
+        raw_path = fixture.assets / 'vision.json'
+        raw = e.load_json(raw_path)
+        raw['cases'][0].update(expectation='refused', name='image_refused')
+        raw_path.write_bytes(encoded(raw))
+        fixture.receipt['gates']['vision']['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+        fixture.receipt_path.write_bytes(encoded(fixture.receipt))
+        with self.assertRaisesRegex(ValueError, 'positive supported image evidence required'):
+            fixture.seal()

@@ -195,6 +195,11 @@ def _validate_observation(observation, expected):
         for capability, flag in (('images', '--no-vision'), ('video', '--no-video')):
             require(not expected['capabilities'].get(capability) or not any(
                 v == flag or v.startswith(flag + '=') for v in argv), 'actual process disables claimed modality')
+        if expected['capabilities'].get('images') is False:
+            # The reverse direction: a vision-off release must really run vision-off,
+            # as one bare switch; an attached or repeated form is never an alias.
+            require(argv.count('--no-vision') == 1 and not any(v.startswith('--no-vision=') for v in argv),
+                    'images=false requires exactly one bare --no-vision in every rank argv')
         require(isinstance(rank.get('env'), dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in rank['env'].items()), 'observed environment required')
         projections.append({k: rank[k] for k in ('rank', 'argv', 'env')})
     require(seen == set(range(len(ranks))) and json_bytes(resolved.get('ranks')) == json_bytes(projections),
@@ -396,10 +401,50 @@ def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incom
         failed += case['status'] == 'FAIL'
     require(passed == result['passed'] and failed == result['failed'], 'raw case verdict/count mismatch: ' + gate)
     if gate == 'vision' and result['status'] == 'PASS':
-        require(expected['capabilities'].get('images') is True and any(
-            c['status'] == 'PASS' and c['modality'] == 'image' and c['expectation'] == 'supported' for c in cases),
-            'positive supported image evidence required; audio refusal is not vision')
+        images = expected['capabilities'].get('images')
+        if images is True:
+            require(any(c['status'] == 'PASS' and c['modality'] == 'image' and c['expectation'] == 'supported'
+                        for c in cases),
+                    'positive supported image evidence required; audio refusal is not vision')
+        else:
+            require(images is False, 'positive supported image evidence required; audio refusal is not vision')
+            # Vision-off release: the live server must refuse an image cleanly. An
+            # image the server was claimed NOT to serve can never be a supported case.
+            require(not any(c['modality'] == 'image' and c['expectation'] == 'supported' for c in cases),
+                    'images=false forbids supported image cases')
+            refused = [c for c in cases if c['status'] == 'PASS' and c['modality'] == 'image'
+                       and c['expectation'] == 'refused']
+            require(refused, 'images=false requires a PASS refused image case (clean refusal evidence)')
+            for case in refused:
+                _require_clean_image_refusal(case, refs, root)
     return result
+
+
+IMAGE_REFUSAL_MAX_SECONDS = 60
+
+
+def _require_clean_image_refusal(case, refs, root):
+    """A refused image case must carry a measured 4xx refusal, never a 5xx/timeout.
+
+    The typed case summary is only a pointer: the bound detail file must record the
+    HTTP status, a refusal message, a bounded wall time and a healthy server after.
+    """
+    ref = case.get('result')
+    require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'image refusal detail reference required')
+    require(ref in refs, 'image refusal detail must be referenced gate evidence')
+    detail = load_json(safe_file(root, relative_path(ref['path'])))
+    require(detail.get('error') is None and isinstance(detail.get('details'), dict),
+            'image refusal detail records a failure')
+    facts = detail['details']
+    status = facts.get('http_status')
+    require(type(status) is int and 400 <= status <= 499, 'image refusal must be an HTTP 4xx, not a 5xx or timeout')
+    error = facts.get('error')
+    require(isinstance(error, dict) and isinstance(error.get('message'), str) and error['message'].strip(),
+            'image refusal must carry an error message')
+    wall = facts.get('wall_s')
+    require(type(wall) in (int, float) and 0 <= wall < IMAGE_REFUSAL_MAX_SECONDS, 'image refusal hung or took too long')
+    require(facts.get('server_healthy_after') is True and facts.get('positive_capability') is False,
+            'server must stay healthy after the image refusal')
 
 
 def validate_receipt(path, *, evidence_root, expected):
@@ -408,7 +453,9 @@ def validate_receipt(path, *, evidence_root, expected):
     Each gate references >=1 rexl3.gate-evidence.v1 JSON summary: gate, all receipt
     identity fields, cases[{name,status,modality,expectation}]. Additional raw files
     may also be referenced. Case names are unique per gate and counts must agree.
-    Positive image/supported cases, not audio/refused cases, satisfy vision.
+    Positive image/supported cases, not audio/refused cases, satisfy vision when
+    capabilities.images is true. When it is false, a PASS image/refused case with a
+    measured HTTP 4xx detail satisfies vision and no supported image case may exist.
     """
     path = checked_path(path)
     root = checked_path(evidence_root)
@@ -708,7 +755,6 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     require(release.get('schema') == 'rexl3.release.v1' and manifest.get('schema') == 'rexl3.generated-source.v1', 'bundle schema mismatch')
     require(profile.get('runtime_id') == release.get('runtime_id') == runtime_id, 'runtime identity mismatch')
     require(release.get('production_commit') == commit and release.get('production_tree') == tree, 'release source identity mismatch')
-    require(release.get('version') == str(version), 'release version mismatch')
     require(profile.get('target_repo') == release.get('target_repo') == models['packs'].get('target', {}).get('repo'), 'model identity mismatch')
     require(release.get('files') == {k: v for k, v in inv.items() if k != 'release.lock.json'}, 'release inventory mismatch')
     for records in (release['files'], manifest.get('files', {})):
@@ -717,6 +763,9 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
             validate_record(item)
     native = release.get('native_version_fields', {})
     require(native.get('commit') == commit, 'native source identity mismatch')
+    # The tester-side installer requires release.version == native_version_fields.version (the engine's own
+    # version). The promotion number lives only in the approval and the release tag, never in release.lock.json.
+    require(release.get('version') == native.get('version'), 'release version must equal the native engine version')
     require(set(native) == {'version', 'commit', 'system_fingerprint', 'nvcc', 'cuda_arch', 'kernel_hash', 'cudart', 'cuda_driver', 'cublas'}, 'complete measured native identity required')
     require(all(isinstance(v, str) and v and v.lower() not in ('none', 'unknown', 'unavailable', 'pending')
                 and 'dirty' not in v.lower() and 'no_cuda' not in v.lower() for v in native.values()), 'native CPU stub/dirty identity refused')

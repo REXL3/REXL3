@@ -44,7 +44,17 @@ def archive(path, entries):
             out.addfile(info, io.BytesIO(data) if info.isfile() else None)
 
 
+def refusal_detail(**changes):
+    """Measured detail a vision-off harness stores for the refused image case."""
+    facts = {'http_status': 400, 'error': {'message': 'image input is not supported by this server (started without image support)'},
+             'wall_s': 0.02, 'positive_capability': False, 'server_healthy_after': True}
+    facts.update(changes)
+    return {'case': {'id': 'vision/image_refused'}, 'details': facts, 'error': None}
+
+
 class ReceiptContract(unittest.TestCase):
+    images = True
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -56,26 +66,31 @@ class ReceiptContract(unittest.TestCase):
                              effective_profile_digest='sha256:' + sha(json.dumps({'max_context': 1048576}, sort_keys=True, separators=(',', ':')).encode()),
                              effective_profile_source='owned-launcher-observation',
                              effective_max_context=1048576,
-                             capabilities={'images': True, 'audio': False}, topology={'ranks': 1})
+                             capabilities={'images': self.images, 'audio': False}, topology={'ranks': 1})
+        self.argv = ['synthetic-serve', '--max-model-len', '1048576'] + ([] if self.images else ['--no-vision'])
         self.resolved = {'max_context': 1048576, 'capabilities': self.expected['capabilities'],
-                         'ranks': [{'rank': 0, 'argv': ['synthetic-serve', '--max-model-len', '1048576'],
-                                    'env': {'SYNTHETIC_FIXTURE': '1'}}]}
+                         'ranks': [{'rank': 0, 'argv': self.argv, 'env': {'SYNTHETIC_FIXTURE': '1'}}]}
         self.expected['effective_profile_digest'] = 'sha256:' + sha(json.dumps(self.resolved, sort_keys=True, separators=(',', ':')).encode())
         self.doc = dict(schema='rexl3.qualification.v1', **self.expected, gates={})
         for gate in GATES:
-            raw = {'schema': 'rexl3.gate-evidence.v1', 'gate': gate,
-                   **self.expected, 'cases': [{'name': 'synthetic-positive', 'status': 'PASS',
-                                             'modality': 'image' if gate == 'vision' else 'text',
-                                             'expectation': 'supported'}]}
+            case = {'name': 'synthetic-positive', 'status': 'PASS',
+                    'modality': 'image' if gate == 'vision' else 'text', 'expectation': 'supported'}
+            extra = []
+            if gate == 'vision' and not self.images:
+                detail = write(self.root, 'vision-detail.json', encoded(refusal_detail()))
+                self.detail_ref = {'path': detail.name, 'sha256': sha(detail.read_bytes())}
+                case.update(name='image_refused', expectation='refused', result=self.detail_ref)
+                extra = [self.detail_ref]
+            raw = {'schema': 'rexl3.gate-evidence.v1', 'gate': gate, **self.expected, 'cases': [case]}
             p = write(self.root, gate + '.json', encoded(raw))
-            self.doc['gates'][gate] = dict(status='PASS', passed=1, total=1, failed=0,
-                                           skipped=0, evidence=[{'path': p.name, 'sha256': sha(p.read_bytes())}])
+            self.doc['gates'][gate] = dict(status='PASS', passed=1, total=1, failed=0, skipped=0,
+                                           evidence=[{'path': p.name, 'sha256': sha(p.read_bytes())}, *extra])
         observation = {'schema': 'rexl3.launcher-observation.v1', **self.expected,
                        'resolved_config': self.resolved, 'ranks': [
                            {'rank': 0, 'pid': 123, 'start_time_ticks': 456, 'hostname': 'synthetic-host',
                             'binary_sha256': self.expected['binary_sha256'],
                             'engine_commit': self.expected['engine_commit'], 'engine_tree': self.expected['engine_tree'],
-                            'argv': ['synthetic-serve', '--max-model-len', '1048576'],
+                            'argv': self.argv,
                             'env': {'SYNTHETIC_FIXTURE': '1'}, 'ready': True}]}
         p = write(self.root, 'identity.json', encoded(observation))
         self.doc['identity_receipt'] = {'path': p.name, 'sha256': sha(p.read_bytes())}
@@ -172,10 +187,136 @@ class ReceiptContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate()
 
+    def rewrite_vision(self, mutate):
+        p = self.root / 'vision.json'
+        raw = json.loads(p.read_bytes())
+        mutate(raw)
+        p.write_bytes(encoded(raw))
+        self.doc['gates']['vision']['evidence'][0]['sha256'] = sha(p.read_bytes())
+
+    def test_vision_with_zero_image_cases_is_rejected(self):
+        # Text-only vision evidence proves neither a served nor a refused image.
+        self.rewrite_vision(lambda raw: raw['cases'][0].update(modality='text'))
+        with self.assertRaisesRegex(ValueError, 'positive supported image|requires a PASS refused image'):
+            self.validate()
+
+    def test_vision_on_rejects_a_refusal_only_gate(self):
+        # images=true must keep requiring positive evidence; a clean refusal is not vision.
+        self.rewrite_vision(lambda raw: raw['cases'][0].update(expectation='refused'))
+        with self.assertRaisesRegex(ValueError, 'positive supported image evidence required'):
+            self.validate()
+
+    def test_forged_capability_maps_are_rejected(self):
+        # The receipt claims the opposite of what the profile/observation pinned.
+        self.doc['capabilities'] = dict(self.doc['capabilities'], images=not self.images)
+        with self.assertRaisesRegex(ValueError, 'receipt identity drift'):
+            self.validate()
+        self.doc['capabilities'] = dict(self.expected['capabilities'])
+        expected = copy.deepcopy(self.expected)
+        expected['capabilities']['images'] = not self.images
+        self.receipt.write_bytes(encoded(self.doc))
+        with self.assertRaisesRegex(ValueError, 'receipt identity drift'):
+            self.api().validate_receipt(self.receipt, evidence_root=self.root, expected=expected)
+
     def test_duplicate_json_keys_refused(self):
         self.receipt.write_bytes(b'{"schema": "x", "schema": "rexl3.qualification.v1"}')
         with self.assertRaises(ValueError):
             self.api().validate_receipt(self.receipt, evidence_root=self.root, expected=self.expected)
+
+
+class VisionOffReceiptContract(ReceiptContract):
+    """The whole receipt contract again, for a release that ships with images=false."""
+    images = False
+    test_vision_on_rejects_a_refusal_only_gate = None  # vision-on contract only
+
+    def test_vision_off_receipt_is_valid_with_refusal_evidence(self):
+        self.assertEqual(self.expected['capabilities']['images'], False)
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_vision_off_rejects_a_supported_image_case(self):
+        self.rewrite_vision(lambda raw: raw['cases'][0].update(expectation='supported'))
+        with self.assertRaisesRegex(ValueError, 'images=false forbids supported image cases'):
+            self.validate()
+
+    def test_vision_off_rejects_supported_case_next_to_valid_refusal(self):
+        def add(raw):
+            raw['cases'].append({'name': 'red', 'status': 'PASS', 'modality': 'image', 'expectation': 'supported'})
+        self.rewrite_vision(add)
+        self.doc['gates']['vision'].update(passed=2, total=2)
+        with self.assertRaisesRegex(ValueError, 'images=false forbids supported image cases'):
+            self.validate()
+
+    def test_vision_off_rejects_audio_refusal_as_vision(self):
+        self.rewrite_vision(lambda raw: raw['cases'][0].update(modality='audio'))
+        with self.assertRaisesRegex(ValueError, 'requires a PASS refused image case'):
+            self.validate()
+
+    def test_vision_off_refusal_must_be_measured_4xx_not_5xx_or_timeout(self):
+        bad = {'5xx': dict(http_status=503), '500': dict(http_status=500), 'timeout': dict(http_status=None),
+               '200': dict(http_status=200), 'bool_status': dict(http_status=True),
+               'missing_status': None, 'no_message': dict(error={'message': ''}),
+               'no_error_object': dict(error=None), 'hung': dict(wall_s=61.0), 'negative_wall': dict(wall_s=-1),
+               'unhealthy_after': dict(server_healthy_after=False), 'claims_positive': dict(positive_capability=True)}
+        for name, change in bad.items():
+            with self.subTest(case=name):
+                detail = refusal_detail()
+                if change is None:
+                    del detail['details']['http_status']
+                else:
+                    detail['details'].update(change)
+                path = self.root / 'vision-detail.json'
+                path.write_bytes(encoded(detail))
+                digest = sha(path.read_bytes())
+                self.rewrite_vision(lambda raw: raw['cases'][0]['result'].update(sha256=digest))
+                self.doc['gates']['vision']['evidence'][1]['sha256'] = digest
+                with self.assertRaises(ValueError):
+                    self.validate()
+
+    def test_vision_off_refusal_detail_failure_or_unbound_reference_rejected(self):
+        path = self.root / 'vision-detail.json'
+        detail = refusal_detail()
+        detail['error'] = 'TimeoutError: read timed out'
+        path.write_bytes(encoded(detail))
+        digest = sha(path.read_bytes())
+        self.rewrite_vision(lambda raw: raw['cases'][0]['result'].update(sha256=digest))
+        self.doc['gates']['vision']['evidence'][1]['sha256'] = digest
+        with self.assertRaisesRegex(ValueError, 'records a failure'):
+            self.validate()
+        # No result pointer, or a pointer outside the gate's referenced evidence.
+        self.setUp()
+        self.rewrite_vision(lambda raw: raw['cases'][0].pop('result'))
+        with self.assertRaisesRegex(ValueError, 'detail reference required'):
+            self.validate()
+        self.setUp()
+        del self.doc['gates']['vision']['evidence'][1]
+        with self.assertRaisesRegex(ValueError, 'referenced gate evidence'):
+            self.validate()
+
+    def test_vision_off_observed_process_without_no_vision_rejected(self):
+        # Receipt claims images=false but the observed process was not started --no-vision.
+        for mode in ('absent', 'duplicate', 'attached'):
+            self.setUp()
+            path = self.root / 'identity.json'
+            observation = json.loads(path.read_bytes())
+            argv = ['synthetic-serve', '--max-model-len', '1048576']
+            argv += {'absent': [], 'duplicate': ['--no-vision', '--no-vision'], 'attached': ['--no-vision=true']}[mode]
+            observation['ranks'][0]['argv'] = argv
+            observation['resolved_config']['ranks'][0]['argv'] = argv
+            digest = 'sha256:' + sha(json.dumps(observation['resolved_config'], sort_keys=True, separators=(',', ':')).encode())
+            observation['effective_profile_digest'] = digest
+            self.expected['effective_profile_digest'] = digest
+            for target in (self.doc, observation):
+                target['effective_profile_digest'] = digest
+            for gate in GATES:
+                p = self.root / (gate + '.json')
+                raw = json.loads(p.read_bytes())
+                raw['effective_profile_digest'] = digest
+                p.write_bytes(encoded(raw))
+                self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+            path.write_bytes(encoded(observation))
+            self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'exactly one bare --no-vision'):
+                self.validate()
 
 
 class ArchiveContract(unittest.TestCase):

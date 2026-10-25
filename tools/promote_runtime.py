@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,23 @@ def release_metadata(tag, repo, *, missing_ok=False):
                   and type(asset.get('size')) is int and asset['size'] > 0,
                   'release asset id/size required')
         ids.add(asset['id'])
-    return doc
+    return stable_release(doc)
+
+
+def stable_release(doc):
+    """A release's identity without the fields GitHub moves on its own.
+
+    The raw API document carries per-asset download_count (it rises with every download, including ours and every CI
+    run's) and updated_at. Comparing it before and after a download therefore always read as "release changed".
+    Only what identifies the release and its bytes is kept: id, tag, target, state, and each asset's id, name, size,
+    digest and state.
+    """
+    return {
+        'id': doc['id'], 'tag_name': doc['tag_name'], 'target_commitish': doc.get('target_commitish'),
+        'draft': doc['draft'], 'prerelease': doc['prerelease'],
+        'assets': [{'id': a['id'], 'name': a['name'], 'size': a['size'], 'digest': a.get('digest'),
+                    'state': a.get('state')} for a in doc['assets']],
+    }
 
 
 def tag_commit(tag, repo):
@@ -162,6 +179,14 @@ def download_release(tag, dest, *, repo=DEV_REPO, registry, approved_templates, 
         raise ValueError('release download verification refused') from None
 
 
+def registry_key_for_tag(tag, repo):
+    """The registry key a promotion tag can only ever belong to: approve-<id>-<N> in dev, prod/<id>/v<N> in prod."""
+    pattern = r'approve-(.+)-([1-9][0-9]*)' if repo == DEV_REPO else r'prod/([^/]+)/v([1-9][0-9]*)'
+    match = re.fullmatch(pattern, tag) if isinstance(tag, str) else None
+    e.require(match is not None and e.ID.fullmatch(match[1]), 'release tag is not a promotion tag')
+    return f'{match[1]}/v{match[2]}'
+
+
 def _download_release(tag, dest, *, repo, registry, approved_templates, target_commit):
     """Fresh verification every attempt plus durable dev release/asset identity pins.
 
@@ -169,6 +194,11 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
     itself. It only narrows which independently verified remote identity may be
     reused. Keep this local state outside the publication/evidence asset set.
     """
+    # The registry is the only authority, so it is asked before any network call: a pull request must not be able to
+    # make the privileged step probe or pull releases that nobody registered.
+    key = registry_key_for_tag(tag, repo)
+    approvals = registry.get('approvals') if isinstance(registry, dict) else None
+    e.require(isinstance(approvals, dict) and key in approvals, 'approval not in independently trusted registry: ' + key)
     dest = e.checked_path(dest)
     receipt_path = e.checked_path(dest / DEV_DOWNLOAD_RECEIPT)
     previous = _load_download_identity(receipt_path) if repo == DEV_REPO and receipt_path.exists() else None

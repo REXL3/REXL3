@@ -13,7 +13,7 @@ This file is the single source of truth for humans and agents. Agents must also 
 | 3 | Every PR title is `TYPE: Past-tense summary` (section 3). |
 | 4 | Standard practice: the other maintainer (`@am423`, `@vcruz305`) reviews every PR before it merges. If only one maintainer is available, that maintainer may merge their own PR once `verify` is green and review threads are resolved. A PR from anyone else needs a maintainer's approval. An AI agent merges only a PR that the maintainer it works for has told it to merge. |
 | 5 | **Never hand-edit `runtimes/<id>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
-| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer (`docs/PROMOTION.md`). |
+| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer or by an agent that maintainer has explicitly told to run it (`docs/PROMOTION.md`, section 9). |
 | 7 | Never weaken a test, a gate or the verifier in the same PR as the change it gates. That goes in its own TEST PR. |
 | 8 | Exit code 0 is not evidence. Show which checks ran and what they printed. |
 | 9 | No secrets, tokens, personal email addresses, internal project names or quantization-method internals in commits, PR text or docs. |
@@ -108,9 +108,19 @@ Agents (AI coding assistants) must:
 2. Work on a `<type>/<kebab-slug>` branch and open a PR. Never push to `main`, force-push a shared branch, bypass hooks, or write to the GitHub API except to open or update your own PR. Merge a PR only when the maintainer you work for has told you to merge that PR.
 3. Report evidence, not ticks: the command, the head SHA it ran on and its output.
 4. Answer in the PR description: Can the purpose be stated in one sentence without "and"? Does the diff contain anything the title does not describe? Did the checks run on this head SHA? Did any test or threshold change, and is that in its own TEST PR?
-5. Never touch `runtimes/*/v*/`, never create or edit a registry entry, a template digest or an approval, and never run `tools/promote_runtime.py`. Those are maintainer actions.
+5. Never touch `runtimes/*/v*/`. Never create or edit a registry entry, a template digest or an approval, and never run `tools/promote_runtime.py`, unless the maintainer you work for has explicitly told you to do that specific step (section 9.1). Without that instruction these are maintainer actions.
 
 Stop and ask a maintainer when the intent is unclear, requirements conflict, the rules do not cover the situation, or you would need to weaken a test or gate.
+
+### 9.1 Approving by instruction
+
+The approvers are always the two maintainers, `@am423` and `@vcruz305`. Either may explicitly instruct the agent they work with to carry out an approval step on their behalf: create or edit a registry entry, a template digest or approval, run `tools/promote_runtime.py`, or grant a gate exception. The rules:
+
+1. **The instruction names the step.** It says which step, for which runtime, version or digest. A general instruction ("handle the release"), earlier approval of related work, or silence is not an instruction to approve, and an agent never infers one. An instruction covers that step only, not another action and not a later session.
+2. **The approver of record is the maintainer.** `--approved-by`, `approved_by` and `granted_by` carry the maintainer's login who gave the instruction, never an agent. The approval is that maintainer's act and responsibility.
+3. **The agent shows the instruction.** The PR description quotes or links it, names the maintainer, and says which step it covered.
+4. **Review is unchanged.** The PR still gets the standard review in section 10, and every other rule in this file still applies. In particular an agent never weakens a check, edits a sealed tree by hand or changes the registry pin without the registry change it belongs to.
+5. **No instruction, no step.** If the instruction is missing, ambiguous or not from `@am423` or `@vcruz305`, stop and ask.
 
 ## 10. Review and merge
 

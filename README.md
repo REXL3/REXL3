@@ -10,25 +10,32 @@ Nothing in this repository is edited by hand after promotion, and contributors d
 `runtimes/`. Rules for changes are in [CONTRIBUTING.md](CONTRIBUTING.md); how a pack gets here is in
 [docs/PROMOTION.md](docs/PROMOTION.md).
 
+**Testing a pack? Start with the [user guide](docs/USER_GUIDE.md).** It covers the whole journey from an
+empty directory (access, download and verification, install, model download, start), using the API
+(streaming, thinking, tools, images), running it day to day, troubleshooting and how to report a problem.
+Each pack also has a one-page **pack sheet** with its model, context window, port and expectations.
+
 ## Released packs
 
-| Runtime | Version | Context | Topology | Vision |
-| --- | --- | --- | --- | --- |
-| `dsv41-flash-1017-sage-1.62` | `v1` | 32K (`--max-model-len 32768`) | single node, one slot | off (`--no-vision`) |
+| Runtime | Version | Context | Topology | Vision | Pack sheet |
+| --- | --- | --- | --- | --- | --- |
+| `dsv41-flash-1017-sage-1.62` | `v1` | 32K (`--max-model-len 32768`) | single node, one slot | off (`--no-vision`) | [sheet](docs/packs/dsv41-flash-1017-sage-1.62.md) |
 
-`v1` serves DeepSeek-V4.1-Flash-1017 (EXL3 1.62 bpw, SAGE) with a q4 KV cache, speculative decoding
-(`--spec auto`) and prefix caching. Capabilities in its profile: text, SSE streaming, reasoning,
-tools, prefix cache. Not supported: images, video, audio, `response_format` JSON schema, tensor
-parallel across nodes. The server listens on `127.0.0.1` only. See
-`runtimes/dsv41-flash-1017-sage-1.62/v1/KNOWN_ISSUES.md` for measured behaviour.
+The table lists only versions that are promoted and published. `v1` serves DeepSeek-V4.1-Flash-1017
+(EXL3, 1.62 bits per weight) with speculative decoding and prefix caching; the sheet and
+`runtimes/dsv41-flash-1017-sage-1.62/v1/KNOWN_ISSUES.md` give its capabilities, limits and measured
+behaviour. A pack's sheet is added by a docs pull request after its release is published
+([docs/packs/README.md](docs/packs/README.md)).
 
 No other profile is released.
 
-## Run `v1`
+## Run a pack
 
-Requirements, from the bundle's `docs/SETUP.md` and `scripts/doctor.py`: Ubuntu 24.04 on ARM64, the GPU
-compute capability the release pins (a GB10 host), `sudo` for system packages, network access, and
-room for the model (`model.lock.json`: 23 files, 304.16 GiB). `doctor` checks all of these. The repository is private, so `gh` must be logged in with access to it.
+This is the short path; the [user guide](docs/USER_GUIDE.md) explains each step and what to do when one
+fails. Requirements, from the bundle's `docs/SETUP.md` and `scripts/doctor.py`: Ubuntu 24.04 on ARM64, the
+GPU compute capability the release pins (a GB10 host), `sudo` for system packages, network access, and
+room for the model (its size is on the pack sheet). `doctor` checks the platform and the bundle, not free
+disk or an idle GPU. The repository is private, so `gh` must be logged in with access to it.
 
 ```bash
 RUNTIME=dsv41-flash-1017-sage-1.62
@@ -37,14 +44,15 @@ VER=v1                                  # or the contents of runtimes/$RUNTIME/L
 gh release download "prod/$RUNTIME/$VER" -R REXL3/REXL3 -D /tmp/pack
 # The archive hash must equal bundle.sha256 in the release's approval.json (and in this repository's
 # runtimes/$RUNTIME/$VER/approval.json).
-sha256sum /tmp/pack/*.tar.gz
+ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/pack/approval.json'))['bundle']['archive'])")   # the name approval.json records
+sha256sum "/tmp/pack/$ARCHIVE"
 grep -A4 '"bundle"' /tmp/pack/approval.json
 
-mkdir -p ~/rexl3 && tar -xzf /tmp/pack/*.tar.gz -C ~/rexl3 && cd ~/rexl3
+mkdir -p ~/rexl3 && tar -xzf "/tmp/pack/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
 ./launch.sh --yes install-deps          # isolated, hash-pinned Python environment; no model download
 ./launch.sh doctor                      # read-only checks; must exit 0
-./launch.sh setup --accept-model-download   # downloads and verifies the model (about 304 GiB)
-./launch.sh start                       # foreground; stays attached to this terminal
+./launch.sh --yes setup --accept-model-download   # downloads and verifies the model (size: the pack sheet)
+./launch.sh --yes start                 # foreground; stays attached to this terminal
 ```
 
 Run `launch.sh` as your normal user, not with `sudo`. `--yes` approves routine package installation
@@ -54,28 +62,38 @@ refuses to run as root.
 From a second terminal:
 
 ```bash
-curl -s http://127.0.0.1:8940/v1/chat/completions \
+PORT=8940                               # the port on the pack's sheet
+curl -s http://127.0.0.1:$PORT/v1/models                  # the model id to use, and the effective window
+curl -s http://127.0.0.1:$PORT/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":64}'
+  -d '{"model":"<id from /v1/models>","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512}'
 ```
 
-Reasoning is on by default, so a very small `max_tokens` can end inside the reasoning span and return
-empty content (see `KNOWN_ISSUES.md`). Use `./launch.sh status`, `logs`, `stop`, `verify` and
-`diagnostics` from the second terminal. `stop` stops only the process that launch owns. The server has
+A pack that thinks before it answers can spend a small `max_tokens` budget inside the thinking and return
+empty content (the pack sheet and its `KNOWN_ISSUES.md` say whether yours does). Use `./launch.sh status`, `logs`,
+`stop`, `verify` and `diagnostics` from the second terminal. `stop` stops only the process that launch owns. The server has
 no authentication and no TLS; keep it on loopback or behind your own proxy (see [SECURITY.md](SECURITY.md)).
 
 The bundle's own `README.md`, `docs/SETUP.md` and `docs/TROUBLESHOOTING.md` are the command reference.
 
 ### Reporting a problem
 
-Run `./launch.sh diagnostics` and attach its output. It is an allow-list: it contains no prompts,
-responses, raw logs, environment values or credentials. Read it before sharing. Send it to the
-maintainers with the command you ran. Report a security problem as described in
-[SECURITY.md](SECURITY.md), not in an issue.
+Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
+tag and archive hash, the profile, the command with its exit code and error token, the output of
+`./launch.sh diagnostics`, and what you expected. `diagnostics` is an allow-list: it contains no prompts,
+responses, raw logs, environment values or credentials. Read it before pasting. Issues are visible to the
+maintainers and every invited tester. For a quick question or to talk with other testers, use the testers'
+Discord server; anything you want tracked belongs in an issue. Report a security problem as described in
+[SECURITY.md](SECURITY.md), never in an issue or a chat channel.
 
 ## Layout
 
 ```
+docs/
+  USER_GUIDE.md                  # the tester's guide, the same for every pack
+  packs/<runtime-id>.md          # one sheet per released runtime, added after its release
+  packs/TEMPLATE.md, README.md   # how to write a sheet
+  PROMOTION.md                   # how a pack gets here
 runtimes/
   templates/APPROVED.json        # runtime template versions and digests production accepts
   templates/APPROVALS.json       # approval registry: the protected anchor for each tree (CODEOWNERS)
@@ -100,8 +118,8 @@ the protected base revision, never from the pull request. It requires every tree
 match an entry in `runtimes/templates/APPROVALS.json` (exact file inventory, hashes, sizes and modes),
 and it refuses a template digest that is not in `APPROVED.json`. `v1` is checked as a legacy tree,
 against its pinned inventory. A tree from the newer receipt-based format also needs the authenticated
-dev release assets, which CI cannot download, so CI rejects it until a maintainer-approved asset
-source exists. This is described in [docs/PROMOTION.md](docs/PROMOTION.md). CI checks provenance and
+dev release assets: `verify` downloads them with a repository secret before it checks the receipts, as
+described in [docs/PROMOTION.md](docs/PROMOTION.md). CI checks provenance and
 integrity; it does not run or qualify a model.
 
 ## Licence and source

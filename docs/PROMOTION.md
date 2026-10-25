@@ -117,6 +117,14 @@ verified, never accepted blindly.
 The tools never write `LATEST`. After step 3 succeeds, open a separate pull request that changes
 `runtimes/<id>/LATEST` to `v<N>`. `LATEST` therefore never points at a tree whose release is missing.
 
+### 5. Publish the pack sheet
+
+Testers read a pack's sheet before they run it, so a released version is not finished until its sheet is
+current. After step 4, open a `DOCS:` pull request that adds or updates `docs/packs/<runtime-id>.md` from
+the sealed files (copy `docs/packs/TEMPLATE.md` for a new runtime; its rules are in `docs/packs/README.md`)
+and the runtime's row in the README's released-packs table. The pull request names the release tag it was
+checked against. Docs pull requests never touch `runtimes/`.
+
 ## Verification in CI
 
 `.github/workflows/verify.yml` (job `verify`) runs on `pull_request_target` and on pushes to `main`:
@@ -178,6 +186,8 @@ v1 is never accepted by the promoter.
 
 History is append-only. Revert the promotion commit through a pull request, add the `-withdrawn` tag,
 and point `runtimes/<id>/LATEST` at the previous version in a pull request. Never force-push `main`.
+Then update the pack sheet and the README table in a `DOCS:` pull request so testers are not pointed at
+the withdrawn version.
 
 ## Open items
 

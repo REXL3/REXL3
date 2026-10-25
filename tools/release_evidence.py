@@ -708,7 +708,6 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     require(release.get('schema') == 'rexl3.release.v1' and manifest.get('schema') == 'rexl3.generated-source.v1', 'bundle schema mismatch')
     require(profile.get('runtime_id') == release.get('runtime_id') == runtime_id, 'runtime identity mismatch')
     require(release.get('production_commit') == commit and release.get('production_tree') == tree, 'release source identity mismatch')
-    require(release.get('version') == str(version), 'release version mismatch')
     require(profile.get('target_repo') == release.get('target_repo') == models['packs'].get('target', {}).get('repo'), 'model identity mismatch')
     require(release.get('files') == {k: v for k, v in inv.items() if k != 'release.lock.json'}, 'release inventory mismatch')
     for records in (release['files'], manifest.get('files', {})):
@@ -717,6 +716,9 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
             validate_record(item)
     native = release.get('native_version_fields', {})
     require(native.get('commit') == commit, 'native source identity mismatch')
+    # The tester-side installer requires release.version == native_version_fields.version (the engine's own
+    # version). The promotion number lives only in the approval and the release tag, never in release.lock.json.
+    require(release.get('version') == native.get('version'), 'release version must equal the native engine version')
     require(set(native) == {'version', 'commit', 'system_fingerprint', 'nvcc', 'cuda_arch', 'kernel_hash', 'cudart', 'cuda_driver', 'cublas'}, 'complete measured native identity required')
     require(all(isinstance(v, str) and v and v.lower() not in ('none', 'unknown', 'unavailable', 'pending')
                 and 'dirty' not in v.lower() and 'no_cuda' not in v.lower() for v in native.values()), 'native CPU stub/dirty identity refused')

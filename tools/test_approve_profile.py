@@ -114,11 +114,11 @@ class SyntheticSeal:
         if tp2:
             self.bundle['bin/rexl3-cluster'] = self.bundle['bin/rexl3-serve']
         self.release = dict(schema='rexl3.release.v1', runtime_id='synthetic-demo', target_repo='synthetic/model',
-            production_commit=self.commit, production_tree=self.tree, version='1',
+            production_commit=self.commit, production_tree=self.tree, version='0.1.2',
             platform={'system': 'Linux', 'machine': 'aarch64', 'gpu_compute_capability': '12.1'},
-            native_version_fields={'commit': self.commit, 'version': 'synthetic', 'system_fingerprint': 'synthetic',
-                'nvcc': 'synthetic', 'cuda_arch': 'sm_121', 'kernel_hash': '1' * 16, 'cudart': 'synthetic',
-                'cuda_driver': 'synthetic', 'cublas': 'synthetic'},
+            native_version_fields={'commit': self.commit, 'version': '0.1.2', 'system_fingerprint': 'fp_synthetic_test',
+                'nvcc': '13.0.88', 'cuda_arch': 'sm_121', 'kernel_hash': '1' * 16, 'cudart': '13.0',
+                'cuda_driver': '13.0', 'cublas': '13.1.1'},
             files=self.inventory(self.bundle), profile_sha256=sha(self.source['profile.json']),
             model_lock_sha256=sha(self.source['model.lock.json']))
         self.bundle['release.lock.json'] = encoded(self.release)
@@ -249,6 +249,28 @@ class ApprovalTest(unittest.TestCase):
                 self.f.tar(self.f.archive, bundle)
                 with self.assertRaises(ValueError):
                     self.f.seal()
+
+    def _reseal_with_release(self, **changes):
+        release = copy.deepcopy(self.f.release)
+        native = changes.pop('native', {})
+        release.update(changes)
+        release['native_version_fields'].update(native)
+        bundle = copy.deepcopy(self.f.bundle)
+        bundle['release.lock.json'] = encoded(release)
+        self.f.tar(self.f.archive, bundle)
+        return release
+
+    def test_release_version_must_be_the_native_engine_version_not_the_promotion_number(self):
+        # The promotion number (1 for approve-<id>-1) used to be demanded here, while the tester's installer
+        # demands release.version == native engine version: no release could pass both.
+        self._reseal_with_release(version='1')
+        with self.assertRaisesRegex(ValueError, 'native engine version'):
+            self.f.seal()
+
+    def test_release_version_that_differs_from_the_native_version_is_refused(self):
+        self._reseal_with_release(version='0.1.2', native={'version': '0.1.3'})
+        with self.assertRaisesRegex(ValueError, 'native engine version'):
+            self.f.seal()
 
     def test_trusted_registry_is_not_self_authorized(self):
         path, doc, registry = self.f.published_fixture()

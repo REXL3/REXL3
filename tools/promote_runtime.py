@@ -61,7 +61,23 @@ def release_metadata(tag, repo, *, missing_ok=False):
                   and type(asset.get('size')) is int and asset['size'] > 0,
                   'release asset id/size required')
         ids.add(asset['id'])
-    return doc
+    return stable_release(doc)
+
+
+def stable_release(doc):
+    """A release's identity without the fields GitHub moves on its own.
+
+    The raw API document carries per-asset download_count (it rises with every download, including ours and every CI
+    run's) and updated_at. Comparing it before and after a download therefore always read as "release changed".
+    Only what identifies the release and its bytes is kept: id, tag, target, state, and each asset's id, name, size,
+    digest and state.
+    """
+    return {
+        'id': doc['id'], 'tag_name': doc['tag_name'], 'target_commitish': doc.get('target_commitish'),
+        'draft': doc['draft'], 'prerelease': doc['prerelease'],
+        'assets': [{'id': a['id'], 'name': a['name'], 'size': a['size'], 'digest': a.get('digest'),
+                    'state': a.get('state')} for a in doc['assets']],
+    }
 
 
 def tag_commit(tag, repo):

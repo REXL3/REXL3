@@ -98,6 +98,57 @@ class PromotionTest(unittest.TestCase):
             shutil.copyfile(self.f.assets / name, destination / name)
         return result()
 
+    def api_doc_with_counters(self, tag, step):
+        # What GitHub returns: download_count and updated_at move between two reads of the same release.
+        doc = self.metadata(tag)
+        doc['updated_at'] = '2026-10-24T00:00:%02dZ' % step
+        for asset in doc['assets']:
+            asset.update(download_count=step * 3, updated_at='2026-10-24T00:01:%02dZ' % step, state='uploaded')
+        return doc
+
+    def test_download_counters_that_move_during_a_download_are_not_a_change(self):
+        tag = 'approve-synthetic-demo-1'
+        calls = {'n': 0}
+
+        def gh(*args, **kwargs):
+            if args[0] == 'api':
+                calls['n'] += 1
+                return result(self.api_doc_with_counters(tag, calls['n']))
+            return self.mock_download(*args, **kwargs)
+
+        with patch.object(p, 'tag_commit', return_value=self.f.commit), patch.object(p, 'gh', side_effect=gh):
+            got = p.download_release(tag, Path(self.tmp.name) / 'download', registry=self.registry,
+                                     approved_templates=self.f.approved)
+        self.assertEqual(got.read_bytes(), self.approval.read_bytes())
+        self.assertGreaterEqual(calls['n'], 2, 'the release is read before and after the download')
+
+    def test_a_real_change_during_a_download_is_still_refused_when_counters_also_move(self):
+        tag = 'approve-synthetic-demo-1'
+        calls = {'n': 0}
+
+        def gh(*args, **kwargs):
+            if args[0] == 'api':
+                calls['n'] += 1
+                doc = self.api_doc_with_counters(tag, calls['n'])
+                if calls['n'] > 1:
+                    doc['assets'][1]['size'] += 1
+                return result(doc)
+            return self.mock_download(*args, **kwargs)
+
+        with patch.object(p, 'tag_commit', return_value=self.f.commit), patch.object(p, 'gh', side_effect=gh):
+            with self.assertRaises(ValueError):
+                p.download_release(tag, Path(self.tmp.name) / 'download', registry=self.registry,
+                                   approved_templates=self.f.approved)
+
+    def test_stable_release_drops_counters_and_keeps_identity(self):
+        doc = self.api_doc_with_counters('approve-synthetic-demo-1', 7)
+        stable = p.stable_release(doc)
+        self.assertNotIn('updated_at', stable)
+        for asset in stable['assets']:
+            self.assertEqual(set(asset), {'id', 'name', 'size', 'digest', 'state'})
+        other = self.api_doc_with_counters('approve-synthetic-demo-1', 99)
+        self.assertEqual(stable, p.stable_release(other))
+
     def test_repeated_authenticated_download_into_populated_cache(self):
         tag = 'approve-synthetic-demo-1'
         dest = Path(self.tmp.name) / 'download'

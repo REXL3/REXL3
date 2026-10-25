@@ -148,6 +148,29 @@ class PromotionTest(unittest.TestCase):
             self.assertEqual(set(asset), {'id', 'name', 'size', 'digest', 'state'})
         other = self.api_doc_with_counters('approve-synthetic-demo-1', 99)
         self.assertEqual(stable, p.stable_release(other))
+    def test_unregistered_approval_is_refused_before_any_network_call(self):
+        for tag, repo in (('approve-synthetic-demo-2', p.DEV_REPO), ('approve-other-demo-1', p.DEV_REPO),
+                          ('prod/synthetic-demo/v2', p.PROD_REPO)):
+            with self.subTest(tag=tag), \
+                 patch.object(p, 'gh', side_effect=AssertionError('network call before the registry check')), \
+                 patch.object(p, 'release_metadata', side_effect=AssertionError('metadata read before the registry check')):
+                with self.assertRaises(ValueError):
+                    p.download_release(tag, Path(self.tmp.name) / 'never', repo=repo, registry=self.registry,
+                                       approved_templates=self.f.approved)
+        self.assertFalse((Path(self.tmp.name) / 'never').exists())
+
+    def test_a_tag_that_is_not_a_promotion_tag_is_refused_before_any_network_call(self):
+        for tag in ('latest', 'approve-synthetic-demo', 'approve--1', '../approve-synthetic-demo-1', 'approve-Synthetic Demo-1',
+                    'approve-synthetic-demo-01', 'prod/synthetic-demo/v1/extra', None, 7):
+            with self.subTest(tag=tag), patch.object(p, 'gh', side_effect=AssertionError('network call')):
+                with self.assertRaises(ValueError):
+                    p.download_release(tag, Path(self.tmp.name) / 'never', registry=self.registry,
+                                       approved_templates=self.f.approved)
+
+    def test_registry_key_for_tag(self):
+        self.assertEqual(p.registry_key_for_tag('approve-synthetic-demo-1', p.DEV_REPO), 'synthetic-demo/v1')
+        self.assertEqual(p.registry_key_for_tag('approve-a-b-c-12', p.DEV_REPO), 'a-b-c/v12')
+        self.assertEqual(p.registry_key_for_tag('prod/synthetic-demo/v3', p.PROD_REPO), 'synthetic-demo/v3')
 
     def test_repeated_authenticated_download_into_populated_cache(self):
         tag = 'approve-synthetic-demo-1'

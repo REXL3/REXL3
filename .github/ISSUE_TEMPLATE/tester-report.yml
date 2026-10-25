@@ -1,0 +1,62 @@
+name: Tester report
+description: A problem or feedback from running a released pack (not a security problem)
+title: "[report] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One report per problem. This repository is private, but every invited tester and maintainer can read issues:
+        **do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
+        A security problem goes through [SECURITY.md](https://github.com/REXL3/REXL3/blob/main/SECURITY.md), not here. The command list and
+        the error-token table are in the [user guide](https://github.com/REXL3/REXL3/blob/main/docs/USER_GUIDE.md).
+  - type: input
+    id: release
+    attributes:
+      label: Release tag and archive SHA-256
+      description: "The tag (for example prod/<runtime-id>/v1) and the archive hash from approval.json."
+    validations:
+      required: true
+  - type: input
+    id: profile
+    attributes:
+      label: Profile
+      description: The profile you ran (the default if you did not choose one).
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command, exit code and error token
+      description: The exact command, its exit code and the capitalised error token it printed, if any.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Output of ./launch.sh diagnostics
+      description: Read it before pasting. It is an allow-list report and contains no prompts, responses, raw logs, environment values or credentials.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you expected, what happened, and how to repeat it
+      description: For a bad answer include the request you sent (remove anything private), the seed if you set one, and the finish_reason.
+    validations:
+      required: true
+  - type: textarea
+    id: checked
+    attributes:
+      label: What you checked and what you could not check
+      description: For example doctor, status, the pack sheet, KNOWN_ISSUES.md; and anything you could not run on your machine.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before sending
+      options:
+        - label: I read the diagnostics output and it contains nothing I do not want shared.
+          required: true
+        - label: This is not a security problem.
+          required: true

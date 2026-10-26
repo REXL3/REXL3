@@ -92,8 +92,27 @@ def tag_commit(tag, repo):
     raise ValueError('annotated tag chain limit')
 
 
-def verify_approval(approval_path, approved_templates, registry):
-    return e.verify_assets(approval_path, registry=registry, approved_templates=approved_templates)
+def verify_approval(approval_path, approved_templates, registry, precomputed=None):
+    return e.verify_assets(approval_path, registry=registry, approved_templates=approved_templates,
+                           precomputed=precomputed)
+
+
+def precomputed_for_assets(approval, assets_dir):
+    """Phase-entry inventory pass-through: one cheap streaming digest per archive.
+
+    Streams SHA-256 and size of every compressed transport archive and requires
+    equality with the approval record before returning the approved member
+    inventories. Downstream phases may then skip decompression/re-derivation;
+    the fresh digest remains mandatory at every verification boundary.
+    """
+    root = e.checked_path(assets_dir)
+    precomputed = {}
+    for asset in approval_assets(approval):
+        path = e.safe_file(root, asset['archive'])
+        e.require(path.stat().st_size == asset['bytes'], 'approved asset size differ: ' + asset['archive'])
+        e.require(e.sha256_file(path) == asset['sha256'], 'approved asset bytes differ: ' + asset['archive'])
+        precomputed[asset['archive']] = asset['members']
+    return precomputed
 
 
 def approval_assets(approval):
@@ -170,13 +189,19 @@ def _store_download_identity(path, receipt):
     e.require(_load_download_identity(path) == receipt, 'download identity persistence failed')
 
 
-def download_release(tag, dest, *, repo=DEV_REPO, registry, approved_templates, target_commit=None):
-    """Download with content-free failures; CLI/metadata errors may contain secrets."""
+def download_release(tag, dest, *, repo=DEV_REPO, registry, approved_templates, target_commit=None,
+                     with_measurements=False):
+    """Download with content-free failures; CLI/metadata errors may contain secrets.
+
+    ``with_measurements`` additionally returns the measured per-asset SHA-256
+    map (the default return value is unchanged).
+    """
     try:
-        return _download_release(tag, dest, repo=repo, registry=registry,
-                                 approved_templates=approved_templates, target_commit=target_commit)
+        path, measured = _download_release(tag, dest, repo=repo, registry=registry,
+                                           approved_templates=approved_templates, target_commit=target_commit)
     except (ValueError, OSError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         raise ValueError('release download verification refused') from None
+    return (path, measured) if with_measurements else path
 
 
 def registry_key_for_tag(tag, repo):
@@ -271,17 +296,29 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
             target = e.safe_file(dest, rel)
             e.require(target.stat().st_size == source.stat().st_size and
                       e.sha256_file(target) == e.sha256_file(source), 'cached download bytes differ')
-        verify_approval(dest / 'approval.json', approved_templates, registry)
+        verify_approval(dest / 'approval.json', approved_templates, registry,
+                        precomputed={asset['archive']: asset['members'] for asset in assets})
         if repo == DEV_REPO:
             e.require(_load_download_identity(receipt_path) == receipt, 'download identity persistence failed')
-    return dest / 'approval.json'
+    return dest / 'approval.json', measured
 
 
-def extract_tree(archive, dest, approval, *, approval_path=None):
-    """Preflight ALL headers, even excluded native entries, before creating dest."""
-    members = e.inspect_archive(archive)
+def extract_tree(archive, dest, approval, *, approval_path=None, preverified=False):
+    """Preflight ALL headers, even excluded native entries, before creating dest.
+
+    ``preverified`` skips only full re-decompression/re-derivation: the fresh
+    compressed-transport digest/size still must equal the approval bundle, and
+    every per-file destination check still runs.
+    """
+    archive = e.checked_path(archive)
     e.require(approval.get('schema') == e.SCHEMA, 'v2 approval required')
-    e.require(e.asset_record(archive, members) == approval['bundle'], 'approved bundle mismatch')
+    if preverified:
+        e.require(e.sha256_file(archive) == approval['bundle']['sha256'] and
+                  Path(archive).stat().st_size == approval['bundle']['bytes'], 'approved bundle mismatch')
+        members = approval['bundle']['members']
+    else:
+        members = e.inspect_archive(archive)
+        e.require(e.asset_record(archive, members) == approval['bundle'], 'approved bundle mismatch')
     selected = {name: item for name, item in members.items() if not name.startswith('bin/') and name != 'release.lock.json'}
     e.require(selected == approval['source_asset']['members'], 'source projection mismatch')
     e.require(approval_path is not None, 'exact approval bytes required')
@@ -293,14 +330,15 @@ def extract_tree(archive, dest, approval, *, approval_path=None):
     if dest.exists():
         e.require(tree_inventory(dest) == expected, 'existing runtime tree differs')
         return
-    e.extract_files(archive, dest, members, selected=selected)
+    e.extract_files(archive, dest, members, selected=selected, preverified=preverified)
     with (dest / 'approval.json').open('xb') as stream:
         stream.write(approval_bytes)
     (dest / 'approval.json').chmod(0o644)
     e.require(tree_inventory(dest) == expected, 'extracted tree differs')
 
 
-def verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approval_path, registry, approved_templates):
+def verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approval_path, registry, approved_templates,
+                       precomputed=None):
     """Require exact checked-out, clean, main-reachable target and identical approval/tree."""
     e.full_hash(target_commit, e.HEX40)
     root = e.checked_path(prod_checkout)
@@ -311,23 +349,25 @@ def verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approv
     # Caller fetches origin/main before invoking; failures do not become success.
     git('merge-base', '--is-ancestor', target_commit, 'origin/main', cwd=root)
     tree = root / 'runtimes' / runtime_id / f'v{version}'
-    problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=Path(approval_path).parent)
+    problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=Path(approval_path).parent,
+                           precomputed=precomputed)
     e.require(not problems, 'merged tree verification failed: ' + '; '.join(problems))
     return tree
 
 
 def verify_published_release(tag, target_commit, approval_path, registry, approved_templates, dest):
     before = release_metadata(tag, PROD_REPO)
-    remote = download_release(tag, dest, repo=PROD_REPO, registry=registry,
-                              approved_templates=approved_templates, target_commit=target_commit)
+    remote, measured = download_release(tag, dest, repo=PROD_REPO, registry=registry,
+                              approved_templates=approved_templates, target_commit=target_commit,
+                              with_measurements=True)
     e.require(Path(remote).read_bytes() == Path(approval_path).read_bytes(), 'published approval bytes differ')
     expected = e.load_json(approval_path)
     for asset in approval_assets(expected):
-        e.require(e.sha256_file(Path(remote).parent / asset['archive']) == asset['sha256'], 'published asset bytes differ')
+        e.require(measured.get(asset['archive']) == asset['sha256'], 'published asset bytes differ')
     e.require(tag_commit(tag, PROD_REPO) == target_commit, 'published tag commit differs')
     after = release_metadata(tag, PROD_REPO)
     e.require(before == after, 'published release id/assets changed during verification')
-    return after
+    return after, measured
 
 
 def publish_release(runtime_id, approve_tag, version, work, *, target_commit, prod_checkout, registry,
@@ -335,10 +375,12 @@ def publish_release(runtime_id, approve_tag, version, work, *, target_commit, pr
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
     approval_path = e.safe_file(work, 'approval.json')
-    approval, _ = verify_approval(approval_path, approved_templates, registry)
+    precomputed = precomputed_for_assets(e.load_json(approval_path), work)
+    approval, _ = verify_approval(approval_path, approved_templates, registry, precomputed=precomputed)
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) ==
               (runtime_id, version, approve_tag), 'publication request identity mismatch')
-    verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approval_path, registry, approved_templates)
+    verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approval_path, registry, approved_templates,
+                       precomputed=precomputed)
     tag = f'prod/{runtime_id}/v{version}'
     if dry_run:
         print(f'VERIFIED_DRY_RUN would publish {tag} at {target_commit}; LATEST unchanged')
@@ -353,11 +395,11 @@ def publish_release(runtime_id, approve_tag, version, work, *, target_commit, pr
         gh('release', 'create', tag, *assets, '-R', PROD_REPO, '--target', target_commit,
            '--title', f'{runtime_id} v{version}', '--notes', f'Sealed by {approve_tag}; exact v2 evidence attached.', '--latest=false')
     with tempfile.TemporaryDirectory(prefix='.published-', dir=Path(work).parent) as tmp:
-        verified = verify_published_release(tag, target_commit, approval_path, registry, approved_templates, Path(tmp) / 'assets')
+        verified, measured = verify_published_release(tag, target_commit, approval_path, registry, approved_templates, Path(tmp) / 'assets')
     receipt = dict(schema='rexl3.publication.v1', runtime_id=runtime_id, version=version, tag=tag,
         release_id=verified['id'], target_commit=target_commit, approval_sha256=e.sha256_file(approval_path),
         assets={asset['name']: dict({key: asset.get(key) for key in ('id', 'size', 'digest')},
-            sha256=e.sha256_file(e.safe_file(work, asset['name']))) for asset in verified['assets']})
+            sha256=measured.get(asset['name'])) for asset in verified['assets']})
     if previous is not None:
         e.require(previous == receipt, 'previously verified publication identity changed')
     else:
@@ -374,7 +416,8 @@ def prepare_promotion(runtime_id, approve_tag, version, *, target_commit, prod_c
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
     approval_path = e.safe_file(assets_dir, 'approval.json')
-    approval, archive = verify_approval(approval_path, approved_templates, registry)
+    precomputed = precomputed_for_assets(e.load_json(approval_path), assets_dir)
+    approval, archive = verify_approval(approval_path, approved_templates, registry, precomputed=precomputed)
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) == (runtime_id, version, approve_tag), 'promotion identity mismatch')
     root = e.checked_path(prod_checkout)
     e.require(git('rev-parse', 'HEAD', cwd=root).stdout.strip() == target_commit, 'explicit base commit required')
@@ -382,20 +425,22 @@ def prepare_promotion(runtime_id, approve_tag, version, *, target_commit, prod_c
     git('merge-base', '--is-ancestor', target_commit, 'origin/main', cwd=root)
     tree = root / 'runtimes' / runtime_id / f'v{version}'
     if tree.exists():
-        problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=assets_dir)
+        problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=assets_dir,
+                               precomputed=precomputed)
         e.require(not problems, 'existing version mismatch: ' + '; '.join(problems))
         print('VERIFIED_TREE_NOOP; publish with --publish-only and exact merged target SHA')
         return 0
     branch = f'promote/{runtime_id}-v{version}'
     if dry_run:
         with tempfile.TemporaryDirectory(prefix='.promotion-', dir=Path(assets_dir).parent) as tmp:
-            extract_tree(archive, Path(tmp) / 'tree', approval, approval_path=approval_path)
+            extract_tree(archive, Path(tmp) / 'tree', approval, approval_path=approval_path, preverified=True)
         print(f'VERIFIED_DRY_RUN would prepare {branch}; no LATEST update')
         return 0
     # Fail if a local branch exists: do not reset or overwrite someone else's work.
     git('checkout', '-b', branch, cwd=root)
-    extract_tree(archive, tree, approval, approval_path=approval_path)
-    problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=assets_dir)
+    extract_tree(archive, tree, approval, approval_path=approval_path, preverified=True)
+    problems = verify_tree(tree, approved_templates, trusted_approvals=registry, assets_dir=assets_dir,
+                           precomputed=precomputed)
     e.require(not problems, '; '.join(problems))
     git('add', '--', str(tree.relative_to(root)), cwd=root)
     git('-c', 'user.name=r0b0tlab', '-c', 'user.email=r0b0tlab@users.noreply.github.com',

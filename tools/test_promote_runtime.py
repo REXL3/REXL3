@@ -475,6 +475,134 @@ class PromotionTest(unittest.TestCase):
                 p.publish_release('synthetic-demo', 'approve-synthetic-demo-1', 1, self.f.assets,
                     target_commit=target, prod_checkout=root, registry=self.registry, approved_templates=self.f.approved)
 
+    def test_verify_approval_threads_precomputed(self):
+        precomputed = {'synthetic-demo-1.tar.gz': {'profile.json': {}}}
+        seen = {}
+        def fake_verify_assets(approval_path, **kwargs):
+            seen.update(kwargs)
+            return self.doc, self.f.archive
+        with patch.object(e, 'verify_assets', side_effect=fake_verify_assets):
+            doc, archive = p.verify_approval(self.approval, self.f.approved, self.registry,
+                                              precomputed=precomputed)
+        self.assertIs(seen['precomputed'], precomputed)
+        self.assertEqual((doc, archive), (self.doc, self.f.archive))
+
+    def test_precomputed_for_assets_requires_streaming_digest_equality(self):
+        precomputed = p.precomputed_for_assets(self.doc, self.f.assets)
+        self.assertEqual(set(precomputed), {a['archive'] for a in e.approval_assets(self.doc)})
+        self.assertEqual(precomputed[self.doc['bundle']['archive']], self.doc['bundle']['members'])
+        name = self.doc['bundle']['archive']
+        path = self.f.assets / name
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        with self.assertRaises(ValueError):
+            p.precomputed_for_assets(self.doc, self.f.assets)
+
+    def test_download_first_verification_is_full_and_second_threads_precomputed(self):
+        tag = 'approve-synthetic-demo-1'
+        dest = Path(self.tmp.name) / 'download'
+        seen = []
+        original = p.verify_approval
+        def spy(*args, **kwargs):
+            seen.append((args, kwargs))
+            return original(*args, **kwargs)
+        with patch.object(p, 'verify_approval', side_effect=spy), \
+             patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            got = p.download_release(tag, dest, registry=self.registry,
+                                      approved_templates=self.f.approved)
+        self.assertEqual(got.read_bytes(), self.approval.read_bytes())
+        self.assertEqual(len(seen), 2)
+        self.assertNotIn('precomputed', seen[0][1])
+        precomputed = seen[1][1]['precomputed']
+        self.assertEqual(set(precomputed), {a['archive'] for a in e.approval_assets(self.doc)})
+        self.assertEqual(precomputed[self.doc['bundle']['archive']], self.doc['bundle']['members'])
+
+    def test_verify_approval_precomputed_rejects_tampered_cached_archive(self):
+        tag = 'approve-synthetic-demo-1'
+        dest = Path(self.tmp.name) / 'download'
+        with patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            p.download_release(tag, dest, registry=self.registry,
+                                approved_templates=self.f.approved)
+        name = self.doc['engine_source_asset']['archive']
+        path = dest / name
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        precomputed = {a['archive']: a['members'] for a in e.approval_assets(self.doc)}
+        with self.assertRaises(ValueError):
+            p.verify_approval(dest / 'approval.json', self.f.approved, self.registry,
+                               precomputed=precomputed)
+
+    def test_extract_tree_preverified_skips_redecompression_but_keeps_digest(self):
+        dest = Path(self.tmp.name) / 'tree'
+        with patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')):
+            p.extract_tree(self.f.archive, dest, self.doc, approval_path=self.approval,
+                           preverified=True)
+        from tools import verify_runtime_tree as v
+        expected = dict(self.doc['source_asset']['members'])
+        expected['approval.json'] = dict(e.record(dest / 'approval.json'), mode=0o644)
+        self.assertEqual(v.tree_inventory(dest), expected)
+        data = self.f.archive.read_bytes()
+        self.f.archive.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        with self.assertRaises(ValueError):
+            p.extract_tree(self.f.archive, Path(self.tmp.name) / 'other', self.doc,
+                           approval_path=self.approval, preverified=True)
+
+    def test_verify_published_release_reuses_returned_measurements(self):
+        metadata = self.metadata('prod/synthetic-demo/v1')
+        measurements = {a['name']: e.sha256_file(self.f.assets / a['name']) for a in metadata['assets']}
+        with patch.object(p, 'download_release',
+                         return_value=(self.f.assets / 'approval.json', measurements)), \
+             patch.object(p, 'release_metadata', return_value=metadata), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch('tools.release_evidence.sha256_file',
+                   side_effect=AssertionError('published verification must not re-hash')):
+            after, measured = p.verify_published_release('prod/synthetic-demo/v1', self.f.commit,
+                self.approval, self.registry, self.f.approved, Path(self.tmp.name) / 'remote')
+        self.assertEqual(after, metadata)
+        self.assertEqual(measured, measurements)
+
+    def test_download_release_counts_measurements_only_when_requested(self):
+        tag = 'approve-synthetic-demo-1'
+        dest = Path(self.tmp.name) / 'download'
+        with patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            path, measured = p.download_release(tag, dest, registry=self.registry,
+                                                approved_templates=self.f.approved,
+                                                with_measurements=True)
+        self.assertEqual(path.read_bytes(), self.approval.read_bytes())
+        self.assertEqual(set(measured), {a['name'] for a in self.metadata(tag)['assets']})
+
+    def test_publish_release_requests_and_reuses_download_measurements(self):
+        root, target = self.make_prod()
+        metadata = self.metadata('prod/synthetic-demo/v1')
+        calls = []
+        def download(tag, dest, **kwargs):
+            calls.append(kwargs)
+            dest.mkdir(parents=True, exist_ok=True)
+            for name in ['approval.json'] + [a['name'] for a in metadata['assets']]:
+                shutil.copyfile(self.f.assets / name, dest / name)
+            return dest / 'approval.json', {a['name']: e.sha256_file(self.f.assets / a['name'])
+                                            for a in metadata['assets']}
+        with patch.object(p, 'release_metadata', return_value=metadata), \
+             patch.object(p, 'tag_commit', return_value=target), \
+             patch.object(p, 'download_release', side_effect=download), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            self.assertEqual(p.publish_release('synthetic-demo', 'approve-synthetic-demo-1', 1,
+                self.f.assets, target_commit=target, prod_checkout=root, registry=self.registry,
+                approved_templates=self.f.approved), 0)
+        self.assertTrue(calls and calls[0]['with_measurements'])
+        receipt = e.load_json(self.f.assets / 'publication-synthetic-demo-v1.json')
+        self.assertEqual(set(receipt['assets']), {a['name'] for a in metadata['assets']})
+        for asset in metadata['assets']:
+            self.assertEqual(receipt['assets'][asset['name']]['sha256'],
+                             e.sha256_file(self.f.assets / asset['name']))
+
 
 if __name__ == '__main__':
     unittest.main()

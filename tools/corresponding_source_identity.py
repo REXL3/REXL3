@@ -25,9 +25,15 @@ MANIFEST = 'SOURCE_IDENTITY.json'
 GENERATED = {'SOURCE_BUILD.md', '.rexl3_commit'}
 
 
-def _read_members(path):
-    """Safe, bounded, regular files only; never extract an engine archive."""
-    inventory = e.inspect_archive(path)
+def _read_members(path, inventory=None):
+    """Safe, bounded, regular files only; never extract an engine archive.
+
+    ``inventory`` is a verified member inventory (normally the approval-listed
+    one). Supplying it skips only the redundant full re-inspection; the content
+    of every member is still read and its digest still must equal the inventory.
+    """
+    if inventory is None:
+        inventory = e.inspect_archive(path)
     e.require(sum(r['bytes'] for r in inventory.values()) <= exporter.MAX_SOURCE_BYTES + e.MAX_JSON_BYTES,
               'engine source size limit')
     e.require(all(r['bytes'] <= (e.MAX_JSON_BYTES if n == MANIFEST else exporter.MAX_BLOB_BYTES)
@@ -38,6 +44,7 @@ def _read_members(path):
             exporter.validate_path(member.name)
             e.require(member.uid == member.gid == member.mtime == 0 and not member.uname and not member.gname,
                       'engine source header identity mismatch')
+            e.require(member.name in inventory, 'unlisted engine source member')
             with tar.extractfile(member) as stream:
                 data = stream.read(inventory[member.name]['bytes'] + 1)
             e.require(inventory[member.name] == dict(sha256=exporter.digest(data), bytes=len(data), mode=member.mode),
@@ -108,18 +115,21 @@ def verify_git_projection(path, *, repo, commit, tree):
         raise ValueError('engine source refused: ' + str(error)) from None
 
 
-def validate_bound_archive(path, *, commit, tree, asset):
+def validate_bound_archive(path, *, commit, tree, asset, inventory=None):
     """Consumer INTERNAL check; caller MUST authenticate approval before invoking.
 
     Recompute original Git blob identities and the protected exporter's generated
     manifest/instructions. Excluded inventory and commit/tree existence cannot be
     proved here: they are independently approval-bound, not self-authorizing.
+
+    ``inventory`` is the approval-listed member inventory; supplying it skips
+    only the redundant full re-inspection, never the content/identity binds.
     """
     e.full_hash(commit, e.HEX40)
     e.full_hash(tree, e.HEX40)
     e.validate_asset(asset)
     try:
-        inventory, members = _read_members(path)
+        inventory, members = _read_members(path, inventory)
         e.require(e.asset_record(path, inventory) == asset, 'engine source asset drift')
         e.require(MANIFEST in members, 'engine source manifest missing')
         identity = e.loads(members[MANIFEST][1])

@@ -11,6 +11,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from tools import release_evidence as e
 
 GATES = ('doctor', 'lifecycle', 'capability', 'vision', 'context', 'exactness',
          'prefix_cache', 'performance', 'quality')
@@ -337,6 +338,102 @@ class ArchiveContract(unittest.TestCase):
                         with self.assertRaises((ValueError, SystemExit)):
                             promotion.extract_tree(root / 'bad.tgz', dest, {})
                     self.assertFalse(dest.exists(), 'preflight must complete before any output')
+
+
+class PrecomputedInventoryTest(unittest.TestCase):
+    """Precomputed inventory pass-through: digest equality stays mandatory everywhere.
+
+    A precomputed member inventory may only replace re-derivation, never the
+    fresh streaming digest of the compressed transport bytes.
+    """
+
+    def setUp(self):
+        from tools.test_approve_profile import SyntheticSeal
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.f = SyntheticSeal(self.tmp.name)
+        self.approval, self.doc, self.registry = self.f.published_fixture()
+
+    def precomputed(self, **exclude):
+        skip = {exclude.get('skip', '')}
+        return {asset['archive']: asset['members'] for asset in e.approval_assets(self.doc)
+                if asset['archive'] not in skip}
+
+    def test_default_full_inspection_path_is_unchanged(self):
+        verified, archive = e.verify_assets(self.approval, registry=self.registry,
+                                             approved_templates=self.f.approved)
+        self.assertEqual(verified, self.doc)
+        self.assertEqual(archive, self.f.archive)
+
+    def test_precomputed_inventories_skip_decompression(self):
+        with patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')):
+            verified, archive = e.verify_assets(self.approval, registry=self.registry,
+                                                approved_templates=self.f.approved,
+                                                precomputed=self.precomputed())
+        self.assertEqual(verified, self.doc)
+        self.assertEqual(archive, self.f.archive)
+
+    def test_precomputed_still_requires_fresh_digest_of_compressed_bytes(self):
+        name = self.doc['bundle']['archive']
+        path = self.f.assets / name
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        with self.assertRaisesRegex(ValueError, 'asset hash/bytes mismatch'):
+            e.verify_assets(self.approval, registry=self.registry,
+                             approved_templates=self.f.approved,
+                             precomputed=self.precomputed())
+
+    def test_precomputed_member_map_tamper_is_refused(self):
+        precomputed = self.precomputed()
+        name = self.doc['bundle']['archive']
+        flipped = copy.deepcopy(precomputed[name])
+        first = next(iter(flipped))
+        flipped[first] = dict(flipped[first], sha256='f' * 64)
+        precomputed[name] = flipped
+        with self.assertRaisesRegex(ValueError, 'precomputed inventory mismatch'):
+            e.verify_assets(self.approval, registry=self.registry,
+                             approved_templates=self.f.approved,
+                             precomputed=precomputed)
+
+    def test_missing_inventory_entry_falls_back_to_full_inspection(self):
+        # Cache-miss fallback: an archive absent from precomputed is fully
+        # re-inspected and still must match the approval record.
+        precomputed = self.precomputed(skip=self.doc['engine_source_asset']['archive'])
+        verified, _ = e.verify_assets(self.approval, registry=self.registry,
+                                       approved_templates=self.f.approved,
+                                       precomputed=precomputed)
+        self.assertEqual(verified, self.doc)
+
+    def test_validate_bound_archive_inventory_skips_first_pass_and_binds_content(self):
+        from tools.corresponding_source_identity import validate_bound_archive
+        asset = self.doc['engine_source_asset']
+        with patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')):
+            identity = validate_bound_archive(self.f.engine_source_asset, commit=self.f.commit,
+                                              tree=self.f.tree, asset=asset,
+                                              inventory=asset['members'])
+        self.assertEqual(identity['source_commit'], self.f.commit)
+        self.assertEqual(identity['source_tree'], self.f.tree)
+
+    def test_validate_bound_archive_inventory_still_rejects_tampered_archive(self):
+        from tools.corresponding_source_identity import validate_bound_archive
+        asset = self.doc['engine_source_asset']
+        target = 'crates/server/src/main.rs'
+        files = {}
+        with tarfile.open(self.f.engine_source_asset, 'r:*') as tar:
+            for member in tar:
+                if member.isfile():
+                    files[member.name] = (member.mode, tar.extractfile(member).read())
+        files[target] = (files[target][0], b'fn forged() {}\n')
+        with tarfile.open(self.f.engine_source_asset, 'w:gz') as out:
+            for name, (mode, data) in sorted(files.items()):
+                info = tarfile.TarInfo(name)
+                info.mode, info.size = mode, len(data)
+                out.addfile(info, io.BytesIO(data))
+        with self.assertRaises(ValueError):
+            validate_bound_archive(self.f.engine_source_asset, commit=self.f.commit,
+                                   tree=self.f.tree, asset=asset, inventory=asset['members'])
 
 
 if __name__ == '__main__':

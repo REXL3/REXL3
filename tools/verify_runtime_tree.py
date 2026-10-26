@@ -33,8 +33,14 @@ def tree_inventory(tree):
     return files
 
 
-def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, allow_legacy=False):
-    """Return named problems (empty means PASS). All inputs are read-only."""
+def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, allow_legacy=False,
+                precomputed=None):
+    """Return named problems (empty means PASS). All inputs are read-only.
+
+    ``precomputed`` (per-archive approval-listed member inventories) is passed
+    through to the asset verifier; the fresh streaming digest of every archive
+    is still required at this boundary.
+    """
     try:
         tree = e.checked_path(tree)
         version = re.fullmatch(r'v([1-9][0-9]*)', tree.name)
@@ -64,7 +70,8 @@ def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=
         e.require(assets_dir is not None, 'authenticated dev assets directory required')
         asset_approval = e.safe_file(assets_dir, 'approval.json')
         e.require(approval_path.read_bytes() == asset_approval.read_bytes(), 'tree/asset approval inequality')
-        approved, _ = e.verify_assets(asset_approval, registry=trusted_approvals, approved_templates=approved_templates)
+        approved, _ = e.verify_assets(asset_approval, registry=trusted_approvals, approved_templates=approved_templates,
+                                      precomputed=precomputed)
         e.require(approved['version'] == number, 'runtime path version mismatch')
         expected = dict(approved['source_asset']['members'])
         expected['approval.json'] = dict(e.record(approval_path), mode=0o644)

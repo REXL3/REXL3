@@ -174,6 +174,36 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source_not_exportable'):
             source_identity.verify_git_projection(self.f.engine_source_asset, repo=self.f.repo, commit=commit, tree=tree)
 
+    def test_bound_archive_validation_counts_reviewed_external_test_targets(self):
+        # The consumer re-validation rebuilds its file list from the archive members; a reviewed external test target is
+        # excluded from the archive and must still satisfy the exporter's review check.
+        repo, target = self.f.repo, 'testdata/external.safetensors'
+        marker = b'SYNTHETIC-PROVENANCE-NOT-A-TENSOR'
+        (repo / target).write_bytes(marker)
+        reference = '../../../' + target
+        directive = b'const B: &[u8] = include_bytes!("' + reference.encode() + b'");\n'
+        body = b'fn main() {}\n#[cfg(test)]\nmod tests {\n' + directive + b'}\n'
+        (repo / 'crates/server/src/main.rs').write_bytes(body)
+        offset = body.index(b'include_bytes!')
+        review = {'source': 'crates/server/src/main.rs', 'source_sha256': exporter.digest(body),
+                  'line': body.count(b'\n', 0, offset) + 1, 'column': offset - body.rfind(b'\n', 0, offset),
+                  'reference': reference, 'target': target, 'target_git_blob': exporter.git_digest('blob', marker),
+                  'target_bytes': len(marker), 'scope': {'kind': 'cfg_test_module', 'attribute_line': 2, 'module_line': 3},
+                  'reason': 'Reviewed synthetic external test dependency; metadata only, never shipped.'}
+        policy = e.loads((repo / exporter.INPUTS).read_bytes())
+        policy['external_test_dependencies'] = [review]
+        (repo / exporter.INPUTS).write_bytes(exporter.canonical(policy))
+        self.f.git('add', '.')
+        self.f.git('commit', '-qm', 'synthetic reviewed external test target')
+        commit, tree = self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+        source = exporter.inspect_source(repo, commit)
+        self.assertEqual(source['blockers'], [])
+        self.f.engine_source_asset.write_bytes(exporter.archive_bytes(source))
+        self.assertNotIn(target, members(self.f.engine_source_asset))
+        asset = e.asset_record(self.f.engine_source_asset, e.inspect_archive(self.f.engine_source_asset))
+        identity = source_identity.validate_bound_archive(self.f.engine_source_asset, commit=commit, tree=tree, asset=asset)
+        self.assertEqual(identity['projection']['external_test_dependencies'], [review])
+
     def test_committed_instruction_forgery_is_not_a_trusted_template(self):
         (self.f.repo / exporter.TEMPLATE).write_bytes(b'SYNTHETIC untrusted build instructions\n')
         self.f.git('add', '.')

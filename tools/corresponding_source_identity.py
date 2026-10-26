@@ -148,6 +148,17 @@ def validate_bound_archive(path, *, commit, tree, asset):
         e.require(GENERATED <= set(records), 'generated source instructions missing')
         _required_inputs(payload)
         _trusted_template(payload[exporter.TEMPLATE])
+        # The reviewed external test targets are excluded from the archive (their bytes are never shipped), so the member
+        # scan above cannot see them, yet the exporter's review check looks each one up in `entries`. Give it the blob
+        # and size recorded in the archived policy (a bound Git blob). Their tree provenance was checked when the
+        # archive was exported and the excluded inventory hash is approval-bound (see the docstring); anything the
+        # policy gets wrong still fails the exporter's own review checks below.
+        policy = e.loads(payload[exporter.INPUTS]) if exporter.INPUTS in payload else {}
+        for review in policy.get('external_test_dependencies', []) if isinstance(policy, dict) else []:
+            if (isinstance(review, dict) and review.get('source') in payload and isinstance(review.get('target'), str)
+                    and isinstance(review.get('target_git_blob'), str) and type(review.get('target_bytes')) is int):
+                entries.setdefault(review['target'], {'git_blob': review['target_git_blob'], 'git_mode': '100644',
+                                                      'bytes': review['target_bytes']})
         toolchain = exporter.toml(payload['rust-toolchain.toml']).get('toolchain', {}).get('channel')
         e.require(isinstance(toolchain, str) and toolchain == identity.get('rust_toolchain'), 'source toolchain mismatch')
         projection = identity.get('projection')

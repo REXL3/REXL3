@@ -10,7 +10,6 @@ There is one sheet per runtime id, named `docs/packs/<runtime-id>.md`. The
 
 | Sheet | Runtime | Latest version |
 | --- | --- | --- |
-| [`dsv41-flash-1017-sage-1.62.md`](dsv41-flash-1017-sage-1.62.md) | DeepSeek-V4.1-Flash-1017, single node | `v1` |
 
 ## Rules for a sheet
 

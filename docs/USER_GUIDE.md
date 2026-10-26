@@ -26,7 +26,7 @@ which fails without GitHub access. Download with `gh release download` (section 
 bundle's verification and extraction steps.
 
 Conventions: commands are for Bash on the GB10 host unless said otherwise. `$RUNTIME` is a runtime id
-such as `dsv41-flash-1017-sage-1.62`; `$VER` is a release version such as `v1`. A line starting with `#`
+such as `qwen38-27b-dflash2-exl3-4.00`; `$VER` is a release version such as `v1`. A line starting with `#`
 inside a code block is a comment.
 
 ## 2. Before you start
@@ -61,7 +61,7 @@ inside a code block is a comment.
 For a pack whose sheet says "single node". Replace the two variables; everything else is as written.
 
 ```bash
-RUNTIME=dsv41-flash-1017-sage-1.62      # from the README's released-packs table
+RUNTIME=<runtime-id>      # from the README's released-packs table
 VER=v1                                  # or the contents of runtimes/$RUNTIME/LATEST
 
 gh release download "prod/$RUNTIME/$VER" -R REXL3/REXL3 -D /tmp/pack
@@ -438,7 +438,7 @@ security problem follow [SECURITY](../SECURITY.md) instead: never an issue and n
 | --- | --- |
 | Pack | A sealed, hash-pinned runtime for one model: profile, launcher, locks, approval |
 | Bundle | The runnable archive of a pack, including the binaries (a release asset) |
-| Runtime id | The pack's name, for example `dsv41-flash-1017-sage-1.62` |
+| Runtime id | The pack's name, for example `qwen38-27b-dflash2-exl3-4.00` |
 | Profile | One approved way to run the pack: window, slots, topology, flags |
 | Slot | One request being processed at the same time |
 | Context window | The most tokens (prompt plus thinking plus answer) a request may use: `max_model_len` |

@@ -28,7 +28,7 @@ from tools.test_approve_profile import SyntheticSeal
 from tools.test_release_evidence import archive, encoded, sha, write
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_ID = 'dsv41-flash-1017-sage-1.62'
+RUNTIME_ID = 'legacy-demo'
 REGISTRY = ROOT / 'runtimes/templates/APPROVALS.json'
 ALLOW_LIST = ROOT / 'runtimes/templates/APPROVED.json'
 WORKFLOW = ROOT / '.github/workflows/verify.yml'
@@ -51,8 +51,12 @@ def normalized_copy(source, dest):
             path.chmod(0o755 if executable else 0o644)
 
 
-class RealLegacyTree(unittest.TestCase):
-    """The committed v1 tree, verified exactly as the workflow does (CLI, committed registry, pinned hash)."""
+class LegacyTree(unittest.TestCase):
+    """A synthetic legacy (profile-approval.v1) tree, verified as the workflow does (CLI, registry file, pinned hash).
+
+    Production holds no legacy tree today; the verifier's legacy path stays and is exercised on a disposable tree and a
+    registry built for it, so the anchor rules keep their mutation tests.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -60,22 +64,34 @@ class RealLegacyTree(unittest.TestCase):
         self.base = Path(self.tmp.name)
         self.root = self.base / 'candidate'
         self.tree = self.root / 'runtimes' / RUNTIME_ID / 'v1'
-        normalized_copy(ROOT / 'runtimes' / RUNTIME_ID / 'v1', self.tree)
+        launch = b'#!/bin/sh\necho legacy demo\n'
+        write(self.tree, 'launch.sh', launch).chmod(0o755)
+        for name in ('KNOWN_ISSUES.md', 'README.md', 'LICENSE'):
+            write(self.tree, name, name.encode() + b'\n').chmod(0o644)
+        write(self.tree, 'source.manifest.json', encoded({'files': {'launch.sh': {'sha256': sha(launch), 'bytes': len(launch)}}})).chmod(0o644)
+        write(self.tree, 'approval.json', encoded({'schema': 'rexl3.profile-approval.v1', 'runtime_id': RUNTIME_ID, 'approved_by': 'maintainer',
+                                                    'source_commit': 'a' * 40, 'source_tree': 'b' * 40})).chmod(0o644)
+        approval = self.tree / 'approval.json'
+        self.registry_path = self.base / 'registry.json'
+        self.registry_path.write_bytes(encoded({
+            'schema': 'rexl3.approval-registry.v1', 'approvals': {},
+            'legacy': {RUNTIME_ID + '/v1': {'approval_sha256': sha(approval.read_bytes()), 'source_commit': 'a' * 40, 'source_tree': 'b' * 40,
+                                            'files': v.tree_inventory(self.tree)}}}))
         self.assets = self.base / 'dev-assets'
         self.assets.mkdir()
-        self.pin = sha(REGISTRY.read_bytes())
+        self.pin = sha(self.registry_path.read_bytes())
 
     def cli(self, *extra, registry=None, pin=None, legacy=True):
-        args = ['--root', self.root, '--approved', ALLOW_LIST, '--trusted-approvals', registry or REGISTRY,
+        args = ['--root', self.root, '--approved', ALLOW_LIST, '--trusted-approvals', registry or self.registry_path,
                 '--trusted-approvals-sha256', pin or self.pin, '--assets-dir', self.assets]
         return run_cli(*args, *(['--allow-legacy'] if legacy else []), *extra)
 
-    def test_real_v1_tree_passes_in_legacy_mode(self):
+    def test_legacy_tree_passes_in_legacy_mode(self):
         code, out, err = self.cli()
         self.assertEqual((code, err), (0, ''), out + err)
         self.assertIn('1 tree(s), 0 problem(s); legacy allowed=True', out)
 
-    def test_real_v1_tree_is_rejected_without_allow_legacy(self):
+    def test_legacy_tree_is_rejected_without_allow_legacy(self):
         code, out, err = self.cli(legacy=False)
         self.assertEqual(code, 1, out + err)
         self.assertIn('LEGACY history requires explicit --allow-legacy', out)
@@ -107,7 +123,7 @@ class RealLegacyTree(unittest.TestCase):
         document = e.loads(approval.read_bytes())
         document['approved_by'] = 'someone-else'
         approval.write_bytes(encoded(document))
-        forged = e.loads(REGISTRY.read_bytes())
+        forged = e.loads(self.registry_path.read_bytes())
         entry = forged['legacy'][RUNTIME_ID + '/v1']
         entry['approval_sha256'] = sha(approval.read_bytes())
         entry['files']['approval.json'] = e.record(approval)
@@ -134,7 +150,7 @@ class RealLegacyTree(unittest.TestCase):
                 tree = root / 'runtimes' / RUNTIME_ID / 'v1'
                 normalized_copy(self.tree, tree)
                 mutate(tree)
-                code, out, _ = run_cli('--root', root, '--approved', ALLOW_LIST, '--trusted-approvals', REGISTRY,
+                code, out, _ = run_cli('--root', root, '--approved', ALLOW_LIST, '--trusted-approvals', self.registry_path,
                                        '--trusted-approvals-sha256', self.pin, '--assets-dir', self.assets, '--allow-legacy')
                 self.assertEqual(code, 1, out)
 

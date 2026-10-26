@@ -17,17 +17,12 @@ Each pack also has a one-page **pack sheet** with its model, context window, por
 
 ## Released packs
 
-| Runtime | Version | Context | Topology | Vision | Pack sheet |
-| --- | --- | --- | --- | --- | --- |
-| `dsv41-flash-1017-sage-1.62` | `v1` | 32K (`--max-model-len 32768`) | single node, one slot | off (`--no-vision`) | [sheet](docs/packs/dsv41-flash-1017-sage-1.62.md) |
+No pack is released yet. A released pack gets a row here: runtime id, version, context, topology, vision and a link to its pack sheet.
 
-The table lists only versions that are promoted and published. `v1` serves DeepSeek-V4.1-Flash-1017
-(EXL3, 1.62 bits per weight) with speculative decoding and prefix caching; the sheet and
-`runtimes/dsv41-flash-1017-sage-1.62/v1/KNOWN_ISSUES.md` give its capabilities, limits and measured
-behaviour. A pack's sheet is added by a docs pull request after its release is published
+The table lists only versions that are promoted and published. A pack's sheet is added by a docs pull request after its release is published
 ([docs/packs/README.md](docs/packs/README.md)).
 
-No other profile is released.
+No profile is released.
 
 ## Run a pack
 
@@ -38,7 +33,7 @@ room for the model (its size is on the pack sheet). `doctor` checks the platform
 disk or an idle GPU. The repository is private, so `gh` must be logged in with access to it.
 
 ```bash
-RUNTIME=dsv41-flash-1017-sage-1.62
+RUNTIME=<runtime-id>
 VER=v1                                  # or the contents of runtimes/$RUNTIME/LATEST
 
 gh release download "prod/$RUNTIME/$VER" -R REXL3/REXL3 -D /tmp/pack

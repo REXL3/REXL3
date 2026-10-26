@@ -166,11 +166,12 @@ python3 -B -E -s tools/verify_runtime_tree.py --root . \
 
 ## Legacy v1
 
-`runtimes/dsv41-flash-1017-sage-1.62/v1` was sealed before the receipt format. Its approval is
-`rexl3.profile-approval.v1` (gates recorded as strings, no receipts, no engine source asset). Its
-bytes are not rewritten. The registry holds its `legacy` anchor, and CI verifies it as history, not as
-a new qualification. The v1 sealer and the `promote.yml` workflow that produced it no longer exist, and
-v1 is never accepted by the promoter.
+Production once held `runtimes/dsv41-flash-1017-sage-1.62/v1`, sealed before the receipt format (approval schema
+`rexl3.profile-approval.v1`: gates recorded as strings, no receipts, no engine source asset). It was removed from
+production by maintainer decision, with its release and tag, and returns only as a new promoted version when its
+runtime is finished. The verifier keeps its legacy path (`--allow-legacy`) and the registry keeps an empty `legacy`
+section, so a tree of that schema is refused unless a maintainer re-anchors it. The v1 sealer and the `promote.yml`
+workflow that produced it no longer exist, and v1 is never accepted by the promoter.
 
 ## Tags
 

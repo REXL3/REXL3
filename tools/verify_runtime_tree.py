@@ -106,7 +106,10 @@ def main(argv=None):
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
         approved = e.load_json(args.approved)['templates']
         trees = discover(args.root)
-        e.require(trees, 'no runtime trees found')
+        # Zero trees is a pass only while the pinned registry anchors nothing; a registry that anchors a tree
+        # which is missing, or a wrong --root, still stops here.
+        anchored = bool(registry.get('approvals')) or bool(registry.get('legacy'))
+        e.require(trees or not anchored, 'no runtime trees found but the registry anchors some')
         problems = []
         for tree in trees:
             problems.extend(verify_tree(tree, approved, trusted_approvals=registry,

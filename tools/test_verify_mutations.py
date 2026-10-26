@@ -148,7 +148,15 @@ class RealLegacyTree(unittest.TestCase):
         shutil.rmtree(self.tree)
         code, out, err = self.cli()
         self.assertEqual(code, 2, out + err)
-        self.assertIn('no runtime trees found', err)
+        self.assertIn('no runtime trees found but the registry anchors some', err)
+
+    def test_no_trees_pass_only_when_the_registry_anchors_nothing(self):
+        shutil.rmtree(self.tree)
+        empty = self.base / 'empty-registry.json'
+        empty.write_bytes(encoded({'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}))
+        code, out, err = self.cli(registry=empty, pin=sha(empty.read_bytes()))
+        self.assertEqual((code, err), (0, ''), out + err)
+        self.assertIn('0 tree(s), 0 problem(s)', out)
 
 
 class V2Mutations(unittest.TestCase):

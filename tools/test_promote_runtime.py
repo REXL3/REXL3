@@ -5,6 +5,7 @@ derived from runtime_id, MODEL.json write/validate, and the model/<model> branch
 """
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -18,6 +19,14 @@ from tools.test_approve_profile import SyntheticSeal
 from tools.test_release_evidence import encoded, sha, write
 
 FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
+
+# Pin a deterministic git identity for every commit these tests make. Git falls back to the OS user
+# name when no identity is configured; GitHub runner images may not resolve one, so the commit in
+# prepare_promotion fails with "Author identity unknown" unless the environment pins it.
+os.environ.setdefault('GIT_AUTHOR_NAME', 'synthetic')
+os.environ.setdefault('GIT_AUTHOR_EMAIL', 'synthetic@example.invalid')
+os.environ.setdefault('GIT_COMMITTER_NAME', 'synthetic')
+os.environ.setdefault('GIT_COMMITTER_EMAIL', 'synthetic@example.invalid')
 
 
 def result(value=None, rc=0, error=''):

@@ -1,0 +1,35 @@
+name: governance-audit
+# Section 5 (not required): scheduled daily + manual, read-only. Compares live releases, merged PR
+# reviews and live rulesets with the committed policy on main. The job fails loudly when the
+# repository state deviates; it never writes anything.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: governance-audit
+jobs:
+  governance-audit:
+    name: governance-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out main (policy and incident records)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: repo
+          persist-credentials: false
+      - name: Run the read-only governance audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REXL3_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          umask 022
+          python3 -B -E -s repo/tools/governance_audit.py \
+            --repo-root repo \
+            --codeowners repo/.github/CODEOWNERS

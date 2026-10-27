@@ -21,6 +21,7 @@ from tools import promote_runtime as p
 from tools import release_evidence as e
 from tools import verify_runtime_tree as v
 from tools.test_approve_profile import SyntheticSeal
+from tools.test_release_evidence import encoded, sha, write
 
 
 def members(path):
@@ -58,8 +59,8 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         self.f = SyntheticSeal(self.root)
         self.original = members(self.f.engine_source_asset)
 
-    def verify(self, path, registry):
-        return e.verify_assets(path, registry=registry, approved_templates=self.f.approved)
+    def verify(self, path, registry, key=None):
+        return e.verify_assets(path, registry=registry, approved_templates=self.f.approved, key=key)
 
     def test_missing_argument_and_wrapper_only_cannot_seal(self):
         args = dict(self.f.kwargs)
@@ -309,13 +310,15 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before['approval.json'])
 
     def test_full_producer_seal_consumer_and_promotion_flow(self):
+        family, model = 'qwen3.8', 'qwen3.8-27b'
         doc = self.f.seal()
         durable = self.root / 'durable'
         path = a.seal_to_directory(doc, archive=self.f.archive, source_asset=self.f.source_asset,
             engine_source_asset=self.f.engine_source_asset, evidence_root=self.f.assets, out_dir=durable)
-        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {'synthetic-demo/v1': {
-            'approval_sha256': e.sha256_file(path), 'source_commit': self.f.commit, 'source_tree': self.f.tree}}}
-        self.verify(path, registry)
+        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {f'{family}/{model}/v1': {
+            'approval_sha256': e.sha256_file(path), 'source_commit': self.f.commit, 'source_tree': self.f.tree,
+            'runtime_id': doc['runtime_id']}}}
+        self.verify(path, registry, key=f'{family}/{model}/v1')
         prod = self.root / 'production'
         prod.mkdir()
         for args in (('init', '-q'), ('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
@@ -324,17 +327,29 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         base = e.git(prod, 'rev-parse', 'HEAD').decode().strip()
         e.git(prod, 'update-ref', 'refs/remotes/origin/main', base)
         with patch.object(p, 'gh', side_effect=AssertionError('no publication/network')):
-            self.assertEqual(p.prepare_promotion('synthetic-demo', 'approve-synthetic-demo-1', 1,
-                target_commit=base, prod_checkout=prod, assets_dir=durable,
-                registry=registry, approved_templates=self.f.approved, dry_run=True), 0)
-        tree = prod / 'runtimes/synthetic-demo/v1'
+            self.assertEqual(p.prepare_promotion(family, model, 1,
+                approve_tag='approve-synthetic-demo-1',
+                target_commit=base, prod_checkout=prod, assets_dir=str(durable),
+                registry=registry, approved_templates=self.f.approved, meta=None, dry_run=True), 0)
+        tree = prod / 'runtimes' / family / model / 'v1'
         p.extract_tree(durable / doc['bundle']['archive'], tree, doc, approval_path=path)
-        self.assertEqual(v.verify_tree(tree, self.f.approved, trusted_approvals=registry, assets_dir=durable), [])
+        write(tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(family, model)))
+        write(tree.parent, 'LATEST', b'v1\n')
+        from tools.test_release_evidence import encoded
+        assets_model = self.root / 'assets-model'
+        dest_m = assets_model / family / model / 'v1'
+        dest_m.mkdir(parents=True)
+        for name in ['approval.json'] + [a['archive'] for a in e.approval_assets(doc)]:
+            shutil.copyfile(durable / name, dest_m / name)
+        e.extract_files(dest_m / doc['evidence_asset']['archive'], dest_m, doc['evidence_asset']['members'])
+        self.assertEqual(v.verify_tree(tree, self.f.approved, trusted_approvals=registry,
+                                      assets_dir=str(assets_model), family=family, model=model), [])
         self.assertEqual({asset['archive'] for asset in p.approval_assets(doc)},
             {doc[k]['archive'] for k in ('bundle', 'source_asset', 'engine_source_asset', 'evidence_asset')})
         self.assertEqual(v.tree_inventory(tree).keys(), doc['source_asset']['members'].keys() | {'approval.json'})
-        (durable / doc['engine_source_asset']['archive']).unlink()
-        self.assertTrue(v.verify_tree(tree, self.f.approved, trusted_approvals=registry, assets_dir=durable))
+        (assets_model / family / model / 'v1' / doc['engine_source_asset']['archive']).unlink()
+        self.assertTrue(v.verify_tree(tree, self.f.approved, trusted_approvals=registry,
+                                      assets_dir=str(assets_model), family=family, model=model))
 
 
 if __name__ == '__main__':

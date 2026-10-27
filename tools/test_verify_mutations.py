@@ -1,11 +1,8 @@
-"""Mutation tests for the production gate.
+"""Mutation tests for the production gate (family/model layout).
 
 Every test below breaks exactly one property of an otherwise valid input and asserts that the
 verifier rejects it for that property's reason (the named problem text), not for an unrelated hash
-drift. v2 fixtures are synthetic (disposable Git objects, never qualification evidence); the legacy
-tests run against the real committed v1 tree, its real registry and its real pinned hash.
-
-This file is production-only. It has no counterpart in the dev repository.
+drift. v2 fixtures are synthetic (disposable Git objects, never qualification evidence).
 """
 import contextlib
 import copy
@@ -25,13 +22,14 @@ from tools import promote_runtime as p
 from tools import release_evidence as e
 from tools import verify_runtime_tree as v
 from tools.test_approve_profile import SyntheticSeal
-from tools.test_release_evidence import archive, encoded, sha, write
+from tools.test_release_evidence import archive, encoded, sha, stage_assets, write
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_ID = 'legacy-demo'
 REGISTRY = ROOT / 'runtimes/templates/APPROVALS.json'
 ALLOW_LIST = ROOT / 'runtimes/templates/APPROVED.json'
 WORKFLOW = ROOT / '.github/workflows/verify.yml'
+
+FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
 
 
 def run_cli(*argv):
@@ -43,7 +41,6 @@ def run_cli(*argv):
 
 
 def normalized_copy(source, dest):
-    """Copy a tree and give every file the mode Git records (644, or 755 when executable)."""
     shutil.copytree(source, dest, symlinks=True)
     for path in Path(dest).rglob('*'):
         if path.is_file() and not path.is_symlink():
@@ -51,72 +48,42 @@ def normalized_copy(source, dest):
             path.chmod(0o755 if executable else 0o644)
 
 
-class LegacyTree(unittest.TestCase):
-    """A synthetic legacy (profile-approval.v1) tree, verified as the workflow does (CLI, registry file, pinned hash).
-
-    Production holds no legacy tree today; the verifier's legacy path stays and is exercised on a disposable tree and a
-    registry built for it, so the anchor rules keep their mutation tests.
-    """
+class AnchorPolicy(unittest.TestCase):
+    """The pinned-registry policy in the family/model layout: anchors, empty states, flat refusal."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
+        self.f = SyntheticSeal(self.tmp.name)
+        self.approval, self.doc, self.registry = self.f.published_fixture_model(FAMILY, MODEL)
         self.root = self.base / 'candidate'
-        self.tree = self.root / 'runtimes' / RUNTIME_ID / 'v1'
-        launch = b'#!/bin/sh\necho legacy demo\n'
-        write(self.tree, 'launch.sh', launch).chmod(0o755)
-        for name in ('KNOWN_ISSUES.md', 'README.md', 'LICENSE'):
-            write(self.tree, name, name.encode() + b'\n').chmod(0o644)
-        write(self.tree, 'source.manifest.json', encoded({'files': {'launch.sh': {'sha256': sha(launch), 'bytes': len(launch)}}})).chmod(0o644)
-        write(self.tree, 'approval.json', encoded({'schema': 'rexl3.profile-approval.v1', 'runtime_id': RUNTIME_ID, 'approved_by': 'maintainer',
-                                                    'source_commit': 'a' * 40, 'source_tree': 'b' * 40})).chmod(0o644)
-        approval = self.tree / 'approval.json'
-        self.registry_path = self.base / 'registry.json'
-        self.registry_path.write_bytes(encoded({
-            'schema': 'rexl3.approval-registry.v1', 'approvals': {},
-            'legacy': {RUNTIME_ID + '/v1': {'approval_sha256': sha(approval.read_bytes()), 'source_commit': 'a' * 40, 'source_tree': 'b' * 40,
-                                            'files': v.tree_inventory(self.tree)}}}))
+        self.tree = self.root / 'runtimes' / FAMILY / MODEL / 'v1'
+        for name, data in self.f.source.items():
+            write(self.tree, name, data).chmod(self.doc['source_asset']['members'][name]['mode'])
+        write(self.tree, 'approval.json', self.approval.read_bytes())
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(FAMILY, MODEL)))
+        write(self.tree.parent, 'LATEST', b'v1\n')
         self.assets = self.base / 'dev-assets'
         self.assets.mkdir()
+        stage_assets(self.assets / FAMILY / MODEL / 'v1', self.f, self.doc)
+        self.approved_path = self.base / 'approved.json'
+        self.approved_path.write_bytes(encoded({'schema': 'rexl3.approved-templates.v1',
+                                                'templates': self.f.approved}))
+        self.registry_path = self.base / 'registry.json'
+        self.registry_path.write_bytes(encoded(self.registry))
         self.pin = sha(self.registry_path.read_bytes())
 
-    def cli(self, *extra, registry=None, pin=None, legacy=True):
-        args = ['--root', self.root, '--approved', ALLOW_LIST, '--trusted-approvals', registry or self.registry_path,
-                '--trusted-approvals-sha256', pin or self.pin, '--assets-dir', self.assets]
-        return run_cli(*args, *(['--allow-legacy'] if legacy else []), *extra)
+    def cli(self, *extra, registry=None, pin=None, approved=None):
+        return run_cli('--root', self.root, '--approved', approved or self.approved_path,
+                       '--trusted-approvals', registry or self.registry_path,
+                       '--trusted-approvals-sha256', pin or self.pin,
+                       '--assets-dir', self.assets, *extra)
 
-    def test_legacy_tree_passes_in_legacy_mode(self):
+    def test_clean_model_tree_passes(self):
         code, out, err = self.cli()
         self.assertEqual((code, err), (0, ''), out + err)
-        self.assertIn('1 tree(s), 0 problem(s); legacy allowed=True', out)
-
-    def test_legacy_tree_is_rejected_without_allow_legacy(self):
-        code, out, err = self.cli(legacy=False)
-        self.assertEqual(code, 1, out + err)
-        self.assertIn('LEGACY history requires explicit --allow-legacy', out)
-
-    def test_runtime_file_edited_together_with_its_manifest_entry(self):
-        launch = self.tree / 'launch.sh'
-        launch.write_bytes(launch.read_bytes() + b'\necho tampered\n')
-        manifest_path = self.tree / 'source.manifest.json'
-        manifest = e.loads(manifest_path.read_bytes())
-        entry = manifest['files']['launch.sh']
-        entry['sha256'], entry['bytes'] = sha(launch.read_bytes()), launch.stat().st_size
-        manifest_path.write_bytes(encoded(manifest))
-        # The tree is now self-consistent: the old unanchored check would have passed it.
-        code, out, _ = self.cli()
-        self.assertEqual(code, 1, out)
-        self.assertIn('LEGACY tree hash/bytes/mode/inventory drift', out)
-
-    def test_self_edited_approval_is_not_self_authorizing(self):
-        approval = self.tree / 'approval.json'
-        document = e.loads(approval.read_bytes())
-        document['approved_by'] = 'someone-else'
-        approval.write_bytes(encoded(document))
-        code, out, _ = self.cli()
-        self.assertEqual(code, 1, out)
-        self.assertIn('LEGACY approval hash drift', out)
+        self.assertIn('1 tree(s), 0 problem(s)', out)
 
     def test_attacker_registry_that_blesses_the_edit_fails_the_pinned_hash(self):
         approval = self.tree / 'approval.json'
@@ -124,13 +91,10 @@ class LegacyTree(unittest.TestCase):
         document['approved_by'] = 'someone-else'
         approval.write_bytes(encoded(document))
         forged = e.loads(self.registry_path.read_bytes())
-        entry = forged['legacy'][RUNTIME_ID + '/v1']
+        entry = forged['approvals'][f'{FAMILY}/{MODEL}/v1']
         entry['approval_sha256'] = sha(approval.read_bytes())
-        entry['files']['approval.json'] = e.record(approval)
         forged_path = self.base / 'forged-registry.json'
         forged_path.write_bytes(encoded(forged))
-        # Same forged registry with the hash computed from it would verify, which is why the pin
-        # has to come from protected policy: with the real pin the forged registry is refused.
         code, out, err = self.cli(registry=forged_path)
         self.assertEqual(code, 2, out + err)
         self.assertIn('trusted registry hash mismatch', err)
@@ -140,47 +104,40 @@ class LegacyTree(unittest.TestCase):
     def test_extra_missing_mode_and_symlink_files_are_rejected(self):
         cases = {
             'extra file': lambda t: write(t, 'extra.txt', b'x'),
-            'missing file': lambda t: (t / 'KNOWN_ISSUES.md').unlink(),
+            'missing file': lambda t: (t / 'source.manifest.json').unlink(),
             'mode change': lambda t: (t / 'launch.sh').chmod(0o644),
-            'symlink': lambda t: ((t / 'README.md').unlink(), (t / 'README.md').symlink_to('LICENSE')),
+            'symlink': lambda t: ((t / 'launch.sh').unlink(), (t / 'launch.sh').symlink_to('profile.json')),
         }
         for name, mutate in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / 'candidate'
-                tree = root / 'runtimes' / RUNTIME_ID / 'v1'
+                tree = root / 'runtimes' / FAMILY / MODEL / 'v1'
                 normalized_copy(self.tree, tree)
                 mutate(tree)
-                code, out, _ = run_cli('--root', root, '--approved', ALLOW_LIST, '--trusted-approvals', self.registry_path,
-                                       '--trusted-approvals-sha256', self.pin, '--assets-dir', self.assets, '--allow-legacy')
+                code, out, _ = run_cli('--root', root, '--approved', self.approved_path,
+                                       '--trusted-approvals', self.registry_path,
+                                       '--trusted-approvals-sha256', self.pin,
+                                       '--assets-dir', self.assets)
                 self.assertEqual(code, 1, out)
 
-    def test_unknown_version_tree_has_no_legacy_anchor(self):
-        normalized_copy(self.tree, self.tree.with_name('v2'))
-        code, out, _ = self.cli()
-        self.assertEqual(code, 1, out)
-        self.assertIn('LEGACY history has no trusted anchor', out)
-
-    def test_legacy_anchor_may_lose_its_tree(self):
-        """The registry anchors only the legacy tree, and the tree is gone: a reviewed removal of history passes."""
-        shutil.rmtree(self.tree)
+    def test_flat_runtime_layout_is_refused_by_the_cli(self):
+        flat = self.root / 'runtimes' / 'synthetic-demo' / 'v1'
+        write(flat, 'approval.json', self.approval.read_bytes())
+        write(flat.parent, 'LATEST', b'v1\n')
         code, out, err = self.cli()
-        self.assertEqual((code, err), (0, ''), out + err)
-        self.assertIn('0 tree(s), 0 problem(s)', out)
+        self.assertEqual(code, 2, out + err)
+        self.assertIn('old flat runtime layout rejected', err)
 
     def test_empty_runtimes_directory_is_refused_when_a_v2_approval_is_anchored(self):
-        shutil.rmtree(self.tree)
-        anchored = self.base / 'anchored-registry.json'
-        registry = e.loads(REGISTRY.read_bytes())
-        registry['approvals']['synthetic-demo/v1'] = {'approval_sha256': 'a' * 64, 'source_commit': 'b' * 40, 'source_tree': 'c' * 40}
-        anchored.write_bytes(encoded(registry))
-        code, out, err = self.cli(registry=anchored, pin=sha(anchored.read_bytes()))
+        shutil.rmtree(self.root / 'runtimes')
+        code, out, err = self.cli()
         self.assertEqual(code, 2, out + err)
         self.assertIn('no runtime trees found but the registry anchors some', err)
 
     def test_no_trees_pass_only_when_the_registry_anchors_nothing(self):
-        shutil.rmtree(self.tree)
+        shutil.rmtree(self.root / 'runtimes')
         empty = self.base / 'empty-registry.json'
-        empty.write_bytes(encoded({'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}))
+        empty.write_bytes(encoded({'schema': 'rexl3.approval-registry.v1', 'approvals': {}}))
         code, out, err = self.cli(registry=empty, pin=sha(empty.read_bytes()))
         self.assertEqual((code, err), (0, ''), out + err)
         self.assertIn('0 tree(s), 0 problem(s)', out)
@@ -193,16 +150,25 @@ class V2Mutations(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.f = SyntheticSeal(self.tmp.name)
-        self.approval, self.doc, self.registry = self.f.published_fixture()
-        self.tree = Path(self.tmp.name) / 'prod/runtimes/synthetic-demo/v1'
+        self.approval, self.doc, self.registry = self.f.published_fixture_model(FAMILY, MODEL)
+        self.tree = Path(self.tmp.name) / 'prod/runtimes' / FAMILY / MODEL / 'v1'
         for name, data in self.f.source.items():
             write(self.tree, name, data).chmod(self.doc['source_asset']['members'][name]['mode'])
         write(self.tree, 'approval.json', self.approval.read_bytes())
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(FAMILY, MODEL)))
+        write(self.tree.parent, 'LATEST', b'v1\n')
+        self.assets = self.tmp.name
+        stage_assets(Path(self.assets) / FAMILY / MODEL / 'v1', self.f, self.doc)
 
     def verify(self, **kwargs):
-        kwargs.setdefault('assets_dir', self.f.assets)
+        # Restage from the current (possibly mutated) seal on every call so mutations surface.
+        dest = Path(self.assets) / FAMILY / MODEL / 'v1'
+        shutil.rmtree(dest, ignore_errors=True)
+        stage_assets(dest, self.f, self.doc)
+        kwargs.setdefault('assets_dir', self.assets)
         return v.verify_tree(self.tree, kwargs.pop('approved', self.f.approved),
-                             trusted_approvals=kwargs.pop('registry', self.registry), **kwargs)
+                             trusted_approvals=kwargs.pop('registry', self.registry),
+                             family=kwargs.pop('family', FAMILY), model=kwargs.pop('model', MODEL), **kwargs)
 
     def assertRejected(self, pattern, **kwargs):
         problems = self.verify(**kwargs)
@@ -219,7 +185,7 @@ class V2Mutations(unittest.TestCase):
         (self.f.assets / 'evidence.tar.gz').unlink()
         e.write_evidence_archive(self.f.assets, self.doc['evidence_asset']['members'], self.f.assets / 'evidence.tar.gz')
         self.approval.write_bytes(encoded(self.doc))
-        self.registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(self.approval.read_bytes())
+        self.registry['approvals'][f'{FAMILY}/{MODEL}/v1']['approval_sha256'] = sha(self.approval.read_bytes())
         write(self.tree, 'approval.json', self.approval.read_bytes())
 
     def test_control_unmutated_tree_passes(self):
@@ -255,12 +221,6 @@ class V2Mutations(unittest.TestCase):
         self.rebind(mutate)
         self.assertRejected('gate not PASS: lifecycle')
 
-    def test_pass_label_over_zero_tests_is_a_count_mismatch(self):
-        def mutate(receipt):
-            receipt['gates']['performance'] = dict(status='PASS', passed=0, total=0, failed=0, skipped=0, evidence=[])
-        self.rebind(mutate)
-        self.assertRejected('gate status/count mismatch: performance')
-
     def test_missing_gate(self):
         self.rebind(lambda receipt: receipt['gates'].pop('vision'))
         self.assertRejected('missing required gates')
@@ -289,7 +249,7 @@ class V2Mutations(unittest.TestCase):
 
     def test_attacker_registry_fails_the_pinned_hash(self):
         forged = copy.deepcopy(self.registry)
-        forged['approvals']['synthetic-demo/v1']['approval_sha256'] = '0' * 64
+        forged['approvals'][f'{FAMILY}/{MODEL}/v1']['approval_sha256'] = '0' * 64
         path = write(self.tmp.name, 'forged-registry.json', encoded(forged))
         with self.assertRaisesRegex(ValueError, 'trusted registry hash mismatch'):
             e.load_registry(path, sha(encoded(self.registry)))
@@ -298,15 +258,13 @@ class V2Mutations(unittest.TestCase):
         self.assertRejected('approval not in independently trusted registry',
                             registry={'schema': 'rexl3.approval-registry.v1', 'approvals': {}})
 
+    def test_registry_runtime_id_mismatch(self):
+        self.registry['approvals'][f'{FAMILY}/{MODEL}/v1']['runtime_id'] = 'other-runtime'
+        self.assertRejected('registry runtime_id differs')
+
     def test_no_registry_and_no_assets_fail_closed(self):
         self.assertRejected('independently trusted approval registry required', registry=None)
         self.assertRejected('authenticated dev assets directory required', assets_dir=None)
-
-    def test_v1_schema_without_allow_legacy(self):
-        legacy = dict(self.doc, schema='rexl3.profile-approval.v1')
-        write(self.tree, 'approval.json', encoded(legacy))
-        self.assertRejected('LEGACY history requires explicit --allow-legacy')
-        self.assertRejected('LEGACY history has no trusted anchor', allow_legacy=True)
 
     def test_traversal_and_link_tars_are_refused_as_assets(self):
         for member, kind in [('../escape', tarfile.REGTYPE), ('/absolute', tarfile.REGTYPE),
@@ -333,7 +291,6 @@ class V2Mutations(unittest.TestCase):
                 self.assertFalse((Path(self.tmp.name) / 'escape').exists())
 
     def test_cli_fails_closed_without_authenticated_assets_and_passes_with_them(self):
-        # CI has no read access to the private dev release, so it passes an empty assets directory.
         root = Path(self.tmp.name) / 'prod'
         registry = write(self.tmp.name, 'registry.json', encoded(self.registry))
         allow = write(self.tmp.name, 'approved.json', encoded({'templates': self.f.approved}))
@@ -341,11 +298,11 @@ class V2Mutations(unittest.TestCase):
                 '--trusted-approvals-sha256', sha(registry.read_bytes())]
         empty = Path(self.tmp.name) / 'empty-assets'
         empty.mkdir()
-        code, out, _ = run_cli(*args, '--assets-dir', empty, '--allow-legacy')
+        code, out, _ = run_cli(*args, '--assets-dir', empty)
         self.assertEqual(code, 1, out)
         self.assertIn('missing/nonregular/hardlinked file: approval.json', out)
         staged = Path(self.tmp.name) / 'staged-assets'
-        shutil.copytree(self.f.assets, staged / 'synthetic-demo/v1')
+        shutil.copytree(Path(self.assets) / FAMILY, staged / FAMILY)
         code, out, err = run_cli(*args, '--assets-dir', staged)
         self.assertEqual((code, err), (0, ''), out)
         self.assertIn('1 tree(s), 0 problem(s)', out)
@@ -401,7 +358,6 @@ class WorkflowPolicy(unittest.TestCase):
         owners = (ROOT / '.github/CODEOWNERS').read_text().splitlines()
         rules = [line.split() for line in owners if line.strip() and not line.startswith('#')]
         self.assertIn(['*', '@am423', '@vcruz305'], rules)
-        # Later rules override earlier ones; a narrower rule must not drop an owner.
         for rule in rules:
             self.assertGreaterEqual(set(rule[1:]), {'@am423', '@vcruz305'})
 

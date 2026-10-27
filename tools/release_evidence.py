@@ -860,15 +860,25 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     return profile, identities, inv, source_inv
 
 
-def trusted_entry(approval_path, registry, *, allow_legacy=False):
+def trusted_entry(approval_path, registry, *, allow_legacy=False, key=None):
     approval = load_json(approval_path)
     require(isinstance(registry, dict) and registry.get('schema') == 'rexl3.approval-registry.v1', 'trusted approval registry required')
     legacy = approval.get('schema') == 'rexl3.profile-approval.v1'
     require(approval.get('schema') == SCHEMA or legacy and allow_legacy, 'weak/unknown approval schema refused')
-    key = f"{approval.get('runtime_id')}/v{approval.get('version')}"
+    if key is None:
+        key = f"{approval.get('runtime_id')}/v{approval.get('version')}"
+        explicit_key = False
+    else:
+        require(not legacy, 'legacy approvals have no family/model registry key')
+        require(isinstance(key, str) and key.count('/') == 2, 'invalid registry key: ' + str(key))
+        require(isinstance(approval.get('runtime_id'), str), 'approval runtime_id required')
+        explicit_key = True
     entries = registry.get('legacy' if legacy else 'approvals', {})
     entry = entries.get(key)
     require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
+    if explicit_key and not legacy:
+        require(entry.get('runtime_id') == approval['runtime_id'],
+                'registry runtime_id differs from the sealed approval')
     full_hash(entry.get('approval_sha256'))
     require(sha256_file(approval_path) == entry['approval_sha256'], 'untrusted approval bytes')
     for field in ('source_commit', 'source_tree'):
@@ -877,15 +887,17 @@ def trusted_entry(approval_path, registry, *, allow_legacy=False):
     return approval
 
 
-def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None):
+def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None, key=None):
     """Authenticate approval, then every archive and receipt, including engine source.
 
+    ``key`` is the family/model registry key (``<family>/<model>/v<N>``) when verifying a prod tree;
+    by default the runtime-id key inside the approval is used (dev-side fixture and sealer self-check).
     Consumer source validation is approval-bound integrity, not independent proof
     of private Git-object existence. Only the Git-backed sealer makes that proof.
     """
     approval_path = checked_path(approval_path)
     root = approval_path.parent
-    doc = trusted_entry(approval_path, registry)
+    doc = trusted_entry(approval_path, registry, key=key)
     validate_request(doc.get('runtime_id'), doc.get('approve_tag'), doc.get('version'))
     template = doc.get('template', {})
     require(isinstance(template, dict) and approved_templates.get(template.get('version')) == template.get('digest')

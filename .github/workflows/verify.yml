@@ -70,8 +70,9 @@ jobs:
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
             --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256"  \
             --assets-dir "$ASSETS_DIR"
-      # Every tree under runtimes/ must match an anchor in the protected registry. The v1 tree is checked in legacy
-      # mode against its pinned inventory; a v2 tree is checked against the assets downloaded above.
+      # Every tree under runtimes/<family>/<model>/ must match an anchor in the protected registry
+      # (key <family>/<model>/v<N>, runtime_id), and MODEL.json (schema rexl3.prod-model.v1) must agree
+      # with the sealed approval. The old flat runtimes/<runtime-id>/v<N> layout is refused.
       - name: Verify every runtime tree against the protected registry
         env:
           ASSETS_DIR: ${{ runner.temp }}/dev-assets
@@ -84,8 +85,7 @@ jobs:
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
             --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256" \
-            --assets-dir "$ASSETS_DIR" \
-            --allow-legacy
+            --assets-dir "$ASSETS_DIR"
           status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::Verification failed (exit $status). A tree that is not in runtimes/templates/APPROVALS.json on the base, or whose dev release assets differ from the registry, is refused by design. See docs/PROMOTION.md."

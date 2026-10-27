@@ -111,21 +111,84 @@ def fetch_reviews(repo, number, token):
         page += 1
 
 
-def strip_integration(value):
+VOLATILE_KEYS = frozenset({'id', 'node_id', 'created_at', 'updated_at', 'source', 'source_type',
+                            'current_user_can_bypass', '_links'})
+
+
+def strip_volatile(value):
+    """Drop incidental API metadata (ids, timestamps, links, actor status) from a ruleset doc."""
     if isinstance(value, dict):
-        return {k: strip_integration(v) for k, v in value.items() if k != 'integration_id'}
+        return {k: strip_volatile(v) for k, v in value.items() if k not in VOLATILE_KEYS}
     if isinstance(value, list):
-        return [strip_integration(v) for v in value]
+        return [strip_volatile(v) for v in value]
     return value
+
+
+def committed_parameter_subset(live_rule, committed_rule):
+    """The committed rule's parameters must all hold in the live rule of the same type.
+
+    The API echoes defaulted parameters (e.g. required_reviewers, dismissal_restriction,
+    require_extra_approval_for_unattributed_changes) that a PUT payload may omit, so the live
+    side may carry keys the committed side does not. Every committed key must be present with
+    an equal value; integration_id on required status checks is incidental and ignored.
+    """
+    live_params = live_rule.get('parameters')
+    committed_params = committed_rule.get('parameters')
+    if committed_params is None:
+        return live_params is None
+    if not isinstance(live_params, dict):
+        return False
+    for key, expected in committed_params.items():
+        if key not in live_params:
+            return False
+        actual = live_params[key]
+        if key == 'required_status_checks' and isinstance(actual, list) and isinstance(expected, list):
+            actual = [{k: v for k, v in item.items() if k != 'integration_id'} for item in actual if isinstance(item, dict)]
+            expected = [{k: v for k, v in item.items() if k != 'integration_id'} for item in expected if isinstance(item, dict)]
+        if actual != expected:
+            return False
+    return True
+
+
+def policy_matches(committed, live):
+    """Committed policy subset holds in the live ruleset (name/target/enforcement/conditions/bypass)."""
+    for key in ('name', 'target', 'enforcement'):
+        if committed.get(key) != live.get(key):
+            return False
+    if committed.get('conditions') != live.get('conditions'):
+        return False
+    if committed.get('bypass_actors') != live.get('bypass_actors'):
+        return False
+    live_rules = {rule.get('type'): rule for rule in live.get('rules', []) if isinstance(rule, dict)}
+    for rule in committed.get('rules', []):
+        if not isinstance(rule, dict):
+            return False
+        live_rule = live_rules.get(rule.get('type'))
+        if live_rule is None or not committed_parameter_subset(live_rule, rule):
+            return False
+    return True
+
+
+def fetch_live_rulesets(repo, token):
+    """List then fetch details: the list endpoint omits conditions and rules."""
+    raw = api(f'/repos/{repo}/rulesets', token)
+    listing = json.loads(raw.decode('utf-8'))
+    live = []
+    for entry in listing:
+        ruleset_id = entry.get('id') if isinstance(entry, dict) else None
+        if ruleset_id is None:
+            continue
+        detail = api(f'/repos/{repo}/rulesets/{ruleset_id}', token)
+        live.append(json.loads(detail.decode('utf-8')))
+    return live
 
 
 def check_rulesets(repo_root, repo, token, live=None):
     if live is None:
         try:
-            raw = api(f'/repos/{repo}/rulesets', token)
+            live = fetch_live_rulesets(repo, token)
         except ValueError as error:
             return [f'live rulesets are not readable: {error}']
-        live = json.loads(raw.decode('utf-8'))
     committed = {}
     for path in sorted((repo_root / '.github/rulesets').glob('*.json')):
         try:
@@ -135,14 +198,14 @@ def check_rulesets(repo_root, repo, token, live=None):
     problems = []
     seen = set()
     for ruleset in live:
-        name = ruleset.get('name')
+        name = ruleset.get('name') if isinstance(ruleset, dict) else None
         if name is None:
             continue
         seen.add(name)
         expected = committed.get(name)
         if expected is None:
             problems.append(f'live ruleset `{name}` has no committed copy in .github/rulesets/')
-        elif strip_integration(ruleset) != strip_integration(expected):
+        elif not policy_matches(expected, strip_volatile(ruleset)):
             problems.append(f'live ruleset `{name}` differs from .github/rulesets/{name}.json')
     for name in committed:
         if name not in seen:

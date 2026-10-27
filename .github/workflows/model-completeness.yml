@@ -56,14 +56,18 @@ jobs:
       - name: Run the model-branch completeness check
         env:
           ASSETS_DIR: ${{ runner.temp }}/model-assets
+          # Untrusted PR values arrive only via env, never as inline expressions in the script.
+          REXL3_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REXL3_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -uo pipefail
           umask 022
           python3 -B -E -s base/tools/check_model_branch.py \
             --repo-root candidate \
             --tree-dir candidate \
-            --base ${{ github.event.pull_request.base.sha }} \
-            --head ${{ github.event.pull_request.head.sha }} \
+            --base "$REXL3_BASE_SHA" \
+            --head "$REXL3_HEAD_SHA" \
             --base-tree-dir base \
-            --branch ${{ github.event.pull_request.head.ref }} \
+            --branch "$REXL3_HEAD_REF" \
             --assets-dir "$ASSETS_DIR"

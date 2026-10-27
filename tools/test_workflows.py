@@ -89,6 +89,41 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertIn('base/tools/check_pr_rules.py', body)
         self.assertNotIn('pull-requests: write', body)
 
+    def test_model_completeness_passes_untrusted_values_via_env(self):
+        body = text('model-completeness.yml')
+        for var in ('REXL3_BASE_SHA', 'REXL3_HEAD_SHA', 'REXL3_HEAD_REF'):
+            self.assertIn(var + ':', body)
+        self.assertIn('--branch "$REXL3_HEAD_REF"', body)
+        self.assertIn('--base "$REXL3_BASE_SHA"', body)
+        self.assertIn('--head "$REXL3_HEAD_SHA"', body)
+
+    def test_no_run_step_interpolates_pr_event_fields_inline(self):
+        # Untrusted PR values (title, head ref, head sha) must arrive via env, never inline in a
+        # shell script: ${{ ... }} inside run: is expanded before the shell sees it and a crafted
+        # branch name (spaces, ;, $, backticks are all legal in git refs) becomes command injection.
+        # env: assignments in the same step are the sanctioned channel, so only the run body is
+        # examined here.
+        for name in ('verify.yml', 'pr-rules.yml', 'model-completeness.yml', 'local-validation.yml'):
+            lines = text(name).splitlines()
+            i = 0
+            while i < len(lines):
+                match = re.match(r'^(\s+)run: \|', lines[i])
+                if match is None:
+                    i += 1
+                    continue
+                indent = len(match.group(1))
+                body = []
+                j = i + 1
+                while j < len(lines):
+                    line = lines[j]
+                    if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                        break
+                    body.append(line)
+                    j += 1
+                self.assertNotIn('${{ github.event.pull_request', '\n'.join(body),
+                                 name + ' run body interpolates PR event fields inline')
+                i = j
+
     def test_ruleset_copies_match_section_8(self):
         import json
         main = json.loads((ROOT / '.github/rulesets/main-guard.json').read_text())
@@ -103,7 +138,7 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertEqual({c['context'] for c in checks}, {'verify', 'pr-rules', 'model-completeness', 'local-validation'})
         self.assertEqual(main['bypass_actors'], [])
         tags = json.loads((ROOT / '.github/rulesets/protected-tags.json').read_text())
-        self.assertEqual(tags['conditions']['ref_name']['include'], ['refs/tags/~ALL'])
+        self.assertEqual(tags['conditions']['ref_name']['include'], ['~ALL'])
         self.assertEqual({r['type'] for r in tags['rules']}, {'creation', 'update', 'deletion'})
         self.assertEqual(tags['bypass_actors'], [])
         model = json.loads((ROOT / '.github/rulesets/model-branches.json').read_text())

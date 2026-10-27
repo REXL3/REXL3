@@ -70,8 +70,14 @@ def file_at(repo, path, ref, token):
     return raw.decode('utf-8')
 
 
-def verify_yml_diff_ok(files, repo, pr, token):
-    """For model/*-approval: verify.yml may only change its TRUSTED_APPROVALS_SHA256 line."""
+def verify_yml_diff_ok(files, repo, pr, token, head_ref=None, base_sha=None):
+    """For model/*-approval: verify.yml may only change its TRUSTED_APPROVALS_SHA256 line.
+
+    The GitHub files API normally includes a unified ``patch``; it is omitted for very large
+    files, in which case the base and head file contents are compared line-by-line. The base
+    content is read at the PR's base commit and the head content at the branch head — never at
+    the same ref.
+    """
     for item in files:
         if item['filename'] != '.github/workflows/verify.yml':
             continue
@@ -80,14 +86,19 @@ def verify_yml_diff_ok(files, repo, pr, token):
             lines = [line for line in patch.splitlines()
                      if line.startswith(('+', '-')) and not line.startswith(('+++', '---'))]
         else:
-            base = file_at(repo, item['filename'], item.get('sha'), token) or ''
-            head = file_at(repo, item['filename'], item.get('sha'), token)
+            if base_sha is None or head_ref is None:
+                doc = api_json(f'/repos/{repo}/pulls/{pr}', token)
+                base_sha = base_sha or doc.get('base', {}).get('sha')
+                head_ref = head_ref or doc.get('head', {}).get('ref')
+            base = file_at(repo, item['filename'], base_sha, token)
+            head = file_at(repo, item['filename'], head_ref, token)
             if head is None:
                 return False, 'verify.yml unreadable'
-            base_lines, head_lines = base.splitlines(), head.splitlines()
-            added = [l for l in head_lines if l not in base_lines]
-            removed = [l for l in base_lines if l not in head_lines]
-            lines = ['+' + l for l in added] + ['-' + l for l in removed]
+            base_lines = (base or '').splitlines()
+            head_lines = head.splitlines()
+            added = [line for line in head_lines if line not in base_lines]
+            removed = [line for line in base_lines if line not in head_lines]
+            lines = ['+' + line for line in added] + ['-' + line for line in removed]
         for line in lines:
             if 'TRUSTED_APPROVALS_SHA256' not in line:
                 return False, 'verify.yml changed beyond the TRUSTED_APPROVALS_SHA256 pin line'
@@ -179,7 +190,7 @@ def check_pr_rules(repo, pr, title, head_ref, token, files=None):
         allowed = {'runtimes/templates/APPROVALS.json', '.github/workflows/verify.yml'}
         bad = sorted(names - allowed)
         report('scope', not bad, '' if not bad else 'out of scope: ' + ', '.join(bad))
-        ok, reason = verify_yml_diff_ok(files, repo, pr, token)
+        ok, reason = verify_yml_diff_ok(files, repo, pr, token, head_ref=head_ref)
         report('verify pin only', ok, reason)
         return results
 

@@ -1,5 +1,6 @@
 """pr-rules: title, branch, scope and fragment mutations. No network: changed files are injected."""
 import unittest
+from unittest import mock
 
 from tools import check_pr_rules as r
 
@@ -120,6 +121,48 @@ class ScopeTest(unittest.TestCase):
         out = files + [f('tools/check.py')]
         results = self.check('release/v0.1.0', out)
         self.assertTrue(any('out of scope' in reason for reason in self.names(results, 'scope')))
+
+
+class VerifyYmlPinTest(unittest.TestCase):
+    """The no-patch fallback must compare the PR base against the branch head (never the same ref)."""
+
+    BASE = '  TRUSTED_APPROVALS_SHA256: 111' + '1' * 64 + '\n'
+    HEAD_PIN = '  TRUSTED_APPROVALS_SHA256: 222' + '2' * 64 + '\n'
+
+    def _run(self, head_content, base_content=None):
+        files = [{'filename': '.github/workflows/verify.yml', 'status': 'modified', 'sha': 'x' * 40}]
+        pr_doc = {'base': {'sha': 'b' * 40}, 'head': {'ref': 'model/m-approval'}}
+
+        def fake_api_json(path, token, **kwargs):
+            if path.startswith('/repos/REXL3/REXL3/pulls/'):
+                return pr_doc
+            raise AssertionError('unexpected API call: ' + path)
+
+        def fake_file_at(repo, path, ref, token):
+            if ref == 'b' * 40:
+                return base_content if base_content is not None else self.BASE
+            if ref == 'model/m-approval':
+                return head_content
+            raise AssertionError('unexpected file ref: ' + str(ref))
+
+        with mock.patch.object(r, 'api_json', side_effect=fake_api_json), \
+             mock.patch.object(r, 'file_at', side_effect=fake_file_at):
+            return r.verify_yml_diff_ok(files, REPO, 1, TOKEN)
+
+    def test_pin_only_change_passes(self):
+        ok, reason = self._run(self.HEAD_PIN)
+        self.assertTrue(ok, reason)
+
+    def test_non_pin_change_fails(self):
+        head = self.HEAD_PIN + 'jobs:\n  verify:\n'
+        ok, reason = self._run(head)
+        self.assertFalse(ok)
+        self.assertIn('beyond the TRUSTED_APPROVALS_SHA256 pin line', reason)
+
+    def test_head_unreadable_fails(self):
+        ok, reason = self._run(None)
+        self.assertFalse(ok)
+        self.assertIn('unreadable', reason)
 
 
 if __name__ == '__main__':

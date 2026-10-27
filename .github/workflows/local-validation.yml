@@ -8,6 +8,11 @@ name: local-validation
 # base checkout only and never executes PR-head code. PR data (number, head SHA) arrives via env, not
 # inline expressions. `statuses: write` is the one narrowly needed write; everything else is read.
 # Model PRs cannot inject a workflow here because pr-rules forbids model/* PRs from touching .github/.
+#
+# Known limitation: a commit status named `local-validation` can in principle be forged by any workflow
+# from any unprotected branch (statuses: write is available to any pushed workflow, and statuses attach
+# to a commit, not to an app). The human approval requirement (require_code_owner_review +
+# require_last_push_approval on main-guard) is the real control; this check is a convenience gate.
 on:
   pull_request_target:
     branches: [main]

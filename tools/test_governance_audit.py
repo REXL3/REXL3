@@ -110,6 +110,79 @@ class RulesetCheckTest(unittest.TestCase):
             problems = g.check_rulesets(Path(tmp), REPO, 'tok', live=[])
             self.assertTrue(any('not live' in p for p in problems))
 
+    def test_volatile_metadata_and_api_defaults_are_not_differences(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            committed = {'name': 'main-guard', 'target': 'branch', 'enforcement': 'active',
+                         'conditions': {'ref_name': {'include': ['refs/heads/main'], 'exclude': []}},
+                         'bypass_actors': [],
+                         'rules': [{'type': 'deletion'},
+                                   {'type': 'pull_request', 'parameters': {
+                                       'required_approving_review_count': 1,
+                                       'require_code_owner_review': True,
+                                       'require_last_push_approval': True,
+                                       'dismiss_stale_reviews_on_push': True,
+                                       'required_review_thread_resolution': True,
+                                       'allowed_merge_methods': ['squash', 'rebase']}}]}
+            write(tmp, '.github/rulesets/main-guard.json', json.dumps(committed).encode())
+            live = [{'id': 25786347, 'name': 'main-guard', 'target': 'branch',
+                     'source_type': 'Repository', 'source': 'REXL3/REXL3', 'enforcement': 'active',
+                     'node_id': 'N', 'created_at': '2026-10-24T00:00:00Z',
+                     'updated_at': '2026-10-26T00:00:00Z', 'current_user_can_bypass': 'never',
+                     '_links': {}, 'bypass_actors': [],
+                     'conditions': {'ref_name': {'include': ['refs/heads/main'], 'exclude': []}},
+                     'rules': [{'type': 'deletion'},
+                               {'type': 'pull_request', 'parameters': {
+                                   'required_approving_review_count': 1,
+                                   'require_code_owner_review': True,
+                                   'require_last_push_approval': True,
+                                   'dismiss_stale_reviews_on_push': True,
+                                   'required_review_thread_resolution': True,
+                                   'allowed_merge_methods': ['squash', 'rebase'],
+                                   'required_reviewers': [],
+                                   'dismissal_restriction': {'enabled': False, 'allowed_actors': []},
+                                   'require_extra_approval_for_unattributed_changes': True}}]}]
+            self.assertEqual(g.check_rulesets(Path(tmp), REPO, 'tok', live=live), [])
+
+    def test_committed_policy_param_that_live_weakens_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            committed = {'name': 'main-guard', 'target': 'branch', 'enforcement': 'active',
+                         'conditions': {'ref_name': {'include': ['refs/heads/main'], 'exclude': []}},
+                         'bypass_actors': [],
+                         'rules': [{'type': 'pull_request', 'parameters': {
+                             'require_code_owner_review': True}}]}
+            write(tmp, '.github/rulesets/main-guard.json', json.dumps(committed).encode())
+            live = [{'name': 'main-guard', 'target': 'branch', 'enforcement': 'active',
+                     'conditions': {'ref_name': {'include': ['refs/heads/main'], 'exclude': []}},
+                     'bypass_actors': [],
+                     'rules': [{'type': 'pull_request', 'parameters': {
+                         'require_code_owner_review': False}}]}]
+            problems = g.check_rulesets(Path(tmp), REPO, 'tok', live=live)
+            self.assertTrue(any('differs' in p for p in problems))
+
+    def test_live_list_endpoint_details_are_fetched_per_id(self):
+        # The /rulesets list endpoint omits conditions/rules; the check must fetch each detail.
+        listing = json.dumps([{'id': 25935530, 'name': 'model-branches'}]).encode()
+        detail = json.dumps({'id': 25935530, 'name': 'model-branches', 'target': 'branch',
+                             'enforcement': 'active',
+                             'conditions': {'ref_name': {'include': ['refs/heads/model/*'], 'exclude': []}},
+                             'bypass_actors': [],
+                             'rules': [{'type': 'deletion'}, {'type': 'non_fast_forward'}]}).encode()
+        calls = []
+        def fake_api(path, token, **kwargs):
+            calls.append(path)
+            if path == '/repos/REXL3/REXL3/rulesets':
+                return listing
+            if path == '/repos/REXL3/REXL3/rulesets/25935530':
+                return detail
+            raise AssertionError('unexpected API call: ' + path)
+        with tempfile.TemporaryDirectory() as tmp:
+            write(tmp, '.github/rulesets/model-branches.json', detail)
+            with patch('tools.governance_audit.api', side_effect=fake_api):
+                problems = g.check_rulesets(Path(tmp), REPO, 'tok')
+            self.assertEqual(problems, [])
+            self.assertEqual(calls, ['/repos/REXL3/REXL3/rulesets',
+                                     '/repos/REXL3/REXL3/rulesets/25935530'])
+
 
 class ImmutableCheckTest(unittest.TestCase):
     def test_enabled_passes(self):

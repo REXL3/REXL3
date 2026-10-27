@@ -1,12 +1,16 @@
-"""Offline production verifier contracts; fixtures are synthetic, never qualification."""
+"""Offline production verifier contracts for the family/model layout; fixtures are synthetic, never qualification."""
 import copy
 import tempfile
 import unittest
 from pathlib import Path
 from tools import verify_runtime_tree as v
 from tools import release_evidence as e
+from tools import model_layout as m
 from tools.test_approve_profile import SyntheticSeal
-from tools.test_release_evidence import encoded, write, sha
+from tools.test_release_evidence import encoded, stage_assets, write, sha
+
+FAMILY = 'qwen3.8'
+MODEL = 'qwen3.8-27b'
 
 
 class VerifyTest(unittest.TestCase):
@@ -14,22 +18,51 @@ class VerifyTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.f = SyntheticSeal(self.tmp.name)
-        self.approval, self.doc, self.registry = self.f.published_fixture()
-        self.tree = Path(self.tmp.name) / 'prod/runtimes/synthetic-demo/v1'
+        self.approval, self.doc, self.registry = self.f.published_fixture_model(FAMILY, MODEL)
+        self.tree = Path(self.tmp.name) / 'prod/runtimes' / FAMILY / MODEL / 'v1'
         for name, data in self.f.source.items():
             p = write(self.tree, name, data)
             p.chmod(self.doc['source_asset']['members'][name]['mode'])
         write(self.tree, 'approval.json', self.approval.read_bytes())
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(FAMILY, MODEL)))
+        write(self.tree.parent, 'LATEST', b'v1\n')
+        stage_assets(Path(self.tmp.name) / 'assets' / FAMILY / MODEL / 'v1', self.f, self.doc)
+        self.assets = Path(self.tmp.name) / 'assets'
 
     def verify(self, **kwargs):
-        return v.verify_tree(self.tree, self.f.approved, trusted_approvals=self.registry,
-                             assets_dir=self.f.assets, **kwargs)
+        kwargs.setdefault('assets_dir', self.assets)
+        return v.verify_tree(self.tree, kwargs.pop('approved', self.f.approved),
+                             trusted_approvals=kwargs.pop('registry', self.registry),
+                             family=kwargs.pop('family', FAMILY), model=kwargs.pop('model', MODEL), **kwargs)
 
     def test_clean_authenticated_tree_passes(self):
         self.assertEqual(self.verify(), [])
 
     def test_no_registry_is_not_authorized(self):
-        self.assertTrue(v.verify_tree(self.tree, self.f.approved))
+        problems = v.verify_tree(self.tree, self.f.approved, family=FAMILY, model=MODEL)
+        self.assertTrue(problems)
+
+    def test_registry_key_is_family_model_version(self):
+        self.assertIn(f'{FAMILY}/{MODEL}/v1', self.registry['approvals'])
+        self.assertEqual(self.registry['approvals'][f'{FAMILY}/{MODEL}/v1']['runtime_id'], 'synthetic-demo')
+
+    def test_registry_runtime_id_mismatch_is_refused(self):
+        self.registry['approvals'][f'{FAMILY}/{MODEL}/v1']['runtime_id'] = 'other-runtime'
+        self.assertTrue(self.verify())
+
+    def test_model_json_runtime_id_mismatch_is_refused(self):
+        doc = self.f.model_doc(FAMILY, MODEL, runtime_id='other-runtime')
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
+        self.assertTrue(self.verify())
+
+    def test_model_json_folder_mismatch_is_refused(self):
+        doc = self.f.model_doc(FAMILY, 'other-model')
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
+        self.assertTrue(self.verify())
+
+    def test_model_json_missing_is_refused(self):
+        (self.tree.parent / 'MODEL.json').unlink()
+        self.assertTrue(self.verify())
 
     def test_edited_manifest_and_rehashed_file_is_not_self_authorized(self):
         write(self.tree, 'launch.sh', b'forged')
@@ -52,7 +85,8 @@ class VerifyTest(unittest.TestCase):
         self.assertTrue(self.verify())
 
     def test_tampered_receipt_file_fails(self):
-        self.f.receipt_path.write_bytes(b'{}')
+        stage = self.assets / FAMILY / MODEL / 'v1' / 'qualification.json'
+        stage.write_bytes(b'{}')
         self.assertTrue(self.verify())
 
     def test_runtime_path_version_identity(self):
@@ -61,18 +95,28 @@ class VerifyTest(unittest.TestCase):
         self.tree = other
         self.assertTrue(self.verify())
 
-    def test_v1_history_is_explicit_and_exact_hash_anchored(self):
+    def test_family_model_folder_identity(self):
+        self.assertTrue(v.verify_tree(self.tree, self.f.approved, trusted_approvals=self.registry,
+                                      assets_dir=self.f.assets, family='other', model=MODEL))
+
+    def test_flat_runtime_layout_is_rejected_by_discover(self):
+        flat = Path(self.tmp.name) / 'flat/runtimes/synthetic-demo/v1'
+        for name, data in self.f.source.items():
+            write(flat, name, data)
+        write(flat, 'approval.json', self.approval.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'old flat runtime layout rejected'):
+            v.discover(Path(self.tmp.name) / 'flat')
+
+    def test_legacy_v1_approval_is_refused(self):
         legacy = copy.deepcopy(self.doc)
-        legacy.update(schema='rexl3.profile-approval.v1', gates={'doctor': 'PASS'})
-        legacy.pop('version')
+        legacy.update(schema='rexl3.profile-approval.v1')
         write(self.tree, 'approval.json', encoded(legacy))
-        files = {p.relative_to(self.tree).as_posix(): e.record(p) for p in self.tree.rglob('*') if p.is_file()}
-        self.registry['legacy'] = {'synthetic-demo/v1': {'approval_sha256': sha(encoded(legacy)),
-            'source_commit': self.f.commit, 'source_tree': self.f.tree, 'files': files}}
-        self.assertTrue(self.verify())
-        self.assertEqual(self.verify(allow_legacy=True), [])
-        write(self.tree, 'source.manifest.json', b'{}')
-        self.assertTrue(self.verify(allow_legacy=True))
+        problems = self.verify()
+        self.assertTrue(any('v2 approval required' in p for p in problems))
+
+    def test_discover_returns_family_model_triples(self):
+        found = v.discover(Path(self.tmp.name) / 'prod')
+        self.assertEqual([(f, mo, p) for f, mo, p in found], [(FAMILY, MODEL, self.tree)])
 
 
 if __name__ == '__main__':

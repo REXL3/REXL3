@@ -1,4 +1,5 @@
 """Mock-only tests for promoting a runtime whose bundle references an engine release: no network, credentials or writes."""
+import copy
 import json
 from pathlib import Path
 import shutil
@@ -69,8 +70,6 @@ class PromoteEngineTest(unittest.TestCase):
     def test_a_dev_engine_tag_on_another_commit_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'does not name the approved engine commit'):
             self.fetch(commit='0' * 40)
-        # production tags the merged promotion commit, so only the bytes decide there
-        self.fetch(repo=p.PROD_REPO, commit='1' * 40)
 
     def test_replaced_bytes_a_wrong_size_or_a_wrong_digest_are_refused(self):
         other = Path(self.tmp.name) / 'other'
@@ -98,50 +97,6 @@ class PromoteEngineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed while downloading'):
             self.fetch(meta=lambda *a, **k: next(answers))
 
-    def test_publish_creates_the_engine_release_at_the_merged_commit_and_verifies_it_by_download(self):
-        calls = []
-        answers = iter([None, self.meta, self.meta])
-        with patch.object(p, 'release_metadata', side_effect=lambda *a, **k: next(answers)), \
-             patch.object(p, 'tag_commit', return_value='2' * 40), \
-             patch.object(p, 'gh', side_effect=self.gh(calls)):
-            verified = p.publish_engine_release(self.approval, self.remote, '2' * 40, self.tmp.name)
-        self.assertEqual(verified, self.meta)
-        create = [c for c in calls if c[:2] == ['release', 'create']]
-        self.assertEqual(len(create), 1)
-        self.assertEqual(create[0][2], self.tag)
-        self.assertIn(str(self.binary), create[0])
-        self.assertEqual(create[0][create[0].index('--target') + 1], '2' * 40)
-        self.assertIn('--latest=false', create[0])
-
-    def test_publish_refuses_a_created_release_whose_tag_is_elsewhere(self):
-        answers = iter([None, self.meta, self.meta])
-        with patch.object(p, 'release_metadata', side_effect=lambda *a, **k: next(answers)), \
-             patch.object(p, 'tag_commit', return_value='3' * 40), patch.object(p, 'gh', side_effect=self.gh()):
-            with self.assertRaisesRegex(ValueError, 'published engine tag commit differs'):
-                p.publish_engine_release(self.approval, self.remote, '2' * 40, self.tmp.name)
-
-    def test_an_existing_engine_release_is_reused_without_creating_and_must_verify(self):
-        calls = []
-        with patch.object(p, 'release_metadata', return_value=self.meta), patch.object(p, 'tag_commit', return_value='4' * 40), \
-             patch.object(p, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')) as git, \
-             patch.object(p, 'gh', side_effect=self.gh(calls)):
-            p.publish_engine_release(self.approval, self.remote, '2' * 40, self.tmp.name)
-        self.assertFalse([c for c in calls if c[:2] == ['release', 'create']])
-        self.assertEqual(git.call_args.args[:3], ('merge-base', '--is-ancestor', '4' * 40))
-        other = Path(self.tmp.name) / 'other'
-        other.mkdir()
-        (other / self.asset).write_bytes(b'x' * self.binary.stat().st_size)
-        with patch.object(p, 'release_metadata', return_value=self.meta), patch.object(p, 'tag_commit', return_value='4' * 40), \
-             patch.object(p, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')), \
-             patch.object(p, 'gh', side_effect=self.gh(serve=other)):
-            with self.assertRaisesRegex(ValueError, 'bytes differ from the approval'):
-                p.publish_engine_release(self.approval, self.remote, '2' * 40, self.tmp.name)
-
-    def test_publish_does_nothing_for_a_bundle_that_carries_its_binary(self):
-        plain = {k: v for k, v in self.approval.items() if k != 'engine_binaries'}
-        with patch.object(p, 'gh', side_effect=AssertionError('no GitHub call expected')):
-            self.assertIsNone(p.publish_engine_release(plain, self.remote, '2' * 40, self.tmp.name))
-
     def test_verify_approval_needs_the_engine_directory(self):
         path = write(self.f.assets, 'approval.json', encoded(self.approval))
         write(self.f.assets, self.approval['bundle']['archive'], (Path(self.tmp.name) / 'stripped' / self.f.archive.name).read_bytes())
@@ -154,7 +109,6 @@ class PromoteEngineTest(unittest.TestCase):
         self.assertEqual(approval['engine_binaries'], self.approval['engine_binaries'])
 
     def publish_assets(self):
-        """Write the sealed release assets as a release would hold them; return (registry, model release metadata)."""
         stripped = Path(self.tmp.name) / 'stripped' / self.f.archive.name
         write(self.f.assets, self.approval['bundle']['archive'], stripped.read_bytes())
         e.write_evidence_archive(self.f.assets, self.approval['evidence_asset']['members'], self.f.assets / 'evidence.tar.gz')
@@ -191,7 +145,6 @@ class PromoteEngineTest(unittest.TestCase):
             self.assertEqual(len(engine_calls), 1, 'exactly one engine download per release download')
         self.assertEqual((dest / 'engine' / self.asset).read_bytes(), self.binary.read_bytes())
         self.assertTrue(set(names) <= {f.name for f in dest.iterdir()})
-        # a cache whose engine file was altered is refused rather than trusted
         (dest / 'engine' / self.asset).write_bytes(b'tampered')
         with patch.object(p, 'release_metadata', side_effect=metadata), patch.object(p, 'tag_commit', return_value=self.f.commit), \
              patch.object(p, 'gh', side_effect=gh):

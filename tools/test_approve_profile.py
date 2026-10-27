@@ -94,6 +94,9 @@ class SyntheticSeal:
             self.profile['profiles']['tp2'] = tp_choice
         self.models = dict(schema='rexl3.model-lock.v1', packs={'target': {'repo': 'synthetic/model',
             'revision': 'a' * 40, 'fingerprint': 'sha256:' + 'b' * 64, 'files': {'config.json': {'sha256': sha(config), 'bytes': len(config)}}}})
+        self.models['packs']['draft'] = {'repo': 'synthetic/draft',
+            'revision': 'c' * 40, 'fingerprint': 'sha256:' + 'd' * 64,
+            'files': {'config.json': {'sha256': sha(config), 'bytes': len(config)}}}
         self.source = {'profile.json': encoded(self.profile), 'model.lock.json': encoded(self.models),
                        'launch.sh': (self.template / 'launch.sh').read_bytes()}
         if tp2:
@@ -210,6 +213,25 @@ class SyntheticSeal:
         registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {'synthetic-demo/v1': {
             'approval_sha256': sha(path.read_bytes()), 'source_commit': self.commit, 'source_tree': self.tree}}}
         return path, doc, registry
+
+    def published_fixture_model(self, family, model):
+        """A fixture in the prod family/model layout: registry key <family>/<model>/v<N> + runtime_id."""
+        path, doc, registry = self.published_fixture()
+        version = doc['version']
+        old = f'synthetic-demo/v{version}'
+        entry = registry['approvals'].pop(old)
+        entry['runtime_id'] = doc['runtime_id']
+        registry['approvals'][f'{family}/{model}/v{version}'] = entry
+        return path, doc, registry
+
+    def model_doc(self, family, model, **overrides):
+        """A valid MODEL.json doc for the synthetic fixture."""
+        from tools import model_layout as m
+        doc = dict(schema=m.MODEL_SCHEMA, family=family, model=model, display_name='Synthetic Demo',
+                   architectures=['SyntheticForConditionalGeneration'], engine_family='synthetic',
+                   runtime_id='synthetic-demo', pack={'format': 'exl3', 'bits': '4.00'})
+        doc.update(overrides)
+        return doc
 
 
 class ApprovalTest(unittest.TestCase):

@@ -30,21 +30,19 @@ room for the model (its size is on the pack sheet). `doctor` checks the platform
 disk or an idle GPU. The repository is private, so `gh` must be logged in with access to it.
 
 ```bash
-RELEASE=v0.1.0                          # the product release you want
-FAMILY=qwen3.8; MODEL=qwen3.8-27b       # and the model folder in it
-VER=v1                                  # or the contents of runtimes/$FAMILY/$MODEL/LATEST
+RUNTIME=<runtime-id>
+VER=v1                                  # or the contents of runtimes/$RUNTIME/LATEST
 
-gh release download "$RELEASE" -R REXL3/REXL3 -D /tmp/pack
-# The archive hash must equal bundle.sha256 in the model's approval (in this repository's
-# runtimes/$FAMILY/$MODEL/$VER/approval.json). Product releases carry one approval per model.
-APPROVAL=/tmp/pack/$(ls /tmp/pack/*-approval.json | head -1)
-ARCHIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['bundle']['archive'])" "$APPROVAL")
+gh release download "prod/$RUNTIME/$VER" -R REXL3/REXL3 -D /tmp/pack
+# The archive hash must equal bundle.sha256 in the release's approval.json (and in this repository's
+# runtimes/$RUNTIME/$VER/approval.json).
+ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/pack/approval.json'))['bundle']['archive'])")   # the name approval.json records
 sha256sum "/tmp/pack/$ARCHIVE"
-grep -A4 '"bundle"' "$APPROVAL"
+grep -A4 '"bundle"' /tmp/pack/approval.json
 
 mkdir -p ~/rexl3 && tar -xzf "/tmp/pack/$ARCHIVE" -C ~/rexl3
-ENGINE=/tmp/pack-engine                              # only when the approval has "engine_binaries" (see section 4.4a)
-python3 - "$APPROVAL" "$ENGINE" ~/rexl3 <<'PY'
+ENGINE=/tmp/pack-engine                              # only when approval.json has "engine_binaries" (see section 4.4a)
+python3 - /tmp/pack/approval.json "$ENGINE" ~/rexl3 <<'PY'
 import hashlib, json, os, shutil, subprocess, sys
 approval, engine_dir, root = sys.argv[1:4]
 for install, item in json.load(open(approval)).get('engine_binaries', {}).items():
@@ -99,15 +97,13 @@ Discord server; anything you want tracked belongs in an issue. Report a security
 ```
 docs/
   USER_GUIDE.md                  # the tester's guide, the same for every pack
-  packs/<model>.md               # one sheet per model, added after its promotion
+  packs/<runtime-id>.md          # one sheet per released runtime, added after its release
   packs/TEMPLATE.md, README.md   # how to write a sheet
   PROMOTION.md                   # how a pack gets here
-  RELEASING.md                   # product releases (maintainer ceremony)
 runtimes/
   templates/APPROVED.json        # runtime template versions and digests production accepts
-  templates/APPROVALS.json       # approval registry: <family>/<model>/v<N> + runtime_id (CODEOWNERS)
-  <family>/<model>/
-    MODEL.json                   # schema rexl3.prod-model.v1: reviewed model metadata
+  templates/APPROVALS.json       # approval registry: the protected anchor for each tree (CODEOWNERS)
+  <runtime-id>/
     LATEST                       # the promoted version, e.g. v1
     v<N>/                        # one sealed tree; never edited
       approval.json              # who approved what: commit, tree, template, archive hashes
@@ -115,30 +111,24 @@ runtimes/
       profile.json, model.lock.json, dependencies.lock.json, requirements-runtime.lock,
       KNOWN_ISSUES.md, LICENSE, NOTICE, THIRD_PARTY_NOTICES.md, README.md,
       launch.sh, scripts/, docs/, sbom/, TEMPLATE.json
-tools/                           # verifier, promoter, release tools and their tests (stdlib Python)
+tools/                           # verifier, promoter and their tests (stdlib Python)
 ```
 
 `bin/` and `release.lock.json` are not in git: they exist only in the release archive, because a
-hosted CPU runner cannot build or qualify the CUDA binaries. A release may leave `bin/` out of its
+hosted CPU runner cannot build or qualify the CUDA binaries. A newer release may leave `bin/` out of its
 archive and take the server binary from an engine release (`engine-v<version>-<commit>`) that its
 `approval.json` names by hash under `engine_binaries`; the quick start above places it.
 
 ## What CI checks
 
 `verify` runs on every pull request and every push to `main`. Its verifier and policy files come from
-the protected base revision, never from the pull request. It requires every tree under
-`runtimes/<family>/<model>/v<N>/` to match an entry in `runtimes/templates/APPROVALS.json` (exact
-file inventory, hashes, sizes and modes), and it refuses a template digest that is not in
-`APPROVED.json` and any tree in the old flat layout. `MODEL.json` must agree with the sealed
-approval's runtime id. Each tree also needs the authenticated dev release assets: `verify` downloads
-them with a repository secret before it checks the receipts, as described in
-[docs/PROMOTION.md](docs/PROMOTION.md). CI checks provenance and integrity; it does not run or
-qualify a model.
-
-`pr-rules` enforces title, branch and path scope; `model-completeness` runs
-`tools/check_model_branch.py` for model PRs; `local-validation` requires a maintainer's approved
-review with a `LOCAL-VALIDATION v1` block for the current head on model PRs; `governance-audit` runs
-daily, read-only.
+the protected base revision, never from the pull request. It requires every tree under `runtimes/` to
+match an entry in `runtimes/templates/APPROVALS.json` (exact file inventory, hashes, sizes and modes),
+and it refuses a template digest that is not in `APPROVED.json`. `v1` is checked as a legacy tree,
+against its pinned inventory. A tree from the newer receipt-based format also needs the authenticated
+dev release assets: `verify` downloads them with a repository secret before it checks the receipts, as
+described in [docs/PROMOTION.md](docs/PROMOTION.md). CI checks provenance and
+integrity; it does not run or qualify a model.
 
 ## Licence and source
 

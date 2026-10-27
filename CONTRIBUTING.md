@@ -11,14 +11,14 @@ This file is the single source of truth for humans and agents. Agents must also 
 | 1 | Never push to `main`: not directly, not by merge, not by force-push. Every change lands through a pull request. |
 | 2 | One purpose per PR. If you cannot state it in one sentence without "and", split the PR. |
 | 3 | Every PR title is `TYPE: Past-tense summary` (section 3). |
-| 4 | Every PR into main needs an approving review from the OTHER maintainer (`@am423`, `@vcruz305`), given by that human personally after their own review. The last push must be approved by someone other than the pusher. No single-maintainer self-merge exception; the only exception is an explicit owner decision recorded in `docs/incidents/` and reviewed retroactively. |
-| 5 | **Never hand-edit `runtimes/<family>/<model>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
-| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer or by an agent that maintainer has explicitly told to run it (`docs/PROMOTION.md`). |
+| 4 | Standard practice: the other maintainer (`@am423`, `@vcruz305`) reviews every PR before it merges. If only one maintainer is available, that maintainer may merge their own PR once `verify` is green and review threads are resolved. A PR from anyone else needs a maintainer's approval. An AI agent merges only a PR that the maintainer it works for has told it to merge. |
+| 5 | **Never hand-edit `runtimes/<id>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
+| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer or by an agent that maintainer has explicitly told to run it (`docs/PROMOTION.md`, section 9). |
 | 7 | Never weaken a test, a gate or the verifier in the same PR as the change it gates. That goes in its own TEST PR. |
 | 8 | Exit code 0 is not evidence. Show which checks ran and what they printed. |
 | 9 | No secrets, tokens, personal email addresses, internal project names or quantization-method internals in commits, PR text or docs. |
 | 10 | When unsure, stop and ask a maintainer. Do not guess policy. |
-| 11 | One logical commit per branch; its subject is the PR title. Base it on the latest `main` and merge current `origin/main` into your branch before opening the PR (no rebase or force-push). |
+| 11 | One logical commit per branch; its subject is the PR title. Base it on the latest `main`. |
 
 ## 2. PR types
 
@@ -53,20 +53,11 @@ Structural regex (the past-tense check is separate):
 Passes: `CI: Made production verify approval receipts from the protected base`, `DOCS: Rewrote the promotion guide for the two-phase path`, `FEAT: Promoted example-runtime-1.0 v7`.
 Fails: `fix: add check` (lowercase type), `FEAT: Adds a check` (not past tense), `DOCS: Updated x.` (trailing period), `DOC: Added x` (not a type).
 
-The title becomes the squash commit subject on `main`. A promotion pull request created by `tools/promote_runtime.py` is titled `FEAT: Promoted <model> v<N>`.
+The title becomes the squash commit subject on `main`. A promotion pull request created by `tools/promote_runtime.py` is titled `promote <id> v<N>`; retitle it to `FEAT: Promoted <id> v<N>` before review.
 
-## 4. Branch names and path scope
+## 4. Branch names
 
-| Branch | Purpose | May touch only |
-|---|---|---|
-| `model/<model>-approval` | register one dev approval (merges first) | `runtimes/templates/APPROVALS.json`, the pin line in `.github/workflows/verify.yml` |
-| `model/<model>` | bring one validated model into prod | `runtimes/<family>/<model>/**`, `docs/packs/<model>.md`, `changes/unreleased/<model>.md` |
-| `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
-| `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
-
-`<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`; `<model>` follows the naming rule in `docs/PROMOTION.md`.
-`model/*` branches are protected from deletion and force-push. A model PR also needs the
-`local-validation` check (`docs/PROMOTION.md`, section 2). Release PRs are opened by maintainers only.
+`<type lowercase>/<kebab-slug>`, for example `ci/prod-verifies-receipts-and-needs-review` or `docs/prod-contributor-rules-and-tester-readme`. `tools/promote_runtime.py` creates `promote/<id>-v<N>`; that prefix confers no privileges and nothing acts on it automatically.
 
 ## 5. Scope
 
@@ -77,9 +68,8 @@ There are no line or file-count limits. Scope is enforced by purpose: reviewers 
 You can propose changes to:
 
 - documentation (`README.md`, `docs/`, `SECURITY.md`, this file);
-- `tools/` (verifier, promoter, release tools, their tests);
-- `.github/` (workflows, CODEOWNERS, ruleset proposals, the PR template);
-- `changes/unreleased/<slug>.md` (release-notes fragments, required for `model/*` and for `engine/*` behavior changes).
+- `tools/` (verifier, promoter, their tests);
+- `.github/` (workflows, CODEOWNERS, ruleset proposals, the PR template).
 
 The following are **protected policy**. They decide what production accepts, they are read by CI from the base branch rather than from your pull request, and every change needs both maintainers' attention in review:
 
@@ -92,17 +82,17 @@ You cannot add or change a runtime tree yourself. If you believe a pack is wrong
 ## 7. Checks before you open a PR
 
 ```bash
-umask 022
+umask 022                     # file modes in the legacy inventory are 644/755
 git diff --check
 python3 -m unittest discover -s tools -p 'test_*.py'
 python3 -B -E -s tools/verify_runtime_tree.py --root . \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
   --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
-  --assets-dir "$(mktemp -d)"
+  --assets-dir "$(mktemp -d)" --allow-legacy
 ```
 
-Model PRs also run `python3 tools/check_model_branch.py --repo-root . --base <base-sha> --head <head-sha> [--rc-commit <dev-rc-sha>] [--local]` and paste the full output. The unit tests need only Python 3.12 and `git`. They use disposable Git repositories and synthetic fixtures; they make no network calls and run no GPU or model code. Paste the output into the PR description. Run them on the head commit you submit; a later push invalidates what you pasted.
+The unit tests need only Python 3.12 and `git`. They use disposable Git repositories and synthetic fixtures; they make no network calls and run no GPU or model code. Paste the output into the PR description. Run them on the head commit you submit; a later push invalidates what you pasted.
 
 CI runs the same checks as the required `verify` job from the protected base revision (`docs/PROMOTION.md`). A pull request that changes the workflow, the tools or the policy files is judged by the rules already on `main`, not by its own changes: its own tool, test, registry and pin changes are not run by its `verify` job (the first CI run of them is the push after the merge). For those pull requests your pasted local run on the head SHA is the only evidence before merge, and reviewers re-run it.
 
@@ -115,10 +105,10 @@ CI runs the same checks as the required `verify` job from the protected base rev
 Agents (AI coding assistants) must:
 
 1. Read this file and `AGENTS.md` in full before any change.
-2. Work on a `model/*` or `engine/*` branch and open a PR. Never push to `main`, force-push a shared branch, delete a `model/*` branch, bypass hooks or checks, or write to the GitHub API except to open or update your own PR. Never merge a PR, never approve one, never create/edit/publish/delete a release or tag, and never change repository settings, rulesets, environments, secrets, collaborators or webhooks. Never work with admin credentials.
+2. Work on a `<type>/<kebab-slug>` branch and open a PR. Never push to `main`, force-push a shared branch, bypass hooks, or write to the GitHub API except to open or update your own PR. Merge a PR only when the maintainer you work for has told you to merge that PR.
 3. Report evidence, not ticks: the command, the head SHA it ran on and its output.
 4. Answer in the PR description: Can the purpose be stated in one sentence without "and"? Does the diff contain anything the title does not describe? Did the checks run on this head SHA? Did any test or threshold change, and is that in its own TEST PR?
-5. Never touch `runtimes/*/*/v*/` (sealed trees) or the registry/template digests except as section 9.1 allows. For a model PR run `tools/check_model_branch.py` and paste its full output.
+5. Never touch `runtimes/*/v*/`. Never create or edit a registry entry, a template digest or an approval, and never run `tools/promote_runtime.py`, unless the maintainer you work for has explicitly told you to do that specific step (section 9.1). Without that instruction these are maintainer actions.
 
 Stop and ask a maintainer when the intent is unclear, requirements conflict, the rules do not cover the situation, or you would need to weaken a test or gate.
 
@@ -135,11 +125,10 @@ The approvers are always the two maintainers, `@am423` and `@vcruz305`. Either m
 ## 10. Review and merge
 
 - `.github/CODEOWNERS` is `* @am423 @vcruz305`. Both are requested on every PR.
-- Every PR needs an approving review by the OTHER maintainer (code owner), given by that human personally. The last push must be approved by someone other than the pusher. Required checks (`verify`, `pr-rules`, `model-completeness`, `local-validation`) must be green. Stale approvals are dismissed on push.
+- Standard practice is that the other maintainer reviews the PR before it merges, and that review is expected for a promotion PR that adds a runtime version. It is acceptable for a maintainer to merge their own PR when the other maintainer is not available, once the required check (`verify`) is green and review threads are resolved; GitHub does not enforce a review so that either of the two maintainers can always merge. A PR from a non-maintainer needs a maintainer's approval. Stale approvals are dismissed on push.
 - Squash-merge only, so the PR title is the commit subject on `main`. No force-push to `main`; linear history.
-- Nothing merges a pull request automatically. No `merge` job and no `gh pr merge --auto` anywhere.
-- `.github/rulesets/` holds the target ruleset copies the maintainers apply on GitHub. Contributors never call the settings API. `model-branches` protects `model/*` from deletion and force-push; `protected-tags` protects all tags; `main-guard` requires review and the four checks.
-- Releases follow [docs/RELEASING.md](docs/RELEASING.md), run by a maintainer personally.
+- Nothing merges a pull request automatically. The old `merge` job and the `gh pr merge --auto` step are gone.
+- `.github/rulesets/` holds ruleset proposals for the maintainers to apply on GitHub. Contributors never call the settings API.
 
 ## 11. Licences, attribution, secrets
 

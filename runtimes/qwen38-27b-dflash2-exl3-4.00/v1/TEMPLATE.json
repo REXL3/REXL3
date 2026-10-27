@@ -1,0 +1,9 @@
+{
+  "schema": "rexl3.template-approval.v1",
+  "version": "v1",
+  "digest": "sha256:66b8b37315ab9d378fe9108b8f4580f005bd33ab27eab147a0cbafbc8165ec86",
+  "approved_commit": "e76ed441bcfc4b100cd6bf528bffa6e4f82ed23b",
+  "approved_at": "2026-10-26",
+  "approved_by": "am423",
+  "note": "Digest set by am423 on 2026-10-26 by explicit instruction to an agent (production CONTRIBUTING 9.1), naming sha256:66b8b373...ec86: the template with the minimum-memory platform field removed. approved_commit is the main commit that introduced this tree (#116). The digest is the content digest of runtimes/template-v1 (tools/runtime_template_digest.py); any later edit to the template changes it and needs a new approval."
+}

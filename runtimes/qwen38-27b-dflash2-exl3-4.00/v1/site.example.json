@@ -1,0 +1,25 @@
+{
+  "nodes": {
+    "leader": {
+      "address": "192.0.2.2",
+      "fabric_address": "192.0.2.2",
+      "user": "tester",
+      "model_dir": "/models/dsv41",
+      "binary_dir": "/opt/rexl3/bin"
+    },
+    "follower": {
+      "address": "192.0.2.3",
+      "fabric_address": "192.0.2.3",
+      "user": "tester",
+      "model_dir": "/models/dsv41",
+      "binary_dir": "/opt/rexl3/bin"
+    }
+  },
+  "http_port": 8940,
+  "tp_port": 29600,
+  "fabric_interface": "REPLACE_WITH_FABRIC_INTERFACE",
+  "hca": [
+    "REPLACE_WITH_HCA_RAIL_0:1",
+    "REPLACE_WITH_HCA_RAIL_1:1"
+  ]
+}

@@ -1,9 +1,9 @@
 # Promotion: dev approval to production
 
-Production (`REXL3/REXL3`) holds sealed runtime trees that a dev-side approval authorised. Nothing is
-copied by hand, no workflow merges a pull request, and a maintainer reviews every promotion. The
-authoritative description of the receipt format and the sealer is `docs/PROMOTION.md` in
-`REXL3/REXL3-dev`; this file is the production side of the same contract.
+Production (`REXL3/REXL3`) holds sealed runtime trees under `runtimes/<family>/<model>/` that a
+dev-side approval authorised. Nothing is copied by hand, no workflow merges a pull request, and a
+maintainer reviews every promotion. The authoritative description of the receipt format and the sealer
+is `docs/PROMOTION.md` in `REXL3/REXL3-dev`; this file is the production side of the same contract.
 
 ## Trust boundary
 
@@ -11,214 +11,128 @@ A hash proves that bytes did not change. It does not prove that a benchmark ran.
 only if all of these hold:
 
 1. The approval is `rexl3.profile-approval.v2` and its exact bytes are listed in
-   `runtimes/templates/APPROVALS.json` (`approvals["<runtime-id>/v<N>"]`: `approval_sha256`,
-   `source_commit`, `source_tree`). A maintainer reviews that entry; it is the independent anchor.
+   `runtimes/templates/APPROVALS.json` under `approvals["<family>/<model>/v<N>"]`: `approval_sha256`,
+   `source_commit`, `source_tree`, `runtime_id`. A maintainer reviews that entry; it is the independent
+   anchor.
 2. The registry file matches the hash pinned in `.github/workflows/verify.yml`
    (`TRUSTED_APPROVALS_SHA256`), so changing the registry also changes a second reviewed file.
-3. The verifier, the registry and the template allow-list (`runtimes/templates/APPROVED.json`) are read
-   from the protected base revision of `main`, never from the pull request. A pull request cannot
+3. The verifier, the registry and the template allow-list (`runtimes/templates/APPROVED.json`) are
+   read from the protected base revision of `main`, never from the pull request. A pull request cannot
    change the rules it is judged by. `.github/CODEOWNERS` makes `@am423` and `@vcruz305` owners of
    `.github/`, `tools/`, `runtimes/` and `docs/`.
-4. The authenticated dev release assets (below) match the approval, and their receipts pass the strict
-   gate rules: nine gates (`doctor`, `lifecycle`, `capability`, `vision`, `context`, `exactness`,
+4. The authenticated dev release assets match the approval, and their receipts pass the strict gate
+   rules: nine gates (`doctor`, `lifecycle`, `capability`, `vision`, `context`, `exactness`,
    `prefix_cache`, `performance`, `quality`), each with `total > 0`, `passed == total`, no failure and
    no skip. `FAIL`, `NOT_RUN`, zero tests and strings that look like a pass are refused.
 5. The tree equals the wrapper projection plus the original `approval.json`, byte for byte: no missing,
    extra, edited, linked or mode-changed file.
 
-No paid service or signing key is part of this. One secret, `DEV_ASSETS_TOKEN`, lets `verify` read the private dev release (see "Verification in production"). There is no auto-merge anywhere.
+One secret, `DEV_ASSETS_TOKEN`, lets `verify` read the private dev release (see "What CI checks").
+There is no auto-merge anywhere.
 
-## Release assets
+## Definition of done for a model in dev
 
-A v2 approval names four archives besides `approval.json`. All five are attached to the dev release
-`approve-<runtime-id>-<N>` and again to the production release `prod/<runtime-id>/v<N>`.
+Dev a model may be proposed for production, the dev repository must have, for the exact version to be
+released:
 
-| Asset | What it is |
-| --- | --- |
-| `approval.json` | The approval document. The production tree holds the same bytes. |
-| `bundle` | The runnable bundle: wrapper, configuration and the qualified native binaries (`bin/`, `release.lock.json`). This is what a tester downloads. |
-| `source_asset` | The **runtime wrapper projection**: exactly the bundle minus `bin/` and `release.lock.json`, including `source.manifest.json`. The field name is historical. This is what lives in `runtimes/<id>/v<N>/`. It is not the engine's corresponding source. |
-| `engine_source_asset` | The **native engine corresponding source**: the original Git blobs and build inputs for the same commit and tree the binaries were built from. A missing engine source is a hard refusal. |
-| `evidence_asset` | `evidence.tar.gz`: the qualification receipts, launcher observations and the raw evidence they reference. |
+- a **final runtime entry** (the release-candidate runtime, not a work-in-progress one);
+- the **capability contract proven**: speculative decoding on with counters above 0; prefix cache on
+  and proven at the real contract (the real context and slots); vision on and tested, or off only with
+  a proven does-not-fit recorded in the tree;
+- **exactness** passed;
+- **long context** passed;
+- **GB10 receipts on the RC commit**: doctor, smoke and a gate subset run on a GB10 host, attached to
+  the release-candidate commit;
+- a `KNOWN_ISSUES` file present in the tree;
+- the **dev approval sealed from the RC commit** (the sealed approval names the RC commit).
 
-The bundle's `bin/` is not in git because a hosted CPU runner cannot build or qualify CUDA binaries.
+Dev tracks a model's qualification with labels `model:MODEL` and `engine`, and scope files under
+`releases/v0.1.0/models` (added by dev tooling; plain text).
 
-**Binary by reference.** A bundle may leave `bin/` out of its archive. Its approval then carries `engine_binaries`:
-for each install path (`bin/rexl3-serve`, `bin/rexl3-cluster`) the engine release tag
-(`engine-v<engine version>-<first eight hex of the engine commit>`), the asset name, and its SHA-256, size and mode
-`0755`. `release.lock.json` is unchanged and still lists the binary, so the qualification receipts bind the same
-identities. The engine binary is not one of the release's own assets: it comes from the engine release of the same
-name in the development repository, and `promote_runtime.py` carries it to the same-named engine release in this
-repository (created once at the merged promotion commit, reused by later runtimes on the same engine). Every
-download verifies the asset against the approval byte for byte; the dev engine tag must name the approved engine
-commit. Testers place the file with the step in the user guide (section 4.4a).
+## The two-PR flow
 
-## Steps
+1. **`model/<model>-approval`** — register the dev approval: add the entry to
+   `runtimes/templates/APPROVALS.json` and update the `TRUSTED_APPROVALS_SHA256` pin in
+   `.github/workflows/verify.yml` in the same commit (tool tests enforce the two agree). This merges
+   first, because CI trusts only the registry on main.
+2. **`model/<model>`** — bring the validated model into prod: `runtimes/<family>/<model>/**`
+   (`MODEL.json`, `LATEST`, `v<N>/`), `docs/packs/<model>.md`, `changes/unreleased/<model>.md`. This
+   PR needs the `local-validation` check (below).
 
-All commands run on a maintainer's machine with an authenticated `gh`, never in CI. They need a clean
-checkout of this repository at the commit you pass as `--target-commit`.
+There are no separate LATEST or pack-sheet PRs, no separate publish step, and no `prod/<runtime>/v<N>`
+release. `LATEST` is part of the model PR's tree addition.
 
-### 0. Register the approval
+## promote_runtime
 
-Open a pull request that adds the `approvals["<runtime-id>/v<N>"]` entry to
-`runtimes/templates/APPROVALS.json` and updates `TRUSTED_APPROVALS_SHA256` in
-`.github/workflows/verify.yml` to the new file's sha256. Add the template digest to
-`runtimes/templates/APPROVED.json` in the same pull request if the template version is new. A second
-maintainer reviews it and merges it. This must be merged before step 1, because CI reads the registry
-from the base branch.
+`tools/promote_runtime.py` produces the sealed tree at `runtimes/<family>/<model>/v<N>` from the dev
+approval assets (dev release `approve-<runtime_id>-<N>`). It runs on a maintainer's machine with an
+authenticated `gh`, never in CI. The tool derives dev release tags from `runtime_id` — read from
+`MODEL.json` and the sealed approval, which must agree — never from folder names. A maintainer runs it;
+an agent runs it only on an explicit, quoted maintainer instruction (CONTRIBUTING.md section 7).
 
-### 1. Prepare the pull request (no `LATEST`)
+## The model-branch completeness checker
 
-```bash
-git fetch origin && git switch --detach origin/main      # clean checkout; HEAD is the base commit
-python3 tools/promote_runtime.py \
-  --runtime-id <id> --approve-tag approve-<id>-<N> --version <N> \
-  --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
-  --assets-dir <durable-dev-assets> --download \
-  --approved runtimes/templates/APPROVED.json \
-  --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)"
+`tools/check_model_branch.py` is the completeness gate for `model/<model>` PRs:
+
+```
+python3 tools/check_model_branch.py --repo-root PATH --base REF --head REF [--rc-commit SHA] [--local]
 ```
 
-The hash comes from the pin in the workflow, a second reviewed file, not from the registry it checks.
+It prints one line per check (`PASS`/`FAIL name: reason`), exit 0 all pass, 1 any fail, 2 usage error.
+Checks:
 
-`--download` fetches the dev release with your `gh` login, validates release and asset ids, sizes, the
-tag commit, every byte and all evidence, and caches the verified files. The tool then creates branch
-`promote/<id>-v<N>`, extracts the tree after checking every tar header (absolute, `..`, duplicate,
-link, device, sparse and oversized members are refused before any write), verifies it, commits it and
-opens a pull request. `LATEST` is not written. `--dry-run` verifies and prints what it would do
-without changing the tree.
+1. Branch/model: the changed `runtimes/<family>/<model>/` folder is exactly one model and matches the
+   branch.
+2. Scope: changed paths are within CONTRIBUTING.md section 3 for `model/<model>`.
+3. `MODEL.json` valid per CONTRIBUTING.md section 2 and consistent with its folder.
+4. `LATEST` names an existing `v<N>`.
+5. The tree passes `tools/verify_runtime_tree.py` against the registry on the base.
+6. If `--rc-commit` is given, the sealed approval's source commit equals it.
+7. Capability contract from the sealed profile: speculative decoding on, prefix cache on, vision on
+   unless the tree records a does-not-fit justification for vision.
+8. `docs/packs/<model>.md` and `changes/unreleased/<model>.md` exist and are non-empty.
 
-Before asking for review, give the pull request a title in the form `FEAT: Promoted <id> v<N>` (the
-tool's own title does not follow the rule in `CONTRIBUTING.md`; the title becomes the squash commit
-subject) and paste the tool's `VERIFIED_PR` line into the description. Check the branch's commit
-author; it must be a noreply identity.
+`--local` additionally downloads and digest-checks the dev assets via `tools/fetch_dev_assets.py`.
 
-### 2. Review and merge
+## The reviewer's local procedure (LOCAL-VALIDATION v1)
 
-The other maintainer reviews the diff, the registry entry from step 0 and the tool output, and merges
-with **squash**; that is standard practice because a promotion changes what testers install. If only
-one maintainer is available, that maintainer may merge the promotion they prepared once `verify` is green. Nothing merges the pull request automatically, and the `promote/`
-branch prefix grants no privilege.
+For a `model/<model>` PR, a maintainer other than the author reviews locally before approving:
 
-### 3. Publish the release
+1. Fetch the branch: `gh pr checkout <N>` (or fetch the head SHA).
+2. Run the completeness checker with `--local` on the head:
+   `python3 tools/check_model_branch.py --repo-root . --base main --head <HEAD> --local`.
+3. Verify the assets: the downloaded dev assets match the approval byte for byte.
+4. On a GB10 host, run the tree's `launch.sh doctor` and `launch.sh smoke`, plus a gate subset
+   (capability, context, prefix_cache at minimum).
+5. Post the `LOCAL-VALIDATION v1` block from CONTRIBUTING.md section 4 as an APPROVED review on the
+   current head.
 
-```bash
-git fetch origin && git switch --detach <merged-commit-sha>
-python3 tools/promote_runtime.py \
-  --runtime-id <id> --approve-tag approve-<id>-<N> --version <N> \
-  --publish-only --target-commit <merged-commit-sha> --prod-checkout "$PWD" \
-  --assets-dir <durable-dev-assets> \
-  --approved runtimes/templates/APPROVED.json \
-  --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)"
-```
+## What CI checks
 
-`--publish-only` requires a clean checkout of exactly the merged commit, reachable from `origin/main`,
-whose tree and approval bytes equal the verified assets. It creates `prod/<id>/v<N>` with
-`--target <merged-commit-sha>`, `--latest=false` and the five assets, downloads them back and compares
-them with the approval (for an approval with `engine_binaries` it first creates, or verifies, the engine release
-`engine-v<version>-<commit>` in this repository with exactly the approved assets), and writes `publication-<id>-v<N>.json` into the assets directory. That file
-pins the release id, asset ids, sizes and measured hashes. A retry must match it; a changed release,
-asset or tag fails closed, and a fully verified retry is a no-op. An existing release is downloaded and
-verified, never accepted blindly.
+Required on every PR to main (each ALWAYS reports; job-level conditions that succeed as a no-op, never
+workflow-level path or branch filters):
 
-### 4. Move `LATEST`
+- `verify` — the tree verifier plus unit tests, from the protected base revision, with the
+  `DEV_ASSETS_TOKEN` download step for v2 trees.
+- `pr-rules` — title, branch name, path scope per branch type, `changes/unreleased/` fragment presence.
+- `model-completeness` — runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success
+  otherwise.
+- `local-validation` — the APPROVED review with the `LOCAL-VALIDATION v1` block for model PRs; no-op
+  success for non-model PRs and `model/*-approval` PRs.
 
-The tools never write `LATEST`. After step 3 succeeds, open a separate pull request that changes
-`runtimes/<id>/LATEST` to `v<N>`. `LATEST` therefore never points at a tree whose release is missing.
+## Withdrawal and superseding
 
-### 5. Publish the pack sheet
-
-Testers read a pack's sheet before they run it, so a released version is not finished until its sheet is
-current. After step 4, open a `DOCS:` pull request that adds or updates `docs/packs/<runtime-id>.md` from
-the sealed files (copy `docs/packs/TEMPLATE.md` for a new runtime; its rules are in `docs/packs/README.md`)
-and the runtime's row in the README's released-packs table. The pull request names the release tag it was
-checked against. Docs pull requests never touch `runtimes/`.
-
-## Verification in CI
-
-`.github/workflows/verify.yml` (job `verify`) runs on `pull_request_target` and on pushes to `main`:
-
-- It checks out the protected base into `base/` and the pull request head into `candidate/` as data
-  only, runs `base/tools/verify_runtime_tree.py` over `candidate/`, then runs the unit tests from
-  `base/`. The workflow token is read-only and actions are pinned by commit SHA. The one secret,
-  `DEV_ASSETS_TOKEN`, is passed only to the step that downloads dev release assets; the verification and
-  test steps have none. There is no `merge` job.
-- A tree whose approval is `rexl3.profile-approval.v1` passes only in `--allow-legacy` mode and only
-  if the registry's `legacy` entry matches its approval hash, source commit and tree, and complete
-  file inventory.
-- A v2 tree needs its authenticated assets in `<assets>/<id>/v<N>/`. They are in the private
-  `REXL3/REXL3-dev` release. The step before verification runs `base/tools/fetch_dev_assets.py` with
-  `DEV_ASSETS_TOKEN` (a fine-grained token that reads that one repository's contents): it takes the id
-  and version from the directory names, derives the tag `approve-<id>-<N>`, and downloads through
-  `promote_runtime.download_release`, which refuses any archive the pinned registry does not name. A
-  candidate cannot choose its own tag. A v1 tree needs no download.
-- Because the verifier, tests and policy come from `base/`, a pull request's own changes to `tools/`,
-  the tests, the registry or the pin are **not** exercised by its `verify` run; the first CI run of
-  them is the push to `main` after the merge. For those pull requests the author's pasted local run
-  on the head commit (below) is the only evidence before merge, and reviewers should run it too.
-- `tools/test_verify_mutations.py` proves the verifier rejects a FAIL gate, a SKIP gate, zero tests, a
-  wrong template digest, a runtime file edited together with its manifest entry, traversal and link
-  tars, a self-edited approval and a v1 tree without `--allow-legacy`, and that the committed v1 tree
-  still passes in legacy mode.
-
-Run the same checks locally (use `umask 022`, which is what makes the file modes match):
-
-```bash
-umask 022
-python3 -m unittest discover -s tools -p 'test_*.py'
-python3 -B -E -s tools/verify_runtime_tree.py --root . \
-  --approved runtimes/templates/APPROVED.json \
-  --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sha256sum runtimes/templates/APPROVALS.json | cut -d' ' -f1)" \
-  --assets-dir "$(mktemp -d)" --allow-legacy
-```
+- Releases are immutable and a bad release is superseded by a patch release (`docs/RELEASING.md`);
+  deletion needs both maintainers.
+- A bad model tree is superseded by a corrected promoted version from dev. Removing a tree or its
+  registry entry needs both maintainers; the registry entry and the `TRUSTED_APPROVALS_SHA256` pin
+  change in the same commit.
 
 ## Legacy v1
 
-Production once held `runtimes/dsv41-flash-1017-sage-1.62/v1`, sealed before the receipt format (approval schema
-`rexl3.profile-approval.v1`: gates recorded as strings, no receipts, no engine source asset). It was removed from
-production by maintainer decision, with its release and tag, and returns only as a new promoted version when its
-runtime is finished. The verifier keeps its legacy path (`--allow-legacy`) and the registry keeps an empty `legacy`
-section, so a tree of that schema is refused unless a maintainer re-anchors it. The v1 sealer and the `promote.yml`
-workflow that produced it no longer exist, and v1 is never accepted by the promoter.
-
-## Tags
-
-| Tag | Meaning |
-| --- | --- |
-| `approve-<runtime-id>-<N>` | dev release; `<N>` and the production `v<N>` are the same integer |
-| `prod/<runtime-id>/v<N>` | production release; same archive bytes as the dev release |
-| `prod/<runtime-id>/v<N>-withdrawn` | marker added when a version is withdrawn |
-
-`.github/rulesets/protected-tags.json` proposes forbidding update and deletion of `prod/*` tags.
-
-## Withdrawing a bad pack
-
-History is append-only. Revert the promotion commit through a pull request, add the `-withdrawn` tag,
-and point `runtimes/<id>/LATEST` at the previous version in a pull request. Never force-push `main`.
-Then update the pack sheet and the README table in a `DOCS:` pull request so testers are not pointed at
-the withdrawn version.
-
-## Open items
-
-- **The asset download has not yet met a real v2 release.** `fetch_dev_assets.py` and the secret are in
-  place and tested with mocks only. The first v2 promotion pull request is the first real run. Because
-  `verify` downloads the assets of every v2 tree on every run, two things follow: a run is as slow as the
-  download, and once a v2 tree is on `main`, an expired or revoked `DEV_ASSETS_TOKEN` turns `verify` red
-  for every later pull request. The token is created with a 90-day expiry; rotate it before day 80 (create
-  a new token, update the secret, delete the old token). If `verify` is red because of the token and a fix
-  must land, the owner can temporarily edit the `main-guard` ruleset, merge, and restore it; write the
-  reason in the pull request.
-- **Corresponding source for v1.** The v1 release has no `engine_source_asset`. Its binaries were built
-  from `source_commit` in `approval.json` in the private dev repository. Decide how that source is
-  provided.
-- **Branch protection.** `.github/rulesets/main-guard.json` is a proposal (one code-owner approval,
-  squash only, `verify` required). The previous workflow noted that this repository's plan could not
-  use rulesets; if it still cannot, the review and the manual merge are the only control.
-- **`LATEST` and stray files.** The verifier checks `runtimes/<id>/v<N>/` trees. It does not verify
-  `LATEST` or files placed elsewhere under `runtimes/<id>/`; reviewers must.
-- **Tool conventions.** `tools/promote_runtime.py` is copied unchanged from dev. It names the PR
-  `promote <id> v<N>` and commits as `r0b0tlab@users.noreply.github.com`; both are corrected by hand
-  as described in step 1 until the tool is changed in dev.
+Production once held `runtimes/dsv41-flash-1017-sage-1.62/v1`, sealed before the receipt format
+(approval schema `rexl3.profile-approval.v1`: gates recorded as strings, no receipts, no engine source
+asset). It was removed from production by maintainer decision, with its release and tag, and returns
+only as a new promoted version when its runtime is finished. The verifier keeps its legacy path
+(`--allow-legacy`) and the registry keeps an empty `legacy` section, so a tree of that schema is
+refused unless a maintainer re-anchors it.

@@ -1,8 +1,14 @@
 # Contributing to REXL3 production
 
-This repository (`REXL3/REXL3`) is the **production** side of REXL3, published under AGPL-3.0-only. Its content is sealed, data-only runtime trees under `runtimes/`, the policy that decides which trees are accepted, and the small stdlib-Python tools that verify and promote them. There is no engine source here. The engine, the runtime template, model profiles and every qualification gate live in the dev repository, `REXL3/REXL3-dev`; follow that repository's `CONTRIBUTING.md` for engine and profile work.
+This repository (`REXL3/REXL3`) is the **production** side of REXL3, published under AGPL-3.0-only.
+Its content is sealed, data-only runtime trees under `runtimes/`, the policy that decides which trees
+are accepted, and the small stdlib-Python tools that verify and promote them. There is no engine source
+here. The engine, the runtime template, model profiles and every qualification gate live in the dev
+repository, `REXL3/REXL3-dev`; follow that repository's `CONTRIBUTING.md` for engine and profile work.
 
-This file is the single source of truth for humans and agents. Agents must also read `AGENTS.md`; where they differ, this file wins. The rules mirror the dev repository's where they apply.
+This file is the single source of truth for humans and agents. Agents must also read `AGENTS.md`;
+where they differ, this file wins, except that nothing here relaxes the agent "Never" list in
+section 7.
 
 ## 1. Golden rules
 
@@ -10,76 +16,153 @@ This file is the single source of truth for humans and agents. Agents must also 
 |---|------|
 | 1 | Never push to `main`: not directly, not by merge, not by force-push. Every change lands through a pull request. |
 | 2 | One purpose per PR. If you cannot state it in one sentence without "and", split the PR. |
-| 3 | Every PR title is `TYPE: Past-tense summary` (section 3). |
-| 4 | Standard practice: the other maintainer (`@am423`, `@vcruz305`) reviews every PR before it merges. If only one maintainer is available, that maintainer may merge their own PR once `verify` is green and review threads are resolved. A PR from anyone else needs a maintainer's approval. An AI agent merges only a PR that the maintainer it works for has told it to merge. |
-| 5 | **Never hand-edit `runtimes/<id>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
-| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`, run by a maintainer or by an agent that maintainer has explicitly told to run it (`docs/PROMOTION.md`, section 9). |
+| 3 | Every PR title is `TYPE: Past-tense summary` (section 5). |
+| 4 | Every PR into `main` needs an approving review from the **other** maintainer, given personally after their own review (section 4). There is no single-maintainer self-merge exception. |
+| 5 | **Never hand-edit `runtimes/<family>/<model>/v<N>/`.** A sealed tree changes only by a new promoted version, never in place. |
+| 6 | Models enter production only through the dev repository's approval and `tools/promote_runtime.py`. An agent prepares a model branch, registry entry or promotion only on an explicit, quoted maintainer instruction (section 7). |
 | 7 | Never weaken a test, a gate or the verifier in the same PR as the change it gates. That goes in its own TEST PR. |
 | 8 | Exit code 0 is not evidence. Show which checks ran and what they printed. |
 | 9 | No secrets, tokens, personal email addresses, internal project names or quantization-method internals in commits, PR text or docs. |
 | 10 | When unsure, stop and ask a maintainer. Do not guess policy. |
 | 11 | One logical commit per branch; its subject is the PR title. Base it on the latest `main`. |
 
-## 2. PR types
+## 2. Runtime layout and naming
 
-Exactly seven. The TYPE is the uppercase prefix of the title.
+Runtimes live under `runtimes/<family>/<model>/`:
+
+```
+runtimes/
+  <family>/
+    <model>/
+      MODEL.json      schema "rexl3.prod-model.v1" (reviewed metadata; see below)
+      LATEST          one line: v<N>
+      v<N>/           sealed tree produced by tools/promote_runtime.py (never edited by hand)
+  templates/          APPROVED.json (template allow-list), APPROVALS.json (approval registry)
+```
+
+Naming:
+
+- Lowercase, regex `^[a-z0-9]+([.-][a-z0-9]+)*$` for both `<family>` and `<model>`.
+- `<family>` is the model family as users know it. `<model>` is the model name **without**
+  quantization format, bit width, draft/speculation method or other pack details. Those live in
+  `MODEL.json` and in the sealed approval.
+- The exact architecture is recorded in `MODEL.json` because one family can span architectures in the
+  engine: Qwen3.8-27B is `qwen3_5` (`Qwen3_5ForConditionalGeneration`, dev family module `qwen`),
+  while Qwen3.8-Flash-Next is `qwen4_exp` (`Qwen4ExpForConditionalGeneration`, dev module
+  `qwen_flash_next`).
+- **One pack per model per release.** A second pack for the same model needs both maintainers'
+  agreement and a descriptive variant suffix agreed by both (never a bit width). For example, dev
+  currently has two GLM-5.3-Flash packs (`glm53-flash-2.25bpw-sm121` and
+  `redsnow-5.3-flash-sage-2.49`); one will be chosen before first release.
+
+First-release map (priority order):
+
+| Priority | Model | prod folder | dev runtime id(s) | dev engine module |
+|---|---|---|---|---|
+| 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen` (qwen3_5) |
+| 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | none yet | `qwen_flash_next` (qwen4_exp) |
+| 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.62` | `deepseek_v41` |
+| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121`, `redsnow-5.3-flash-sage-2.49` | `glm` |
+| 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | none yet | `nemotron_h_omni` |
+
+`MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
+
+- `schema`, `family`, `model` (must equal the folder names), `display_name` (e.g. "Qwen3.8-27B"),
+- `architectures` (list of HF architecture class names), `engine_family` (dev module name),
+- `runtime_id` (dev runtime id used for dev release tags `approve-<runtime_id>-<n>`),
+- `pack` (object; required key `format`, e.g. "exl3"; other descriptive keys such as `bits`,
+  `draft`, `target_repo`, `draft_repo` are allowed).
+
+Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
+keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The
+`TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml` changes in the same commit as the
+registry. Tools derive dev release tags from `runtime_id` (MODEL.json and the sealed approval must
+agree), never from folder names.
+
+## 3. Branches and PR scope
+
+| Branch | Purpose | May touch only |
+|---|---|---|
+| `model/<model>-approval` | register one dev approval (merges first; verify trusts only the registry on main) | `runtimes/templates/APPROVALS.json`, the pin line in `.github/workflows/verify.yml` |
+| `model/<model>` | bring one validated model into prod | `runtimes/<family>/<model>/**`, `docs/packs/<model>.md`, `changes/unreleased/<model>.md` |
+| `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
+| `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
+
+- `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
+- Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
+  characters, no trailing period.
+- Squash merge only; the title becomes main's commit subject.
+- `model/*` branches are protected from deletion and force-push (they are the record of what a model
+  brought in).
+
+## 4. Review and merge
+
+- Every PR into prod main needs an approving review from the OTHER maintainer (code owner; CODEOWNERS
+  `* @am423 @vcruz305`), given by that human personally after their own review. No agent approvals in
+  prod. The last push must be approved by someone other than the pusher. Required checks green. Squash
+  merge.
+- No single-maintainer self-merge exception. The only exception is an explicit owner decision recorded
+  in `docs/incidents/` and reviewed retroactively (for example `docs/incidents/2026-10-26-unreviewed-release.md`).
+- Model PRs (`model/<model>`) additionally need the `local-validation` check: an APPROVED review by a
+  maintainer other than the PR author whose body contains a `LOCAL-VALIDATION v1` block for the current
+  head.
+
+`LOCAL-VALIDATION v1` block (plain text lines in the review body; keys exact, all required):
+
+```
+LOCAL-VALIDATION v1
+pr: 123
+head: <40-hex PR head sha>
+model: <family>/<model>
+host: <hostname and GPU>
+check_model_branch: PASS
+assets: PASS
+doctor: PASS
+smoke: PASS
+gates: <free text naming the gates run on that host>
+```
+
+Rules: `head` equals the PR head at evaluation time; `model` equals the PR's model folder; the four
+PASS fields are exactly `PASS`; the reviewer is a maintainer and not the PR author.
+
+## 5. PR types, titles and required checks
+
+PR types are exactly seven; the TYPE is the uppercase prefix of the title:
 
 | Type | Meaning | Typical paths here |
 |---|---|---|
 | FIX | Fixed a bug | `tools/**`, `.github/**` |
-| FEAT | Added a feature, or promoted a runtime version | `tools/**`; a promotion adds `runtimes/<id>/v<N>/` |
+| FEAT | Added a feature, or promoted a model version | `tools/**`; a model PR adds `runtimes/<family>/<model>/v<N>/` |
 | BUILD | Changed the build or packaging process | `.gitignore`, `tools/requirements*.txt` |
 | CI | Changed CI or repository policy | `.github/**`, `tools/**` that the workflow runs, `runtimes/templates/**` |
 | TEST | Added or fixed tests or checks | `tools/test_*.py` |
 | BUMP | Bumped a pinned version (an action SHA, a Python requirement) | `.github/workflows/**`, `tools/requirements*.txt` |
 | DOCS | Documentation only | `**/*.md` outside `runtimes/`, `docs/**` |
 
-DOCS, TEST and BUMP pull requests must not touch `runtimes/`. A pull request that changes `runtimes/<id>/v<N>/` other than by adding a new version through `tools/promote_runtime.py` is rejected, whatever its type. A sealed tree also contains `.md` files; they are not documentation you may fix.
+Title rule: `TYPE: Summary`, TYPE uppercase and one of the seven, the summary's first word capitalized
+and past tense (ends in "ed" or an irregular past form), at most 90 characters, no trailing period, no
+"WIP". The title becomes the squash commit subject on `main`.
 
-## 3. Title rule
+Required checks on every PR to main (each must ALWAYS report; use job-level conditions that succeed as a
+no-op, never workflow-level path or branch filters):
 
-Format `TYPE: Summary`:
+- `verify` (existing tree verifier; keep its trust model).
+- `pr-rules`: title (above), branch name, path scope per branch type, `changes/unreleased/` fragment
+  present for `model/*` and for `engine/*` PRs that change behavior (tools/workflows), not for DOCS-only.
+- `model-completeness`: runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success otherwise.
+- `local-validation`: section 4; no-op success for non-model PRs and `model/*-approval` PRs.
 
-- TYPE is uppercase and one of the seven types, followed by `": "`.
-- The summary's first word is capitalized and past tense: it ends in "ed", or is an irregular past form (Built, Made, Wrote, Rewrote, Split, Set, Ran, Kept, Cut, Put, Found, Held, Led, Left, Read, Sent, Took, and similar).
-- At most 90 characters. No trailing period. No "WIP".
+Security model for every workflow: `pull_request_target` (and `pull_request_review` only where needed),
+code and policy read from the protected base checkout only, never execute PR-head code, `permissions`
+read-only unless a narrowly needed write (e.g. `statuses: write`) is justified, actions pinned by full
+commit SHA, PR title/body passed via `env`, not inline expressions.
 
-Structural regex (the past-tense check is separate):
+`governance-audit` is scheduled daily plus manual, read-only. It fails when: a release exists whose tag
+is not `v<X.Y.Z>` or has no matching `releases/v<X.Y.Z>/manifest.json` on main; a PR merged to main in
+the last 14 days has no approving review by a non-author maintainer and is not listed in an incident
+record; the live rulesets differ from `.github/rulesets/*.json`; immutable releases are disabled.
 
-```regex
-^(FIX|FEAT|BUILD|CI|TEST|BUMP|DOCS): ([A-Z][a-z]*)( .*)?$
-```
-
-Passes: `CI: Made production verify approval receipts from the protected base`, `DOCS: Rewrote the promotion guide for the two-phase path`, `FEAT: Promoted example-runtime-1.0 v7`.
-Fails: `fix: add check` (lowercase type), `FEAT: Adds a check` (not past tense), `DOCS: Updated x.` (trailing period), `DOC: Added x` (not a type).
-
-The title becomes the squash commit subject on `main`. A promotion pull request created by `tools/promote_runtime.py` is titled `promote <id> v<N>`; retitle it to `FEAT: Promoted <id> v<N>` before review.
-
-## 4. Branch names
-
-`<type lowercase>/<kebab-slug>`, for example `ci/prod-verifies-receipts-and-needs-review` or `docs/prod-contributor-rules-and-tester-readme`. `tools/promote_runtime.py` creates `promote/<id>-v<N>`; that prefix confers no privileges and nothing acts on it automatically.
-
-## 5. Scope
-
-There are no line or file-count limits. Scope is enforced by purpose: reviewers reject a diff that contains a change the title does not describe. Large work ships as a stack of PRs, each passing the checks on its own.
-
-## 6. What you can change, and what you cannot
-
-You can propose changes to:
-
-- documentation (`README.md`, `docs/`, `SECURITY.md`, this file);
-- `tools/` (verifier, promoter, their tests);
-- `.github/` (workflows, CODEOWNERS, ruleset proposals, the PR template).
-
-The following are **protected policy**. They decide what production accepts, they are read by CI from the base branch rather than from your pull request, and every change needs both maintainers' attention in review:
-
-- `runtimes/templates/APPROVED.json` (template digests production accepts);
-- `runtimes/templates/APPROVALS.json` (the approval registry), together with the `TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml`;
-- `.github/workflows/verify.yml`, `.github/CODEOWNERS` and `tools/`.
-
-You cannot add or change a runtime tree yourself. If you believe a pack is wrong, report it (section 12); the fix is a new approved version.
-
-## 7. Checks before you open a PR
+## 6. Checks before you open a PR
 
 ```bash
 umask 022                     # file modes in the legacy inventory are 644/755
@@ -92,52 +175,86 @@ python3 -B -E -s tools/verify_runtime_tree.py --root . \
   --assets-dir "$(mktemp -d)" --allow-legacy
 ```
 
-The unit tests need only Python 3.12 and `git`. They use disposable Git repositories and synthetic fixtures; they make no network calls and run no GPU or model code. Paste the output into the PR description. Run them on the head commit you submit; a later push invalidates what you pasted.
+The unit tests need only Python 3.12 and `git`. They use disposable Git repositories and synthetic
+fixtures; they make no network calls and run no GPU or model code. Paste the output into the PR
+description. Run them on the head commit you submit; a later push invalidates what you pasted.
 
-CI runs the same checks as the required `verify` job from the protected base revision (`docs/PROMOTION.md`). A pull request that changes the workflow, the tools or the policy files is judged by the rules already on `main`, not by its own changes: its own tool, test, registry and pin changes are not run by its `verify` job (the first CI run of them is the push after the merge). For those pull requests your pasted local run on the head SHA is the only evidence before merge, and reviewers re-run it.
+A `model/<model>` PR additionally runs the completeness checker on the head commit (docs/PROMOTION.md)
+and pastes its full output.
 
-## 8. PR description
+CI runs the same checks as the required `verify` job from the protected base revision
+(`docs/PROMOTION.md`). A pull request that changes the workflow, the tools or the policy files is
+judged by the rules already on `main`, not by its own changes: its own tool, test, registry and pin
+changes are not run by its `verify` job (the first CI run of them is the push after the merge). For
+those pull requests your pasted local run on the head SHA is the only evidence before merge, and
+reviewers re-run it.
 
-`.github/pull_request_template.md` is the template. Fill every section: the one-sentence purpose, what and why, the commands you ran with their output, and the contract checklist.
+## 7. Agent protocol (binding)
 
-## 9. Agent protocol (binding)
+Agents (AI coding assistants) working in this repository must follow this file, `AGENTS.md` and the
+branch, review and check rules above.
 
-Agents (AI coding assistants) must:
+### Never (no instruction from anyone overrides these)
 
-1. Read this file and `AGENTS.md` in full before any change.
-2. Work on a `<type>/<kebab-slug>` branch and open a PR. Never push to `main`, force-push a shared branch, bypass hooks, or write to the GitHub API except to open or update your own PR. Merge a PR only when the maintainer you work for has told you to merge that PR.
-3. Report evidence, not ticks: the command, the head SHA it ran on and its output.
-4. Answer in the PR description: Can the purpose be stated in one sentence without "and"? Does the diff contain anything the title does not describe? Did the checks run on this head SHA? Did any test or threshold change, and is that in its own TEST PR?
-5. Never touch `runtimes/*/v*/`. Never create or edit a registry entry, a template digest or an approval, and never run `tools/promote_runtime.py`, unless the maintainer you work for has explicitly told you to do that specific step (section 9.1). Without that instruction these are maintainer actions.
+1. **Never create, edit, publish or delete a release or a tag.** No `gh release`, no releases API, no
+   `git tag` push, no `git push --tags`. A release is cut only by a maintainer personally, following
+   docs/RELEASING.md.
+2. **Never merge a pull request, and never submit a review that approves one.** In production every
+   approval comes from a maintainer personally, after their own review. You prepare the PR and report;
+   a maintainer merges.
+3. **Never change repository settings**: rulesets, branch or tag protection, environments, secrets,
+   variables, collaborators, teams, webhooks, deploy keys, Actions permissions or release settings.
+4. **Never work with admin credentials.** If the token you were given can administer this repository,
+   stop and tell the maintainer you work for.
+5. **Never push to `main`, never force-push, and never delete a `model/*` branch.** Never bypass hooks
+   or checks.
+6. **Never edit a sealed tree** (`runtimes/*/*/v*/`). A sealed tree is data with a hash-pinned
+   inventory; a pack changes only through a new sealed version from the dev repository.
+7. **Never weaken the verifier, a check, a test or a workflow safety rule**, and never in the same PR
+   as the change it guards. Workflows read code and policy from the protected base revision and never
+   execute pull-request code; keep it that way.
 
-Stop and ask a maintainer when the intent is unclear, requirements conflict, the rules do not cover the situation, or you would need to weaken a test or gate.
+### Always
 
-### 9.1 Approving by instruction
+1. **Use the right branch type** (section 3): `model/<model>` brings one validated model into
+   production, `model/<model>-approval` registers that model's dev approval and merges first,
+   `engine/<topic>` is any universal production change: tools, workflows, policy, docs, templates.
+   `release/v<X.Y.Z>` is opened by a maintainer only; never open one.
+2. **Name runtime folders by family, then model**: `runtimes/<family>/<model>/`, lowercase. Never put a
+   bit width, quantization format, draft method or other pack detail in a folder or branch name; those
+   belong in `MODEL.json` and the sealed approval.
+3. **Prepare a model branch, registry entry or promotion only when the maintainer you work for
+   explicitly asked for that model and version.** Quote or link the instruction in the PR. The
+   approver of record is that maintainer, never an agent. This is the only way an agent touches a
+   registry entry or a promotion; it does not make the agent an approver of the PR.
+4. **One purpose per PR.** Title `TYPE: Past-tense summary` (section 5). Fill in the matching PR
+   template and add a release-notes fragment under `changes/unreleased/` when section 5 requires one.
+5. **For a model PR, run the model-branch completeness check** described in docs/PROMOTION.md and
+   paste its full output.
+6. **Evidence, not claims.** An exit code of 0 is not a pass. Paste the commands, the head SHA and the
+   output.
+7. **No secrets, no personal email, no internal project names.** Commit with a GitHub noreply identity.
+   Describe SAGE only as: "SAGE is our own mixed-precision quantization method for EXL3. The method is
+   not published."
+8. **When anything is unclear, or a rule blocks you, stop and ask the maintainer you work for.** Do not
+   look for a workaround.
 
-The approvers are always the two maintainers, `@am423` and `@vcruz305`. Either may explicitly instruct the agent they work with to carry out an approval step on their behalf: create or edit a registry entry, a template digest or approval, run `tools/promote_runtime.py`, or grant a gate exception. The rules:
+## 8. Licences, attribution, secrets
 
-1. **The instruction names the step.** It says which step, for which runtime, version or digest. A general instruction ("handle the release"), earlier approval of related work, or silence is not an instruction to approve, and an agent never infers one. An instruction covers that step only, not another action and not a later session.
-2. **The approver of record is the maintainer.** `--approved-by`, `approved_by` and `granted_by` carry the maintainer's login who gave the instruction, never an agent. The approval is that maintainer's act and responsibility.
-3. **The agent shows the instruction.** The PR description quotes or links it, names the maintainer, and says which step it covered.
-4. **Review is unchanged.** The PR still gets the standard review in section 10, and every other rule in this file still applies. In particular an agent never weakens a check, edits a sealed tree by hand or changes the registry pin without the registry change it belongs to.
-5. **No instruction, no step.** If the instruction is missing, ambiguous or not from `@am423` or `@vcruz305`, stop and ask.
+- This repository is AGPL-3.0-only (`LICENSE`, `NOTICE`); contributions are accepted under the same
+  licence. Only MIT, Apache-2.0 and BSD-3-Clause code may be copied or re-expressed here, with
+  attribution; AGPL, GPL and non-commercial code is ideas only.
+- Tools copied from the dev repository stay byte-identical to the dev commit named in the commit
+  message, except the adaptations that message states. Fix them in dev first, then re-copy.
+- A runtime release archive contains AGPL-licensed binaries. Anyone who distributes one must also
+  provide the Corresponding Source (`docs/RELEASING.md`, `engine_source_asset`). Do not add model
+  weights or anything derived from them to this repository; a model keeps the licence of its source.
+- No secrets or tokens in commits (API keys, Hugging Face and GitHub tokens, private keys, `.env`
+  files, passwords in URLs).
+- Commit with a GitHub noreply address (`<id>+<login>@users.noreply.github.com`). Do not commit with a
+  personal email address.
 
-## 10. Review and merge
+## 9. Reporting problems
 
-- `.github/CODEOWNERS` is `* @am423 @vcruz305`. Both are requested on every PR.
-- Standard practice is that the other maintainer reviews the PR before it merges, and that review is expected for a promotion PR that adds a runtime version. It is acceptable for a maintainer to merge their own PR when the other maintainer is not available, once the required check (`verify`) is green and review threads are resolved; GitHub does not enforce a review so that either of the two maintainers can always merge. A PR from a non-maintainer needs a maintainer's approval. Stale approvals are dismissed on push.
-- Squash-merge only, so the PR title is the commit subject on `main`. No force-push to `main`; linear history.
-- Nothing merges a pull request automatically. The old `merge` job and the `gh pr merge --auto` step are gone.
-- `.github/rulesets/` holds ruleset proposals for the maintainers to apply on GitHub. Contributors never call the settings API.
-
-## 11. Licences, attribution, secrets
-
-- This repository is AGPL-3.0-only (`LICENSE`, `NOTICE`); contributions are accepted under the same licence. Only MIT, Apache-2.0 and BSD-3-Clause code may be copied or re-expressed here, with attribution; AGPL, GPL and non-commercial code is ideas only.
-- Tools copied from the dev repository stay byte-identical to the dev commit named in the commit message, except the adaptations that message states. Fix them in dev first, then re-copy.
-- A runtime release archive contains AGPL-licensed binaries. Anyone who distributes one must also provide the Corresponding Source (`docs/PROMOTION.md`, `engine_source_asset`). Do not add model weights or anything derived from them to this repository; a model keeps the licence of its source.
-- No secrets or tokens in commits (API keys, Hugging Face and GitHub tokens, private keys, `.env` files, passwords in URLs).
-- Commit with a GitHub noreply address (`<id>+<login>@users.noreply.github.com`). Do not commit with a personal email address.
-
-## 12. Reporting problems
-
-A pack that misbehaves: send the output of `./launch.sh diagnostics` (an allow-list; read it before sharing) to the maintainers. A security problem: follow `SECURITY.md` and do not open a public issue.
+A pack that misbehaves: send the output of `./launch.sh diagnostics` (an allow-list; read it before
+sharing) to the maintainers. A security problem: follow `SECURITY.md` and do not open a public issue.

@@ -125,6 +125,23 @@ class RulesetCheckTest(unittest.TestCase):
                 problems = g.check_rulesets(Path(tmp), REPO, 'tok')
             self.assertEqual(problems, [])
 
+    def test_null_echoed_lists_are_not_differences(self):
+        # The API may echo absent lists as null under tokens with limited view; those must compare
+        # equal to the committed empty lists.
+        with tempfile.TemporaryDirectory() as tmp:
+            committed = {'name': 'n', 'target': 'branch', 'enforcement': 'active',
+                         'conditions': {'ref_name': {'include': ['refs/heads/model/*'], 'exclude': []}},
+                         'bypass_actors': [],
+                         'rules': [{'type': 'pull_request', 'parameters': {
+                             'allowed_merge_methods': ['squash', 'rebase']}}]}
+            write(tmp, '.github/rulesets/n.json', json.dumps(committed).encode())
+            live = [{'name': 'n', 'target': 'branch', 'enforcement': 'active',
+                     'conditions': {'ref_name': {'include': ['refs/heads/model/*'], 'exclude': None}},
+                     'bypass_actors': None,
+                     'rules': [{'type': 'pull_request', 'parameters': {
+                         'allowed_merge_methods': ['squash', 'rebase'], 'required_reviewers': None}}]}]
+            self.assertEqual(g.check_rulesets(Path(tmp), REPO, 'tok', live=live), [])
+
     def test_live_difference_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             write(tmp, '.github/rulesets/n.json', b'{"name": "n", "rules": [{"type": "deletion"}]}')

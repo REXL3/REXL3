@@ -75,6 +75,8 @@ maintains the table; rows for PRs that are not yet merged are marked "filled at 
 | #34 | FIX: Removed the unreviewed Qwen3.8-27B approvals from the registry | `106c9680` | 2026-10-27 05:50:56 |
 | #35 | FEAT: Restructured production runtime layout and added release and governance checks | `779e86cf` | 2026-10-27 06:42:04 |
 | #36 | TEST: Pinned the promotion test git identity to the synthetic user | `804d793b` | 2026-10-27 06:49:38 |
+| #37 | FIX: Made the governance audit tolerate workflow-token limits and cover the retro range | `a949ad5a` | 2026-10-27 07:00:23 |
+| #39 | FIX: Fixed the incident range parsing for single PR numbers | `656f7f6b` | 2026-10-27 07:04:45 |
 | #32 | DOCS: Rewrote the production README around engine features and recipes | `51f99840` | 2026-10-27 06:51:53 |
 | #31 | DOCS: Replaced the production rules with the model-branch release process | this PR | this PR |
 

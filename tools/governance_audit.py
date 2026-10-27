@@ -125,6 +125,13 @@ def strip_volatile(value):
     return value
 
 
+def _norm_null_list(value):
+    """The API may echo an absent list as null; compare it equal to an empty list."""
+    if value is None:
+        return []
+    return value
+
+
 def committed_parameter_subset(live_rule, committed_rule):
     """The committed rule's parameters must all hold in the live rule of the same type.
 
@@ -146,6 +153,8 @@ def committed_parameter_subset(live_rule, committed_rule):
         if key == 'required_status_checks' and isinstance(actual, list) and isinstance(expected, list):
             actual = [{k: v for k, v in item.items() if k != 'integration_id'} for item in actual if isinstance(item, dict)]
             expected = [{k: v for k, v in item.items() if k != 'integration_id'} for item in expected if isinstance(item, dict)]
+        if isinstance(expected, list):
+            actual = _norm_null_list(actual)
         if actual != expected:
             return False
     return True
@@ -156,9 +165,17 @@ def policy_matches(committed, live):
     for key in ('name', 'target', 'enforcement'):
         if committed.get(key) != live.get(key):
             return False
-    if committed.get('conditions') != live.get('conditions'):
+    committed_conditions = committed.get('conditions')
+    live_conditions = live.get('conditions')
+    if committed_conditions is not None and live_conditions is not None:
+        committed_ref = committed_conditions.get('ref_name') or {}
+        live_ref = live_conditions.get('ref_name') or {}
+        for sub in ('include', 'exclude'):
+            if _norm_null_list(committed_ref.get(sub)) != _norm_null_list(live_ref.get(sub)):
+                return False
+    elif committed_conditions != live_conditions:
         return False
-    if committed.get('bypass_actors') != live.get('bypass_actors'):
+    if _norm_null_list(committed.get('bypass_actors')) != _norm_null_list(live.get('bypass_actors')):
         return False
     live_rules = {rule.get('type'): rule for rule in live.get('rules', []) if isinstance(rule, dict)}
     for rule in committed.get('rules', []):

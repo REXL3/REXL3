@@ -1,0 +1,42 @@
+name: pr-rules
+# Section 5: title (section 3), branch name, path scope per branch type, and the changes/unreleased/
+# fragment rule. Runs from the protected base revision (pull_request_target): the checker is read from
+# the base checkout; PR title and head ref arrive via env, never inline expressions. The check reports
+# on every PR to main: the job always runs and the checker itself decides PASS vs FAIL (a no-op
+# success is expressed as PASS lines inside the checker).
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: pr-rules-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  pr-rules:
+    name: pr-rules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the protected base (tools and policy)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: base
+          persist-credentials: false
+      - name: Enforce title, branch, scope and fragment rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REXL3_REPO: ${{ github.repository }}
+          REXL3_PR_NUMBER: ${{ github.event.pull_request.number }}
+          REXL3_TITLE: ${{ github.event.pull_request.title }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          umask 022
+          python3 -B -E -s base/tools/check_pr_rules.py || exit $?

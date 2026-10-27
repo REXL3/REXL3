@@ -1,0 +1,73 @@
+name: model-completeness
+# Section 5: runs tools/check_model_branch.py (section 6) for model/<model> PRs; no-op success
+# otherwise (the checker prints PASS lines and exits 0 for non-model branches). Trust model: code,
+# registry and policy come from the protected base checkout only; the head is data. The one
+# dev-read secret (DEV_ASSETS_TOKEN) is used only by the download step below, exactly as in verify.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: model-completeness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  model-completeness:
+    name: model-completeness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the protected base (tools and policy)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: base
+          persist-credentials: false
+      # Untrusted data. Never executed.
+      - name: Check out the candidate (data only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      # Same authenticated dev assets as verify: base code, candidate folder names -> base registry
+      # entries -> dev tags derived from each entry's runtime_id. Refuses anything the pinned registry
+      # does not name.
+      - name: Download the authenticated dev release assets for the candidate trees
+        env:
+          GH_TOKEN: ${{ secrets.DEV_ASSETS_TOKEN }}
+          ASSETS_DIR: ${{ runner.temp }}/model-assets
+        run: |
+          set -uo pipefail
+          umask 022
+          mkdir -p "$ASSETS_DIR"
+          python3 -B -E -s base/tools/fetch_dev_assets.py \
+            --root candidate \
+            --approved base/runtimes/templates/APPROVED.json \
+            --trusted-approvals base/runtimes/templates/APPROVALS.json \
+            --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' base/.github/workflows/verify.yml)" \
+            --assets-dir "$ASSETS_DIR"
+      - name: Run the model-branch completeness check
+        env:
+          ASSETS_DIR: ${{ runner.temp }}/model-assets
+          # Untrusted PR values arrive only via env, never as inline expressions in the script.
+          REXL3_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REXL3_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          umask 022
+          python3 -B -E -s base/tools/check_model_branch.py \
+            --repo-root candidate \
+            --tree-dir candidate \
+            --base "$REXL3_BASE_SHA" \
+            --head "$REXL3_HEAD_SHA" \
+            --base-tree-dir base \
+            --branch "$REXL3_HEAD_REF" \
+            --assets-dir "$ASSETS_DIR"

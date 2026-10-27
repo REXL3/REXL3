@@ -18,7 +18,7 @@ In scope:
 | Version | Supported |
 | --- | --- |
 | `main` | yes: fixes land here first |
-| `runtimes/dsv41-flash-1017-sage-1.62/v1` | yes, until the next version. A fix ships as a new version; a released version is never edited in place. |
+| A released `runtimes/<runtime-id>/v<N>` | yes, until the next version. A fix ships as a new version; a released version is never edited in place. No runtime is released yet. |
 
 There are no backport branches. A fix is a new promoted version, and the old one is withdrawn as described in `docs/PROMOTION.md`.
 

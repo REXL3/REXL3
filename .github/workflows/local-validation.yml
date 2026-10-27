@@ -1,0 +1,55 @@
+name: local-validation
+# Section 4/5: a model PR passes only when an APPROVED review by a maintainer other than the PR
+# author carries a LOCAL-VALIDATION v1 block for the current head. The result attaches to the PR head
+# SHA as a commit status named `local-validation`, so it re-evaluates when the head changes
+# (pull_request_target synchronize) and when a review is submitted or dismissed (pull_request_review).
+#
+# Security: both triggers run pull_request_target-style code — the checker is read from the protected
+# base checkout only and never executes PR-head code. PR data (number, head SHA) arrives via env, not
+# inline expressions. `statuses: write` is the one narrowly needed write; everything else is read.
+# Model PRs cannot inject a workflow here because pr-rules forbids model/* PRs from touching .github/.
+#
+# Known limitation: a commit status named `local-validation` can in principle be forged by any workflow
+# from any unprotected branch (statuses: write is available to any pushed workflow, and statuses attach
+# to a commit, not to an app). The human approval requirement (require_code_owner_review +
+# require_last_push_approval on main-guard) is the real control; this check is a convenience gate.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    branches: [main]
+    types: [submitted, dismissed]
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+concurrency:
+  group: local-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  local-validation:
+    name: local-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the protected base (owners and policy)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: base
+          persist-credentials: false
+      - name: Evaluate LOCAL-VALIDATION v1 reviews and set the head status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REXL3_REPO: ${{ github.repository }}
+          REXL3_PR_NUMBER: ${{ github.event.pull_request.number }}
+          REXL3_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REXL3_CODEOWNERS: base/.github/CODEOWNERS
+        run: |
+          set -uo pipefail
+          umask 022
+          python3 -B -E -s base/tools/check_local_validation.py || exit $?

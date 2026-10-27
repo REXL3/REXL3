@@ -21,6 +21,7 @@ from tools import promote_runtime as p
 from tools import release_evidence as e
 from tools import verify_runtime_tree as v
 from tools.test_approve_profile import SyntheticSeal
+from tools.test_release_evidence import encoded, sha, write
 
 
 def members(path):
@@ -58,8 +59,8 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         self.f = SyntheticSeal(self.root)
         self.original = members(self.f.engine_source_asset)
 
-    def verify(self, path, registry):
-        return e.verify_assets(path, registry=registry, approved_templates=self.f.approved)
+    def verify(self, path, registry, key=None):
+        return e.verify_assets(path, registry=registry, approved_templates=self.f.approved, key=key)
 
     def test_missing_argument_and_wrapper_only_cannot_seal(self):
         args = dict(self.f.kwargs)
@@ -174,6 +175,36 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source_not_exportable'):
             source_identity.verify_git_projection(self.f.engine_source_asset, repo=self.f.repo, commit=commit, tree=tree)
 
+    def test_bound_archive_validation_counts_reviewed_external_test_targets(self):
+        # The consumer re-validation rebuilds its file list from the archive members; a reviewed external test target is
+        # excluded from the archive and must still satisfy the exporter's review check.
+        repo, target = self.f.repo, 'testdata/external.safetensors'
+        marker = b'SYNTHETIC-PROVENANCE-NOT-A-TENSOR'
+        (repo / target).write_bytes(marker)
+        reference = '../../../' + target
+        directive = b'const B: &[u8] = include_bytes!("' + reference.encode() + b'");\n'
+        body = b'fn main() {}\n#[cfg(test)]\nmod tests {\n' + directive + b'}\n'
+        (repo / 'crates/server/src/main.rs').write_bytes(body)
+        offset = body.index(b'include_bytes!')
+        review = {'source': 'crates/server/src/main.rs', 'source_sha256': exporter.digest(body),
+                  'line': body.count(b'\n', 0, offset) + 1, 'column': offset - body.rfind(b'\n', 0, offset),
+                  'reference': reference, 'target': target, 'target_git_blob': exporter.git_digest('blob', marker),
+                  'target_bytes': len(marker), 'scope': {'kind': 'cfg_test_module', 'attribute_line': 2, 'module_line': 3},
+                  'reason': 'Reviewed synthetic external test dependency; metadata only, never shipped.'}
+        policy = e.loads((repo / exporter.INPUTS).read_bytes())
+        policy['external_test_dependencies'] = [review]
+        (repo / exporter.INPUTS).write_bytes(exporter.canonical(policy))
+        self.f.git('add', '.')
+        self.f.git('commit', '-qm', 'synthetic reviewed external test target')
+        commit, tree = self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+        source = exporter.inspect_source(repo, commit)
+        self.assertEqual(source['blockers'], [])
+        self.f.engine_source_asset.write_bytes(exporter.archive_bytes(source))
+        self.assertNotIn(target, members(self.f.engine_source_asset))
+        asset = e.asset_record(self.f.engine_source_asset, e.inspect_archive(self.f.engine_source_asset))
+        identity = source_identity.validate_bound_archive(self.f.engine_source_asset, commit=commit, tree=tree, asset=asset)
+        self.assertEqual(identity['projection']['external_test_dependencies'], [review])
+
     def test_committed_instruction_forgery_is_not_a_trusted_template(self):
         (self.f.repo / exporter.TEMPLATE).write_bytes(b'SYNTHETIC untrusted build instructions\n')
         self.f.git('add', '.')
@@ -279,13 +310,15 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before['approval.json'])
 
     def test_full_producer_seal_consumer_and_promotion_flow(self):
+        family, model = 'qwen3.8', 'qwen3.8-27b'
         doc = self.f.seal()
         durable = self.root / 'durable'
         path = a.seal_to_directory(doc, archive=self.f.archive, source_asset=self.f.source_asset,
             engine_source_asset=self.f.engine_source_asset, evidence_root=self.f.assets, out_dir=durable)
-        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {'synthetic-demo/v1': {
-            'approval_sha256': e.sha256_file(path), 'source_commit': self.f.commit, 'source_tree': self.f.tree}}}
-        self.verify(path, registry)
+        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {f'{family}/{model}/v1': {
+            'approval_sha256': e.sha256_file(path), 'source_commit': self.f.commit, 'source_tree': self.f.tree,
+            'runtime_id': doc['runtime_id']}}}
+        self.verify(path, registry, key=f'{family}/{model}/v1')
         prod = self.root / 'production'
         prod.mkdir()
         for args in (('init', '-q'), ('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
@@ -294,17 +327,29 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         base = e.git(prod, 'rev-parse', 'HEAD').decode().strip()
         e.git(prod, 'update-ref', 'refs/remotes/origin/main', base)
         with patch.object(p, 'gh', side_effect=AssertionError('no publication/network')):
-            self.assertEqual(p.prepare_promotion('synthetic-demo', 'approve-synthetic-demo-1', 1,
-                target_commit=base, prod_checkout=prod, assets_dir=durable,
-                registry=registry, approved_templates=self.f.approved, dry_run=True), 0)
-        tree = prod / 'runtimes/synthetic-demo/v1'
+            self.assertEqual(p.prepare_promotion(family, model, 1,
+                approve_tag='approve-synthetic-demo-1',
+                target_commit=base, prod_checkout=prod, assets_dir=str(durable),
+                registry=registry, approved_templates=self.f.approved, meta=None, dry_run=True), 0)
+        tree = prod / 'runtimes' / family / model / 'v1'
         p.extract_tree(durable / doc['bundle']['archive'], tree, doc, approval_path=path)
-        self.assertEqual(v.verify_tree(tree, self.f.approved, trusted_approvals=registry, assets_dir=durable), [])
+        write(tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(family, model)))
+        write(tree.parent, 'LATEST', b'v1\n')
+        from tools.test_release_evidence import encoded
+        assets_model = self.root / 'assets-model'
+        dest_m = assets_model / family / model / 'v1'
+        dest_m.mkdir(parents=True)
+        for name in ['approval.json'] + [a['archive'] for a in e.approval_assets(doc)]:
+            shutil.copyfile(durable / name, dest_m / name)
+        e.extract_files(dest_m / doc['evidence_asset']['archive'], dest_m, doc['evidence_asset']['members'])
+        self.assertEqual(v.verify_tree(tree, self.f.approved, trusted_approvals=registry,
+                                      assets_dir=str(assets_model), family=family, model=model), [])
         self.assertEqual({asset['archive'] for asset in p.approval_assets(doc)},
             {doc[k]['archive'] for k in ('bundle', 'source_asset', 'engine_source_asset', 'evidence_asset')})
         self.assertEqual(v.tree_inventory(tree).keys(), doc['source_asset']['members'].keys() | {'approval.json'})
-        (durable / doc['engine_source_asset']['archive']).unlink()
-        self.assertTrue(v.verify_tree(tree, self.f.approved, trusted_approvals=registry, assets_dir=durable))
+        (assets_model / family / model / 'v1' / doc['engine_source_asset']['archive']).unlink()
+        self.assertTrue(v.verify_tree(tree, self.f.approved, trusted_approvals=registry,
+                                      assets_dir=str(assets_model), family=family, model=model))
 
 
 if __name__ == '__main__':

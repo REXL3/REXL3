@@ -8,9 +8,7 @@ everything that differs.
 There is one sheet per runtime id, named `docs/packs/<runtime-id>.md`. The
 [README](../../README.md)'s released-packs table links to each sheet.
 
-| Sheet | Runtime | Latest version |
-| --- | --- | --- |
-| [`dsv41-flash-1017-sage-1.62.md`](dsv41-flash-1017-sage-1.62.md) | DeepSeek-V4.1-Flash-1017, single node | `v1` |
+No pack sheet exists yet; the first accompanies the `v0.1.0` product release.
 
 ## Rules for a sheet
 

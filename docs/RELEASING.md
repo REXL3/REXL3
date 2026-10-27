@@ -27,9 +27,12 @@ Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Nemotron-3.5-Sup
 - Only AFTER v0.1.0 is released may a later release contain a single newly validated model as a new
   version; it is never phrased as a release candidate for one model.
 
-## The release candidate on dev
+## The group freeze on dev
 
-- Dev uses a release branch `release/v<X.Y.Z>`; the group freeze is tagged `v<X.Y.Z>-rc.<N>` on dev.
+- Dev uses a release branch `release/v<X.Y.Z>`; there are no release-candidate tags. The only
+  tags are the final `v<X.Y.Z>` tags (the prod release through the maintainer ceremony, and the
+  matching dev source tag), created by maintainers after all in-scope model PRs are validated by
+  the non-submitting maintainer and merged.
 - The dev freeze commit exists only so the whole group is validated on one engine build; it is never
   a release and is never per model. Every model in the release is sealed from the SAME freeze commit.
 - The dev workspace version is set to `<X.Y.Z>` at the freeze; the next dev cycle uses
@@ -97,8 +100,8 @@ Before the candidate:
 - [ ] Every first-release model meets the definition of done in `docs/PROMOTION.md` (final runtime
       entry, capability contract proven, exactness, long context, GB10 receipts on the RC commit,
       `KNOWN_ISSUES`, approval sealed from the RC commit).
-- [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut; candidate tagged
-      `v<X.Y.Z>-rc.<N>`.
+- [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut at the merged
+      bump (no release-candidate tags).
 - [ ] All models in the release are sealed from the SAME dev freeze commit; GB10 receipts
       exist for that commit. The freeze exists only so the whole group is validated on one engine
       build; it is never a release and is never per model.

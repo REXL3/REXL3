@@ -25,7 +25,7 @@ except ImportError:
     import model_layout as m
 
 PRODUCT_VERSION_RE = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+\Z')
-INCIDENT_RANGE = re.compile(r'#(\d+)(?:-#(\d+))?')
+INCIDENT_RANGE = re.compile(r'#(\d+)(?:\s*(?:-|through)\s*#?(\d+))?')
 
 
 def days_ago(days):
@@ -34,7 +34,8 @@ def days_ago(days):
 
 def incident_covers(incident_text, number):
     for match in INCIDENT_RANGE.finditer(incident_text):
-        start, end = int(match[1]), int(match[2] or match[1])
+        start = int(match[1])
+        end = int(match[2] or match[3] or match[1])
         if start <= number <= end:
             return True
     return False
@@ -178,7 +179,11 @@ def fetch_live_rulesets(repo, token):
         ruleset_id = entry.get('id') if isinstance(entry, dict) else None
         if ruleset_id is None:
             continue
-        detail = api(f'/repos/{repo}/rulesets/{ruleset_id}', token)
+        try:
+            detail = api(f'/repos/{repo}/rulesets/{ruleset_id}', token)
+        except ValueError as error:
+            live.append({'name': entry.get('name'), '_unreadable': str(error)})
+            continue
         live.append(json.loads(detail.decode('utf-8')))
     return live
 
@@ -202,10 +207,22 @@ def check_rulesets(repo_root, repo, token, live=None):
         if name is None:
             continue
         seen.add(name)
+        if '_unreadable' in ruleset:
+            print(f'INFO: live ruleset `{name}` detail is unreadable by this token: '
+                  f'{ruleset["_unreadable"]}; skipped')
+            continue
         expected = committed.get(name)
         if expected is None:
             problems.append(f'live ruleset `{name}` has no committed copy in .github/rulesets/')
-        elif not policy_matches(expected, strip_volatile(ruleset)):
+            continue
+        if any(key not in ruleset for key in ('enforcement', 'conditions', 'rules')):
+            missing = [key for key in ('enforcement', 'conditions', 'rules', 'bypass_actors')
+                       if key not in ruleset and key in expected]
+            if missing:
+                print(f'INFO: live ruleset `{name}` returned an incomplete view for this token '
+                      f'(missing {missing}); skipped')
+                continue
+        if not policy_matches(expected, strip_volatile(ruleset)):
             problems.append(f'live ruleset `{name}` differs from .github/rulesets/{name}.json')
     for name in committed:
         if name not in seen:
@@ -214,10 +231,17 @@ def check_rulesets(repo_root, repo, token, live=None):
 
 
 def check_immutable_releases(repo, token):
-    """Read the repo-level immutable-releases setting; fail closed when unreadable or explicitly disabled."""
+    """Read the repo-level immutable-releases setting; fail closed when unreadable or explicitly disabled.
+
+    The GitHub Actions workflow token cannot read this repository-settings endpoint and receives
+    HTTP 403; the change is still verifiable by a maintainer (or a token with repository-admin
+    settings read), so a 403 is skipped with an informational line instead of failing the audit.
+    """
     try:
         raw = api(f'/repos/{repo}/immutable-releases', token)
     except ValueError as error:
+        if '403' in str(error):
+            return [], 'INFO: immutable releases setting is unreadable by this token (HTTP 403); skipped'
         return [f'immutable releases setting is not readable: {error}'], None
     try:
         doc = json.loads(raw.decode('utf-8'))

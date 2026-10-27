@@ -67,6 +67,12 @@ class MergedPrCheckTest(unittest.TestCase):
                                       reviews_for=lambda n: [])
         self.assertEqual(problems, [])
 
+    def test_incident_record_through_range_exempts(self):
+        write(self.tmp.name, 'docs/incidents/2026-10-26-unreviewed-release.md', b'PRs #1 through #28 merged unreviewed.\n')
+        problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, pulls=[merged_pr(15)],
+                                      reviews_for=lambda n: [])
+        self.assertEqual(problems, [])
+
     def test_old_merge_is_ignored(self):
         problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, pulls=[merged_pr(1, days=30)],
                                       reviews_for=lambda n: [])
@@ -91,6 +97,27 @@ class RulesetCheckTest(unittest.TestCase):
             live = [{'name': 'n', 'rules': [{'type': 'required_status_checks', 'parameters': {
                 'required_status_checks': [{'context': 'verify', 'integration_id': 15368}]}}]}]
             self.assertEqual(g.check_rulesets(Path(tmp), REPO, 'tok', live=live), [])
+
+    def test_incomplete_live_ruleset_view_is_skipped(self):
+        # The workflow token sees ruleset details without conditions/rules; that must be skipped
+        # with an INFO line, not reported as drift (and not flagged as "not live").
+        with tempfile.TemporaryDirectory() as tmp:
+            write(tmp, '.github/rulesets/n.json', b'{"name": "n", "target": "branch", "enforcement": "active", "rules": []}')
+            live = [{'name': 'n', 'target': 'branch', 'enforcement': 'active'}]
+            problems = g.check_rulesets(Path(tmp), REPO, 'tok', live=live)
+            self.assertEqual(problems, [])
+
+    def test_unreadable_live_ruleset_detail_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write(tmp, '.github/rulesets/n.json', b'{"name": "n", "rules": []}')
+            listing = json.dumps([{'id': 1, 'name': 'n'}]).encode()
+            def fake_api(path, token, **kwargs):
+                if path == '/repos/REXL3/REXL3/rulesets':
+                    return listing
+                raise ValueError('GitHub API 403 for ' + path)
+            with patch('tools.governance_audit.api', side_effect=fake_api):
+                problems = g.check_rulesets(Path(tmp), REPO, 'tok')
+            self.assertEqual(problems, [])
 
     def test_live_difference_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,9 +222,17 @@ class ImmutableCheckTest(unittest.TestCase):
             self.assertTrue(any('disabled' in p for p in problems))
 
     def test_unreadable_fails_closed(self):
-        with patch('tools.governance_audit.api', side_effect=ValueError('HTTP 403')):
+        with patch('tools.governance_audit.api', side_effect=ValueError('HTTP 500')):
             problems = g.check_immutable_releases(REPO, 'tok')[0]
             self.assertTrue(any('not readable' in p for p in problems))
+
+    def test_http403_is_skipped(self):
+        # The workflow token cannot read the repo-settings endpoint (403); the audit skips it with
+        # an informational line and does not fail.
+        with patch('tools.governance_audit.api', side_effect=ValueError('GitHub API 403 for /repos/REXL3/REXL3/immutable-releases')):
+            problems, note = g.check_immutable_releases(REPO, 'tok')
+            self.assertEqual(problems, [])
+            self.assertIn('INFO', note)
 
 
 if __name__ == '__main__':

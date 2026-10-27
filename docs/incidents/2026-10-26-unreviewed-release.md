@@ -83,6 +83,7 @@ maintains the table; rows for PRs that are not yet merged are marked "filled at 
 | #43 | DOCS: Recorded the final audit PR rows in the incident record | this PR | this PR |
 | #32 | DOCS: Rewrote the production README around engine features and recipes | `51f99840` | 2026-10-27 06:51:53 |
 | #31 | DOCS: Replaced the production rules with the model-branch release process | this PR | this PR |
+| #46 | BUILD: Reused verified release inventories | this PR | this PR |
 | #44 | DOCS: Rewrote the agent instructions for the production release process | this PR | this PR |
 | #45 | DOCS: Corrected RED-SNOW-5.3-Flash as a separate model, not a GLM pack | this PR | this PR |
 

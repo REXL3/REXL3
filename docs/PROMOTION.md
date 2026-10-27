@@ -43,6 +43,16 @@ A v2 approval names four archives besides `approval.json`. All five are attached
 
 The bundle's `bin/` is not in git because a hosted CPU runner cannot build or qualify CUDA binaries.
 
+**Binary by reference.** A bundle may leave `bin/` out of its archive. Its approval then carries `engine_binaries`:
+for each install path (`bin/rexl3-serve`, `bin/rexl3-cluster`) the engine release tag
+(`engine-v<engine version>-<first eight hex of the engine commit>`), the asset name, and its SHA-256, size and mode
+`0755`. `release.lock.json` is unchanged and still lists the binary, so the qualification receipts bind the same
+identities. The engine binary is not one of the release's own assets: it comes from the engine release of the same
+name in the development repository, and `promote_runtime.py` carries it to the same-named engine release in this
+repository (created once at the merged promotion commit, reused by later runtimes on the same engine). Every
+download verifies the asset against the approval byte for byte; the dev engine tag must name the approved engine
+commit. Testers place the file with the step in the user guide (section 4.4a).
+
 ## Steps
 
 All commands run on a maintainer's machine with an authenticated `gh`, never in CI. They need a clean
@@ -107,7 +117,8 @@ python3 tools/promote_runtime.py \
 `--publish-only` requires a clean checkout of exactly the merged commit, reachable from `origin/main`,
 whose tree and approval bytes equal the verified assets. It creates `prod/<id>/v<N>` with
 `--target <merged-commit-sha>`, `--latest=false` and the five assets, downloads them back and compares
-them with the approval, and writes `publication-<id>-v<N>.json` into the assets directory. That file
+them with the approval (for an approval with `engine_binaries` it first creates, or verifies, the engine release
+`engine-v<version>-<commit>` in this repository with exactly the approved assets), and writes `publication-<id>-v<N>.json` into the assets directory. That file
 pins the release id, asset ids, sizes and measured hashes. A retry must match it; a changed release,
 asset or tag fails closed, and a fully verified retry is a no-op. An existing release is downloaded and
 verified, never accepted blindly.

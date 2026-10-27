@@ -92,8 +92,71 @@ def tag_commit(tag, repo):
     raise ValueError('annotated tag chain limit')
 
 
-def verify_approval(approval_path, approved_templates, registry):
-    return e.verify_assets(approval_path, registry=registry, approved_templates=approved_templates)
+def verify_approval(approval_path, approved_templates, registry, engine_dir=None):
+    return e.verify_assets(approval_path, registry=registry, approved_templates=approved_templates, engine_dir=engine_dir)
+
+
+def engine_release_tag(approval):
+    """The one engine release an approval's ``engine_binaries`` come from, or None when its bundle carries them."""
+    engine = approval.get('engine_binaries')
+    if engine is None:
+        return None
+    return next(iter(e.validate_engine_binaries(engine).values()))['release_tag']
+
+
+def fetch_engine(approval, stage, *, repo):
+    """Download the engine release assets an approval references into ``stage`` and check them byte for byte.
+
+    The approval, authenticated by the pinned registry, names each asset and its sha256, size and mode, so the release
+    is not trusted on its own: a replaced or extra-large asset fails the size, GitHub digest or hash check, and a release
+    that changes while it is read is refused. In the development repository the engine tag must also name the approved
+    engine commit. Returns the release metadata, or None when the bundle carries its own native binaries."""
+    tag = engine_release_tag(approval)
+    if tag is None:
+        return None
+    engine = approval['engine_binaries']
+    before = release_metadata(tag, repo)
+    remote = {asset['name']: asset for asset in before['assets']}
+    for item in engine.values():
+        asset = remote.get(item['asset'])
+        e.require(asset is not None and asset['size'] == item['bytes'], 'engine release asset missing or size differs')
+        e.require(asset.get('digest') in (None, 'sha256:' + item['sha256']), 'engine release asset digest differs')
+    stage.mkdir(parents=True)
+    for item in engine.values():
+        gh('release', 'download', tag, '-R', repo, '-p', item['asset'], '-D', stage)
+    e.require({f.name for f in stage.iterdir()} == {item['asset'] for item in engine.values()}, 'engine download inventory mismatch')
+    for item in engine.values():
+        path = e.safe_file(stage, item['asset'])
+        e.require(path.stat().st_size == item['bytes'] and e.sha256_file(path) == item['sha256'], 'engine asset bytes differ from the approval')
+    if repo == DEV_REPO:
+        e.require(tag_commit(tag, repo) == approval['source_commit'], 'engine release tag does not name the approved engine commit')
+    e.require(release_metadata(tag, repo) == before, 'engine release changed while downloading')
+    return before
+
+
+def publish_engine_release(approval, engine_dir, target_commit, prod_checkout):
+    """Make the engine release an approval references exist in production, with exactly the approved assets.
+
+    Created once, at the merged promotion commit, and reused by every later runtime built on the same engine: an
+    existing release is accepted only when its assets verify against this approval and its tag is on main."""
+    tag = engine_release_tag(approval)
+    if tag is None:
+        return None
+    engine = approval['engine_binaries']
+    existing = release_metadata(tag, PROD_REPO, missing_ok=True)
+    if existing is None:
+        files = [e.safe_file(engine_dir, item['asset']) for item in engine.values()]
+        gh('release', 'create', tag, *files, '-R', PROD_REPO, '--target', target_commit, '--title', 'REXL3 engine ' + tag[len('engine-v'):],
+           '--notes', 'Native engine binary that runtime bundles reference by hash. The runtime approval that names it pins each '
+                      'asset by sha256 and size; this release makes no model claim.', '--latest=false')
+    with tempfile.TemporaryDirectory(prefix='.engine-', dir=Path(engine_dir).parent) as tmp:
+        verified = fetch_engine(approval, Path(tmp) / 'engine', repo=PROD_REPO)
+    commit = tag_commit(tag, PROD_REPO)
+    if existing is None:
+        e.require(commit == target_commit, 'published engine tag commit differs')
+    else:
+        git('merge-base', '--is-ancestor', commit, 'origin/main', cwd=e.checked_path(prod_checkout))
+    return verified
 
 
 def approval_assets(approval):
@@ -209,10 +272,14 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
         e.require(asset['size'] <= e.MAX_BYTES, 'release asset size limit')
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.download-', dir=dest.parent) as tmp:
-        stage = Path(tmp)
+        stage = Path(tmp) / 'release'
+        stage.mkdir()
         gh('release', 'download', tag, '-R', repo, '-D', stage)
         approval_path = e.safe_file(stage, 'approval.json')
         approval = e.trusted_entry(approval_path, registry)
+        # A bundle that leaves its native binary to an engine release is only verifiable together with that release.
+        engine_stage = Path(tmp) / 'engine'
+        engine_release = fetch_engine(approval, engine_stage, repo=repo)
         assets = approval_assets(approval)
         names = {'approval.json'} | {asset['archive'] for asset in assets}
         e.require({a['name'] for a in before['assets']} == names, 'unexpected/missing release assets')
@@ -231,8 +298,9 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
         transport = e.safe_file(stage, evidence['archive'])
         e.require(e.asset_record(transport) == evidence, 'evidence archive mismatch')
         e.require(not set(evidence['members']) & (names | {DEV_DOWNLOAD_RECEIPT}), 'evidence collides with release assets/state')
+        e.require(not any(name.startswith('engine/') for name in evidence['members']), 'evidence collides with the engine directory')
         e.extract_files(transport, stage, evidence['members'])
-        verify_approval(approval_path, approved_templates, registry)
+        verify_approval(approval_path, approved_templates, registry, engine_dir=engine_stage if engine_release else None)
         expected_commit = approval['source_commit'] if repo == DEV_REPO else target_commit
         e.full_hash(expected_commit, e.HEX40)
         expected_tag = approval['approve_tag'] if repo == DEV_REPO else f"prod/{approval['runtime_id']}/v{approval['version']}"
@@ -248,6 +316,8 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
             e.require(previous is None or previous == receipt, 'download retry identity drift')
         # Only after full validation may bytes enter/reuse the durable cache.
         files = {p.relative_to(stage).as_posix(): p for p in stage.rglob('*') if p.is_file()}
+        if engine_release:
+            files.update({'engine/' + p.name: p for p in engine_stage.iterdir()})
         for rel, source in files.items():
             target = e.checked_path(dest / rel)
             if target.exists():
@@ -271,7 +341,7 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
             target = e.safe_file(dest, rel)
             e.require(target.stat().st_size == source.stat().st_size and
                       e.sha256_file(target) == e.sha256_file(source), 'cached download bytes differ')
-        verify_approval(dest / 'approval.json', approved_templates, registry)
+        verify_approval(dest / 'approval.json', approved_templates, registry, engine_dir=dest / 'engine' if engine_release else None)
         if repo == DEV_REPO:
             e.require(_load_download_identity(receipt_path) == receipt, 'download identity persistence failed')
     return dest / 'approval.json'
@@ -335,7 +405,7 @@ def publish_release(runtime_id, approve_tag, version, work, *, target_commit, pr
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
     approval_path = e.safe_file(work, 'approval.json')
-    approval, _ = verify_approval(approval_path, approved_templates, registry)
+    approval, _ = verify_approval(approval_path, approved_templates, registry, engine_dir=Path(work) / 'engine')
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) ==
               (runtime_id, version, approve_tag), 'publication request identity mismatch')
     verify_merged_tree(runtime_id, version, target_commit, prod_checkout, approval_path, registry, approved_templates)
@@ -343,6 +413,8 @@ def publish_release(runtime_id, approve_tag, version, work, *, target_commit, pr
     if dry_run:
         print(f'VERIFIED_DRY_RUN would publish {tag} at {target_commit}; LATEST unchanged')
         return 0
+    # The engine release comes first: the runtime release is only usable, and only verifiable, together with it.
+    engine_release = publish_engine_release(approval, Path(work) / 'engine', target_commit, prod_checkout)
     existing = release_metadata(tag, PROD_REPO, missing_ok=True)
     publication_path = e.checked_path(Path(work) / f'publication-{runtime_id}-v{version}.json')
     previous = e.load_json(publication_path) if publication_path.exists() else None
@@ -358,6 +430,9 @@ def publish_release(runtime_id, approve_tag, version, work, *, target_commit, pr
         release_id=verified['id'], target_commit=target_commit, approval_sha256=e.sha256_file(approval_path),
         assets={asset['name']: dict({key: asset.get(key) for key in ('id', 'size', 'digest')},
             sha256=e.sha256_file(e.safe_file(work, asset['name']))) for asset in verified['assets']})
+    if engine_release is not None:
+        receipt['engine_release'] = dict(tag=engine_release['tag_name'], release_id=engine_release['id'],
+            assets={asset['name']: {key: asset.get(key) for key in ('id', 'size', 'digest')} for asset in engine_release['assets']})
     if previous is not None:
         e.require(previous == receipt, 'previously verified publication identity changed')
     else:
@@ -374,7 +449,7 @@ def prepare_promotion(runtime_id, approve_tag, version, *, target_commit, prod_c
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
     approval_path = e.safe_file(assets_dir, 'approval.json')
-    approval, archive = verify_approval(approval_path, approved_templates, registry)
+    approval, archive = verify_approval(approval_path, approved_templates, registry, engine_dir=Path(assets_dir) / 'engine')
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) == (runtime_id, version, approve_tag), 'promotion identity mismatch')
     root = e.checked_path(prod_checkout)
     e.require(git('rev-parse', 'HEAD', cwd=root).stdout.strip() == target_commit, 'explicit base commit required')

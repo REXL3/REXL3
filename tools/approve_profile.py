@@ -26,17 +26,34 @@ SCHEMA = e.SCHEMA
 sha256_file = e.sha256_file
 
 
+def engine_records(files, tag):
+    """``engine_binaries`` for an approval whose bundle leaves the native executables to an engine release.
+
+    ``files`` maps an install path (bin/rexl3-serve) to the engine release asset on disk, named exactly as the release
+    names it; ``tag`` is that release's tag. Returns the records and the directory holding the files."""
+    e.require(isinstance(files, dict) and files and isinstance(tag, str), 'engine binary files and release tag are required together')
+    paths = {install: e.checked_path(path) for install, path in files.items()}
+    directories = {path.parent for path in paths.values()}
+    e.require(len(directories) == 1, 'engine binary files must share one directory')
+    records = {install: dict(release_tag=tag, asset=path.name, sha256=e.sha256_file(path), bytes=path.stat().st_size, mode=0o755)
+               for install, path in sorted(paths.items())}
+    return e.validate_engine_binaries(records), directories.pop()
+
+
 def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_asset, engine_source_asset,
-                   receipts, evidence_root, repo, version, approved_by):
+                   receipts, evidence_root, repo, version, approved_by, engine_binary_files=None, engine_release_tag=None):
     e.validate_request(runtime_id, f'approve-{runtime_id}-{version}', version)
     e.require(isinstance(approved_by, str) and approved_by.strip(), 'named approver required')
     repo = e.checked_path(repo)
     e.git_identity(repo, commit, tree)
     engine_inventory = verify_git_projection(engine_source_asset, repo=repo, commit=commit, tree=tree)
     template = verified_identity(template_dir, repo=repo, commit=commit)
+    engine_binaries = engine_dir = None
+    if engine_binary_files is not None or engine_release_tag is not None:
+        engine_binaries, engine_dir = engine_records(engine_binary_files, engine_release_tag)
     profile, identities, inventory, source_inventory = e.bundle_identity(
         archive, source_asset, runtime_id=runtime_id, commit=commit, tree=tree,
-        template=template, version=version)
+        template=template, version=version, engine_binaries=engine_binaries, engine_dir=engine_dir)
     # Source declarations must name actual local Git objects, not 40-hex inventions.
     for filename in ('profile.json', 'model.lock.json'):
         raw = e.git_file(repo, commit, f'runtimes/models/{runtime_id}/{filename}')
@@ -71,6 +88,8 @@ def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_as
         bundle=e.asset_record(archive, inventory), source_asset=e.asset_record(source_asset, source_inventory),
         engine_source_asset=e.asset_record(engine_source_asset, engine_inventory),
         approved_by=approved_by, approved_at=datetime.now(timezone.utc).isoformat())
+    if engine_binaries is not None:
+        approval['engine_binaries'] = engine_binaries
     approval['evidence_asset'] = e.evidence_asset(approval, root)
     e.approval_assets(approval)  # all names distinct, including reserved transport/state names
     return approval
@@ -143,6 +162,10 @@ def main(argv=None):
     parser.add_argument('--archive', required=True)
     parser.add_argument('--source-asset', required=True, help='runtime wrapper projection (not engine source)')
     parser.add_argument('--engine-source-asset', required=True, help='exact Git-bound native engine corresponding-source archive')
+    parser.add_argument('--engine-binary', action='append', default=[], metavar='INSTALL_PATH=FILE',
+                        help='native executable supplied by an engine release instead of the bundle, e.g. '
+                             'bin/rexl3-serve=/dir/rexl3-serve-0.1.2-4208d848-linux-aarch64-sm121 (file named as the release asset)')
+    parser.add_argument('--engine-release-tag', help='tag of the engine release that holds the --engine-binary assets')
     parser.add_argument('--receipt', action='append', required=True)
     parser.add_argument('--evidence-root', required=True)
     parser.add_argument('--approved-by', required=True)
@@ -150,17 +173,27 @@ def main(argv=None):
     parser.add_argument('--no-publish', action='store_true', help='explicit offline mode (publication is always print-only)')
     args = parser.parse_args(argv)
     try:
+        engine_files = None
+        if args.engine_binary or args.engine_release_tag:
+            pairs = [item.partition('=') for item in args.engine_binary]
+            e.require(args.engine_binary and args.engine_release_tag and all(sep and key and value for key, sep, value in pairs)
+                      and len({key for key, _, _ in pairs}) == len(pairs),
+                      '--engine-binary INSTALL_PATH=FILE and --engine-release-tag are required together')
+            engine_files = {key: value for key, _, value in pairs}
         doc = build_approval(runtime_id=args.runtime_id, commit=args.commit, tree=args.tree, template_dir=args.template_dir,
             archive=args.archive, source_asset=args.source_asset, engine_source_asset=args.engine_source_asset,
             receipts=args.receipt, evidence_root=args.evidence_root,
-            repo=args.repo, version=args.version, approved_by=args.approved_by)
+            repo=args.repo, version=args.version, approved_by=args.approved_by,
+            engine_binary_files=engine_files, engine_release_tag=args.engine_release_tag)
         path = seal_to_directory(doc, archive=args.archive, source_asset=args.source_asset,
                                  engine_source_asset=args.engine_source_asset,
                                  evidence_root=args.evidence_root, out_dir=args.out_dir)
         # Re-read the seal and every bound file before reporting a durable result.
         registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {f'{args.runtime_id}/v{args.version}': {
             'approval_sha256': e.sha256_file(path), 'source_commit': args.commit, 'source_tree': args.tree}}}
-        e.verify_assets(path, registry=registry, approved_templates={doc['template']['version']: doc['template']['digest']})
+        engine_dir = engine_records(engine_files, args.engine_release_tag)[1] if engine_files else None
+        e.verify_assets(path, registry=registry, approved_templates={doc['template']['version']: doc['template']['digest']},
+                        engine_dir=engine_dir)
         assets = [path] + [path.parent / asset['archive'] for asset in e.approval_assets(doc)]
         # Nested evidence is transported as a separate tar; GitHub assets cannot preserve directories.
         # promote_runtime also accepts a local authenticated asset directory after unpacking evidence.
@@ -170,6 +203,9 @@ def main(argv=None):
         print(shlex.join(['gh', 'release', 'create', doc['approve_tag'], *map(str, assets), '-R', 'REXL3/REXL3-dev',
                           '--target', args.commit, '--title', 'approve ' + args.runtime_id]))
         print('evidence.tar.gz carries the exact bound sibling receipt/observation/raw files.')
+        for install, item in doc.get('engine_binaries', {}).items():
+            print(f"engine binary {install} is not a release asset here: it comes from engine release {item['release_tag']} "
+                  f"(asset {item['asset']}, sha256 {item['sha256']}); that release must exist before this one is promoted.")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         print('APPROVAL_REFUSED: ' + str(error), file=sys.stderr)

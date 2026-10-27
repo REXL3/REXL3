@@ -47,7 +47,21 @@ ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/pack/approval.json'
 sha256sum "/tmp/pack/$ARCHIVE"
 grep -A4 '"bundle"' /tmp/pack/approval.json
 
-mkdir -p ~/rexl3 && tar -xzf "/tmp/pack/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
+mkdir -p ~/rexl3 && tar -xzf "/tmp/pack/$ARCHIVE" -C ~/rexl3
+ENGINE=/tmp/pack-engine                              # only when approval.json has "engine_binaries" (see section 4.4a)
+python3 - /tmp/pack/approval.json "$ENGINE" ~/rexl3 <<'PY'
+import hashlib, json, os, shutil, subprocess, sys
+approval, engine_dir, root = sys.argv[1:4]
+for install, item in json.load(open(approval)).get('engine_binaries', {}).items():
+    subprocess.run(['gh', 'release', 'download', item['release_tag'], '-R', 'REXL3/REXL3', '-p', item['asset'], '-D', engine_dir], check=True)
+    path = os.path.join(engine_dir, item['asset'])
+    if hashlib.sha256(open(path, 'rb').read()).hexdigest() != item['sha256'] or os.path.getsize(path) != item['bytes']:
+        sys.exit('ENGINE_BINARY_HASH_MISMATCH: stop; do not run it')
+    os.makedirs(os.path.join(root, os.path.dirname(install)), exist_ok=True)
+    shutil.copyfile(path, os.path.join(root, install)); os.chmod(os.path.join(root, install), 0o755)
+    print('placed', install, 'from', item['release_tag'])
+PY
+cd ~/rexl3
 ./launch.sh --yes install-deps          # isolated, hash-pinned Python environment; no model download
 ./launch.sh doctor                      # read-only checks; must exit 0
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the model (size: the pack sheet)
@@ -108,7 +122,9 @@ tools/                           # verifier, promoter and their tests (stdlib Py
 ```
 
 `bin/` and `release.lock.json` are not in git: they exist only in the release archive, because a
-hosted CPU runner cannot build or qualify the CUDA binaries.
+hosted CPU runner cannot build or qualify the CUDA binaries. A newer release may leave `bin/` out of its
+archive and take the server binary from an engine release (`engine-v<version>-<commit>`) that its
+`approval.json` names by hash under `engine_binaries`; the quick start above places it.
 
 ## What CI checks
 

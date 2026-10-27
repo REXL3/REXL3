@@ -30,6 +30,9 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
 MAX_FILES, MAX_BYTES, MAX_FILE_BYTES = 10000, 8 * 1024**3, 2 * 1024**3
 MAX_JSON_BYTES = 16 * 1024**2
+# Native executables a runtime may take from an engine release instead of carrying them in its bundle.
+ENGINE_PATHS = ('bin/rexl3-serve', 'bin/rexl3-cluster')
+ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\Z')
 
 
 def require(condition, message):
@@ -743,9 +746,53 @@ def profile_context(choice, archive):
     return context, 2
 
 
-def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template, version):
+def validate_engine_binaries(engine):
+    """Strict shape of an approval's ``engine_binaries``: install path -> the engine release asset that supplies it."""
+    require(isinstance(engine, dict) and 'bin/rexl3-serve' in engine and set(engine) <= set(ENGINE_PATHS),
+            'engine_binaries must name bin/rexl3-serve and only known native paths')
+    for path, item in engine.items():
+        require(isinstance(item, dict) and set(item) == {'release_tag', 'asset', 'sha256', 'bytes', 'mode'},
+                'invalid engine binary record: ' + path)
+        require(isinstance(item['release_tag'], str) and ENGINE_TAG.fullmatch(item['release_tag']), 'invalid engine release tag')
+        require(isinstance(item['asset'], str), 'invalid engine asset name')
+        relative_path(item['asset'])
+        require('/' not in item['asset'], 'engine asset must be a basename')
+        full_hash(item['sha256'])
+        require(type(item['bytes']) is int and item['bytes'] > 0, 'invalid engine binary size')
+        require(type(item['mode']) is int and item['mode'] == 0o755, 'engine binary mode must be 0755')
+    require(len({item['release_tag'] for item in engine.values()}) == 1, 'one engine release supplies every native binary')
+    require(len({item['asset'] for item in engine.values()}) == len(engine), 'engine assets must be distinct')
+    return engine
+
+
+def native_elf_header(header, machine):
+    return (len(header) == 64 and header[:7] == b'\x7fELF\x02\x01\x01' and
+            struct.unpack_from('<H', header, 16)[0] in (2, 3) and
+            struct.unpack_from('<H', header, 18)[0] == {'aarch64': 183, 'x86_64': 62}[machine])
+
+
+def engine_binary_files(engine, engine_dir, machine):
+    """The real engine files behind ``engine_binaries``: exact bytes, size and a native ELF header for this platform."""
+    require(engine_dir is not None, 'engine binary files are required to verify an approval that references an engine release')
+    for path, item in engine.items():
+        file = safe_file(engine_dir, item['asset'])
+        require(file.stat().st_size == item['bytes'] and sha256_file(file) == item['sha256'], 'engine binary hash/size mismatch: ' + path)
+        with file.open('rb') as stream:
+            header = stream.read(64)
+        require(native_elf_header(header, machine), 'native ELF/platform mismatch: ' + path)
+
+
+def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template, version, engine_binaries=None, engine_dir=None):
+    """Identity of a bundle. With ``engine_binaries`` the native executables are not in the archive: the approval
+    names the engine release assets that supply them and ``engine_dir`` holds those files."""
     inv = inspect_archive(archive)
-    require({'source.manifest.json', 'profile.json', 'model.lock.json', 'release.lock.json', 'bin/rexl3-serve'} <= set(inv), 'incomplete bundle')
+    if engine_binaries is None:
+        full = inv
+    else:
+        validate_engine_binaries(engine_binaries)
+        require(not any(name.startswith('bin/') for name in inv), 'bundle must not carry native executables the engine release supplies')
+        full = dict(inv, **{path: {k: item[k] for k in ('sha256', 'bytes', 'mode')} for path, item in engine_binaries.items()})
+    require({'source.manifest.json', 'profile.json', 'model.lock.json', 'release.lock.json', 'bin/rexl3-serve'} <= set(full), 'incomplete bundle')
     profile = archive_json(archive, 'profile.json')
     models = archive_json(archive, 'model.lock.json')
     release = archive_json(archive, 'release.lock.json')
@@ -756,7 +803,7 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     require(profile.get('runtime_id') == release.get('runtime_id') == runtime_id, 'runtime identity mismatch')
     require(release.get('production_commit') == commit and release.get('production_tree') == tree, 'release source identity mismatch')
     require(profile.get('target_repo') == release.get('target_repo') == models['packs'].get('target', {}).get('repo'), 'model identity mismatch')
-    require(release.get('files') == {k: v for k, v in inv.items() if k != 'release.lock.json'}, 'release inventory mismatch')
+    require(release.get('files') == {k: v for k, v in full.items() if k != 'release.lock.json'}, 'release inventory mismatch')
     for records in (release['files'], manifest.get('files', {})):
         for name, item in records.items():
             relative_path(name)
@@ -775,21 +822,25 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     arch = platform.get('gpu_compute_capability')
     require(isinstance(arch, str) and re.fullmatch(r'[1-9][0-9]*\.[0-9]+', arch), 'native GPU architecture required')
     require(native['cuda_arch'] in (arch.replace('.', ''), 'sm_' + arch.replace('.', ''), 'compute_' + arch.replace('.', '')), 'native architecture mismatch')
-    require({name for name in inv if name.startswith('bin/')} <= {'bin/rexl3-serve', 'bin/rexl3-cluster'}, 'unexpected native executable')
-    with tarfile.open(archive, 'r:*') as tar:
-        for name in inv:
-            if name.startswith('bin/'):
-                with tar.extractfile(name) as stream:
-                    header = stream.read(64)
-                require(len(header) == 64 and header[:7] == b'\x7fELF\x02\x01\x01' and
-                        struct.unpack_from('<H', header, 16)[0] in (2, 3) and
-                        struct.unpack_from('<H', header, 18)[0] == {'aarch64': 183, 'x86_64': 62}[platform['machine']]
-                        and inv[name]['mode'] == 0o755, 'native ELF/platform/mode mismatch')
+    require({name for name in full if name.startswith('bin/')} <= set(ENGINE_PATHS), 'unexpected native executable')
+    if engine_binaries is None:
+        with tarfile.open(archive, 'r:*') as tar:
+            for name in inv:
+                if name.startswith('bin/'):
+                    with tar.extractfile(name) as stream:
+                        header = stream.read(64)
+                    require(native_elf_header(header, platform['machine']) and inv[name]['mode'] == 0o755,
+                            'native ELF/platform/mode mismatch')
+    else:
+        # The tag names the engine, never a model: engine version and the first eight hex digits of its commit.
+        require({item['release_tag'] for item in engine_binaries.values()} == {'engine-v%s-%s' % (native['version'], commit[:8])},
+                'engine release tag does not name the native engine version and commit')
+        engine_binary_files(engine_binaries, engine_dir, platform['machine'])
     source_inv = {k: v for k, v in inv.items() if not k.startswith('bin/') and k != 'release.lock.json'}
     require(inspect_archive(source_asset) == source_inv, 'runtime wrapper source asset mismatch')
     require(manifest.get('files') == {k: v for k, v in source_inv.items() if k != 'source.manifest.json'}, 'source inventory mismatch')
     require(manifest.get('template') == {k: template[k] for k in ('version', 'digest')}, 'manifest template mismatch')
-    identities = {key: inv[name]['sha256'] for key, name in (
+    identities = {key: full[name]['sha256'] for key, name in (
         ('profile_sha256', 'profile.json'), ('model_lock_sha256', 'model.lock.json'),
         ('release_lock_sha256', 'release.lock.json'), ('source_manifest_sha256', 'source.manifest.json'),
         ('binary_sha256', 'bin/rexl3-serve'))}
@@ -805,7 +856,7 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
         context, ranks = profile_context(choice, archive)
         require(context > 0, 'positive context required')
         if ranks == 2:
-            require('bin/rexl3-cluster' in inv, 'cluster binary missing')
+            require('bin/rexl3-cluster' in full, 'cluster binary missing')
     return profile, identities, inv, source_inv
 
 
@@ -826,7 +877,7 @@ def trusted_entry(approval_path, registry, *, allow_legacy=False):
     return approval
 
 
-def verify_assets(approval_path, *, registry, approved_templates):
+def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None):
     """Authenticate approval, then every archive and receipt, including engine source.
 
     Consumer source validation is approval-bound integrity, not independent proof
@@ -853,8 +904,10 @@ def verify_assets(approval_path, *, registry, approved_templates):
                            tree=doc['source_tree'], asset=doc['engine_source_asset'])
     evidence = doc.get('evidence_asset')
     require(receipt_files(doc, root) == evidence['members'], 'evidence inventory drift')
+    engine = doc.get('engine_binaries')
+    require('engine_binaries' not in doc or isinstance(engine, dict), 'engine_binaries must be an object')
     profile, identities, _, _ = bundle_identity(archive, wrapper, runtime_id=doc['runtime_id'], commit=doc['source_commit'],
-        tree=doc['source_tree'], template=template, version=doc['version'])
+        tree=doc['source_tree'], template=template, version=doc['version'], engine_binaries=engine, engine_dir=engine_dir)
     require(identities == doc.get('identities'), 'approval bundle identities mismatch')
     profiles = doc.get('profiles')
     require(isinstance(profiles, dict) and set(profiles) == set(profile['profiles']), 'receipt profile set mismatch')

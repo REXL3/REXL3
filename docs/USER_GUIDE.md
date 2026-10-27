@@ -128,6 +128,32 @@ mkdir -p ~/rexl3 && tar -xzf "/tmp/pack/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
 Use a new directory for every version. Never extract over a bundle that is running. Keep the archive and
 `approval.json` next to it: you need them for updates, rollback and bug reports.
 
+### 4.4a Place the engine binary, when the release references one
+
+Some releases do not carry the server binary. Their `approval.json` has an `engine_binaries` entry that names an
+engine release (`engine-v<version>-<commit>` in this repository), the asset, and its SHA-256 and size. The bundle's
+`release.lock.json` still pins the same hash, so `doctor` refuses any other file. Run this once after extracting; it
+does nothing for a release without the entry:
+
+```bash
+ENGINE=/tmp/pack-engine                              # only when approval.json has "engine_binaries" (see section 4.4a)
+python3 - /tmp/pack/approval.json "$ENGINE" ~/rexl3 <<'PY'
+import hashlib, json, os, shutil, subprocess, sys
+approval, engine_dir, root = sys.argv[1:4]
+for install, item in json.load(open(approval)).get('engine_binaries', {}).items():
+    subprocess.run(['gh', 'release', 'download', item['release_tag'], '-R', 'REXL3/REXL3', '-p', item['asset'], '-D', engine_dir], check=True)
+    path = os.path.join(engine_dir, item['asset'])
+    if hashlib.sha256(open(path, 'rb').read()).hexdigest() != item['sha256'] or os.path.getsize(path) != item['bytes']:
+        sys.exit('ENGINE_BINARY_HASH_MISMATCH: stop; do not run it')
+    os.makedirs(os.path.join(root, os.path.dirname(install)), exist_ok=True)
+    shutil.copyfile(path, os.path.join(root, install)); os.chmod(os.path.join(root, install), 0o755)
+    print('placed', install, 'from', item['release_tag'])
+PY
+```
+
+If it prints `ENGINE_BINARY_HASH_MISMATCH`, **stop** and report it (section 11). Engine releases are shared: a
+second runtime built on the same engine uses the same file.
+
 ### 4.5 Install the dependencies, then run `doctor`
 
 ```bash

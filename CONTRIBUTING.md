@@ -90,6 +90,12 @@ agree), never from folder names.
 | `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
 | `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
 
+- A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0 is
+  the five-model group (section 2); it is cut only after all five model PRs are validated by the
+  non-submitting maintainer and merged. Each `model/<model>` PR holds all the commits that make that
+  model work; a later release may add a single newly validated model as a new version only after
+  v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
+  release candidate.
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.

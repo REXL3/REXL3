@@ -50,7 +50,15 @@ privileges, network, GitHub access).
 There is **one versioned product release** — the engine and its recipes ship together — not a release
 per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
-- All models in a release are sealed from the same dev release-candidate commit.
+- Releases are cut from an agreed group of models listed in the release manifest; v0.1.0 is the
+  five-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash,
+  Nemotron-3.5-Super-VL). Each model enters prod through its own `model/<model>` PR, validated
+  (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
+  only after every in-scope model PR has been validated and merged. No model gets its own release or
+  release candidate; a later release may add a single newly validated model as a new version only
+  after v0.1.0 is released.
+- All models in a release are sealed from the same dev freeze commit; the freeze exists only so the
+  whole group is validated on one engine build, and is never a release per model.
 - A release is a `v<X.Y.Z>` tag on the prod repository. Per-runtime releases are retired; a release
   contains the bundle archives for every recipe in it, their `approval.json` records, and the engine
   corresponding source.

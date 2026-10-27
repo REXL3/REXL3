@@ -11,12 +11,28 @@ never by agents, never by automation. Agents never create, edit, publish or dele
   - PATCH: fixes and performance work that keep recipes compatible.
 - Prod tags: `v<X.Y.Z>` only. No per-runtime GitHub releases; `prod/<runtime>/v<N>` is retired.
 - Dev releases `approve-*` and `engine-v*` are internal provenance, never product releases.
+- No model ever gets its own release or release candidate.
+
+## Grouped releases
+
+A release is cut from an explicitly agreed group of models listed in the release manifest
+(`releases/v<X.Y.Z>/manifest.json`). v0.1.0 is the five-model group: Qwen3.8-27B,
+Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Nemotron-3.5-Super-VL.
+
+- Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
+  that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
+  the maintainer who did NOT submit it (CONTRIBUTING.md section 4).
+- The release is cut ONLY after every in-scope model PR has been validated and merged.
+- No model gets its own release or release candidate.
+- Only AFTER v0.1.0 is released may a later release contain a single newly validated model as a new
+  version; it is never phrased as a release candidate for one model.
 
 ## The release candidate on dev
 
-- Dev uses a release branch `release/v<X.Y.Z>`; candidates are tagged `v<X.Y.Z>-rc.<N>` on dev.
-- **All models in a release are sealed from the SAME dev release-candidate commit.**
-- The dev workspace version is set to `<X.Y.Z>` at the release candidate; the next dev cycle uses
+- Dev uses a release branch `release/v<X.Y.Z>`; the group freeze is tagged `v<X.Y.Z>-rc.<N>` on dev.
+- The dev freeze commit exists only so the whole group is validated on one engine build; it is never
+  a release and is never per model. Every model in the release is sealed from the SAME freeze commit.
+- The dev workspace version is set to `<X.Y.Z>` at the freeze; the next dev cycle uses
   `<X.(Y+1).0>-dev`. Earlier 0.1.1/0.1.2 labels were internal builds.
 
 ## The release PR
@@ -83,13 +99,15 @@ Before the candidate:
       `KNOWN_ISSUES`, approval sealed from the RC commit).
 - [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut; candidate tagged
       `v<X.Y.Z>-rc.<N>`.
-- [ ] All models in the release are sealed from the SAME dev release-candidate commit; GB10 receipts
-      exist for that commit.
+- [ ] All models in the release are sealed from the SAME dev freeze commit; GB10 receipts
+      exist for that commit. The freeze exists only so the whole group is validated on one engine
+      build; it is never a release and is never per model.
 
 At the release PR:
 
 - [ ] `releases/v<X.Y.Z>/manifest.json` is schema-valid (`rexl3.release-manifest.v1`) and consistent
       with main (engine dev commit/tree/tag/digests; every model entry matches the registry).
+- [ ] The manifest lists the agreed release group (all in-scope models; no model outside the group).
 - [ ] `releases/v<X.Y.Z>/NOTES.md` assembled from fragments via
       `tools/assemble_release_notes.py`; `CHANGELOG.md` entry added; consumed
       `changes/unreleased/*.md` fragments deleted.

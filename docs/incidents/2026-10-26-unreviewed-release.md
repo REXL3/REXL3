@@ -73,9 +73,10 @@ maintains the table; rows for PRs that are not yet merged are marked "filled at 
 |---|---|---|---|
 | #33 | FIX: Removed the unreviewed Qwen3.8-27B release from production | `677a092e` | 2026-10-27 05:52:22 |
 | #34 | FIX: Removed the unreviewed Qwen3.8-27B approvals from the registry | `106c9680` | 2026-10-27 05:50:56 |
-| #35 | FEAT: Restructured production runtime layout and added release and governance checks | filled at merge time | filled at merge time |
-| #31 | DOCS: Replaced the production rules with the model-branch release process | filled at merge time | filled at merge time |
-| #32 | DOCS: Rewrote the production README around engine features and recipes | filled at merge time | filled at merge time |
+| #35 | FEAT: Restructured production runtime layout and added release and governance checks | `779e86cf` | 2026-10-27 06:42:04 |
+| #36 | TEST: Pinned the promotion test git identity to the synthetic user | `804d793b` | 2026-10-27 06:49:38 |
+| #32 | DOCS: Rewrote the production README around engine features and recipes | `51f99840` | 2026-10-27 06:51:53 |
+| #31 | DOCS: Replaced the production rules with the model-branch release process | this PR | this PR |
 
 Retroactive review list: PRs #12 through #28, plus every PR in the table above. The review is a
 maintainer approval of the change itself; where a change has since been superseded by the restructure,

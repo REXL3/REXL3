@@ -51,9 +51,10 @@ Naming:
   while Qwen3.8-Flash-Next is `qwen4_exp` (`Qwen4ExpForConditionalGeneration`, dev module
   `qwen_flash_next`).
 - **One pack per model per release.** A second pack for the same model needs both maintainers'
-  agreement and a descriptive variant suffix agreed by both (never a bit width). For example, dev
-  currently has two GLM-5.3-Flash packs (`glm53-flash-2.25bpw-sm121` and
-  `redsnow-5.3-flash-sage-2.49`); one will be chosen before first release.
+  agreement and a descriptive variant suffix agreed by both (never a bit width).
+- A derivative model with its own name is a separate model, not a second pack: it gets its own
+  `<model>` folder, for example RED-SNOW-5.3-Flash lives at
+  `runtimes/glm-5.3/red-snow-5.3-flash/` rather than being a second GLM-5.3-Flash pack.
 
 First-release map (priority order):
 
@@ -62,7 +63,7 @@ First-release map (priority order):
 | 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen` (qwen3_5) |
 | 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | none yet | `qwen_flash_next` (qwen4_exp) |
 | 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.62` | `deepseek_v41` |
-| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121`, `redsnow-5.3-flash-sage-2.49` | `glm` |
+| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm` |
 | 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | none yet | `nemotron_h_omni` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:

@@ -97,7 +97,8 @@ superseded by the restructure, a review of its replacement suffices.
   orchestrator writes them once the owner consents. CONTRIBUTING.md already carries the agent rules.
 - **Secrets for am423 to review**: `REXL3_PROMOTE_PAT` (legacy, unused) and `XAI_OAUTH_STATE` —
   decide whether to rotate, restrict or remove.
-- **Choose one GLM-5.3-Flash pack**: dev has two (`glm53-flash-2.25bpw-sm121`,
-  `redsnow-5.3-flash-sage-2.49`); the first release carries one.
+- **Choose one GLM-5.3-Flash pack** — resolved: RED-SNOW-5.3-Flash is a separate GLM-5.3-Flash
+  derivative model with its own name, Hugging Face repo and MTP head, not a second pack; no pack
+  choice is needed. The first release carries `glm53-flash-2.25bpw-sm121`.
 - **Version alignment at the RC**: set the dev workspace version to `v0.1.0` at the release candidate
   (earlier 0.1.1/0.1.2 labels were internal builds).

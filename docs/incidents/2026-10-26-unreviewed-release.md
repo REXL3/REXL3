@@ -83,6 +83,7 @@ maintains the table; rows for PRs that are not yet merged are marked "filled at 
 | #43 | DOCS: Recorded the final audit PR rows in the incident record | this PR | this PR |
 | #32 | DOCS: Rewrote the production README around engine features and recipes | `51f99840` | 2026-10-27 06:51:53 |
 | #31 | DOCS: Replaced the production rules with the model-branch release process | this PR | this PR |
+| #44 | DOCS: Rewrote the agent instructions for the production release process | this PR | this PR |
 
 Retroactive review list: every pre-restructure unreviewed merge (PRs #1-#28) plus every PR in the
 table above. The review is a maintainer approval of the change itself; where a change has since been

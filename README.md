@@ -17,14 +17,7 @@ Each pack also has a one-page **pack sheet** with its model, context window, por
 
 ## Released packs
 
-| Runtime | Version | Context | Topology | Vision | Pack sheet |
-| --- | --- | --- | --- | --- | --- |
-| `qwen38-27b-dflash2-exl3-4.00` | `v1` | 262K (`--max-model-len 262144`) | single node, 6 slots | on | [sheet](docs/packs/qwen38-27b-dflash2-exl3-4.00.md) |
-
-The table lists only versions that are promoted and published. `v1` serves Qwen3.8-27B (4.00 bits per weight) with a
-DFlash2 draft for speculative decoding and a pinned prefix cache; the sheet and
-`runtimes/qwen38-27b-dflash2-exl3-4.00/v1/KNOWN_ISSUES.md` give its capabilities, limits and measured behaviour. A pack's
-sheet is added by a docs pull request after its release is published ([docs/packs/README.md](docs/packs/README.md)).
+No pack is released yet. The first product release will be `v0.1.0`.
 
 No other profile is released.
 

@@ -73,6 +73,12 @@ class MergedPrCheckTest(unittest.TestCase):
                                       reviews_for=lambda n: [])
         self.assertEqual(problems, [])
 
+    def test_incident_record_single_number_exempts(self):
+        write(self.tmp.name, 'docs/incidents/2026-10-26-unreviewed-release.md', b'PR #33 merged unreviewed.\n')
+        problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, pulls=[merged_pr(33)],
+                                      reviews_for=lambda n: [])
+        self.assertEqual(problems, [])
+
     def test_old_merge_is_ignored(self):
         problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, pulls=[merged_pr(1, days=30)],
                                       reviews_for=lambda n: [])

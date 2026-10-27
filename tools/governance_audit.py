@@ -35,7 +35,7 @@ def days_ago(days):
 def incident_covers(incident_text, number):
     for match in INCIDENT_RANGE.finditer(incident_text):
         start = int(match[1])
-        end = int(match[2] or match[3] or match[1])
+        end = int(match[2] or match[1])
         if start <= number <= end:
             return True
     return False

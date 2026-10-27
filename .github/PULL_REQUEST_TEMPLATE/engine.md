@@ -12,7 +12,7 @@ Run on this head commit (SHA: ), with `umask 022`; paste the output:
 
 - [ ] `git diff --check`
 - [ ] `python3 -m unittest discover -s tools -p 'test_*.py'`
-- [ ] For behavior-changing tool/workflow PRs: the verifier command from CONTRIBUTING.md section 6, run on the head
+- [ ] For behavior-changing tool/workflow PRs: `python3 -B -E -s tools/verify_runtime_tree.py --root . --approved runtimes/templates/APPROVED.json --trusted-approvals runtimes/templates/APPROVALS.json --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" --assets-dir "$(mktemp -d)"` (the command in CONTRIBUTING.md section 6), run on the head
 - [ ] Rebased on `origin/main` (commit: ); one commit; the subject equals the PR title
 
 ## Contracts

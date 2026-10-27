@@ -35,15 +35,26 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
 - Each change contributes a fragment `changes/unreleased/<slug>.md` (rules in
   `changes/unreleased/README.md`).
 - Fragments are assembled by `tools/assemble_release_notes.py` into the template
-  `docs/templates/RELEASE_NOTES.md`, with sections: Highlights; Supported models (table: model,
-  architecture, pack, context, speculative decoding, prefix cache, vision, evidence); New features and
-  improvements; Bug fixes; Breaking changes and upgrade notes; Known issues; Assets and checksums;
-  Provenance. A fragment uses only the headings it needs.
+  `docs/templates/RELEASE_NOTES.md`:
+
+  ```bash
+  python3 tools/assemble_release_notes.py --repo-root PATH --version vX.Y.Z
+  ```
+
+  (`--repo-root` defaults to `.`.) The template sections are: Highlights; Supported models (table:
+  model, architecture, pack, context, speculative decoding, prefix cache, vision, evidence); New
+  features and improvements; Bug fixes; Breaking changes and upgrade notes; Known issues; Assets and
+  checksums; Provenance. A fragment uses only the headings it needs (Highlights; New features and
+  improvements; Bug fixes; Breaking changes and upgrade notes; Known issues); the Supported models,
+  Assets and Provenance sections are generated from `releases/v<X.Y.Z>/manifest.json`. The tool writes
+  `releases/v<X.Y.Z>/NOTES.md` and prepends the `CHANGELOG.md` entry; unknown headings, empty
+  fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2).
 
 ## The cut_release ceremony (maintainers only)
 
 No GitHub App. The ceremony is run by a maintainer personally on their own machine with an
-authenticated `gh`:
+authenticated `gh`; `tools/cut_release.py` requires `GH_TOKEN` in the environment (it never edits
+rulesets or settings):
 
 1. **Release PR approved by the other maintainer and merged.**
 2. `python3 tools/cut_release.py --version vX.Y.Z` — dry run (the default) verifies: release PR
@@ -52,10 +63,11 @@ authenticated `gh`:
 3. A maintainer temporarily allows creation of exactly that tag in the tag ruleset.
 4. `python3 tools/cut_release.py --version vX.Y.Z --publish` — creates the tag at the release PR's
    merge commit, a draft release with the notes and assets, verifies uploaded digests, then publishes.
-5. The maintainer restores the tag ruleset; `python3 tools/cut_release.py --verify vX.Y.Z` confirms
-   the lock is restored and the published release matches the manifest.
+5. The maintainer restores the tag ruleset; `python3 tools/cut_release.py --version vX.Y.Z --verify`
+   confirms the lock is restored and the published release matches the manifest.
 
-`cut_release.py` never edits rulesets or settings.
+`--publish` and `--verify` are mutually exclusive; `--repo` defaults to `REXL3/REXL3` and
+`--repo-root` to `.`; refusals print `CUT_REFUSED: ...` on stderr and exit 2.
 
 ## Immutability
 
@@ -89,7 +101,7 @@ At the ceremony:
 - [ ] Maintainer temporarily allows creation of exactly that tag in the tag ruleset.
 - [ ] `python3 tools/cut_release.py --version vX.Y.Z --publish` publishes tag + draft release, verifies
       uploaded digests, publishes.
-- [ ] Maintainer restores the tag ruleset; `python3 tools/cut_release.py --verify vX.Y.Z` confirms the
+- [ ] Maintainer restores the tag ruleset; `python3 tools/cut_release.py --version vX.Y.Z --verify` confirms the
       lock is restored and the release matches the manifest.
 
 After the release:

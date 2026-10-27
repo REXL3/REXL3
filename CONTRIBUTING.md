@@ -71,7 +71,8 @@ First-release map (priority order):
 - `architectures` (list of HF architecture class names), `engine_family` (dev module name),
 - `runtime_id` (dev runtime id used for dev release tags `approve-<runtime_id>-<n>`),
 - `pack` (object; required key `format`, e.g. "exl3"; other descriptive keys such as `bits`,
-  `draft`, `target_repo`, `draft_repo` are allowed).
+  `draft`, `target_repo`, `draft_repo`, and `vision_does_not_fit` (a string recording a proven
+  does-not-fit justification when vision is off) are allowed).
 
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
 keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The
@@ -160,19 +161,22 @@ commit SHA, PR title/body passed via `env`, not inline expressions.
 `governance-audit` is scheduled daily plus manual, read-only. It fails when: a release exists whose tag
 is not `v<X.Y.Z>` or has no matching `releases/v<X.Y.Z>/manifest.json` on main; a PR merged to main in
 the last 14 days has no approving review by a non-author maintainer and is not listed in an incident
-record; the live rulesets differ from `.github/rulesets/*.json`; immutable releases are disabled.
+record; the live rulesets differ from `.github/rulesets/*.json`; immutable releases are disabled. It
+is run as `python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOKEN`
+(`--codeowners` defaults to `<repo-root>/.github/CODEOWNERS`; `REXL3_REPO`/`GH_TOKEN` environment
+fallbacks apply) and prints `PASS governance-audit` or one `FAIL <problem>` per problem.
 
 ## 6. Checks before you open a PR
 
 ```bash
-umask 022                     # file modes in the legacy inventory are 644/755
+umask 022                     # file modes in the inventory are 644/755
 git diff --check
 python3 -m unittest discover -s tools -p 'test_*.py'
 python3 -B -E -s tools/verify_runtime_tree.py --root . \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
   --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
-  --assets-dir "$(mktemp -d)" --allow-legacy
+  --assets-dir "$(mktemp -d)"
 ```
 
 The unit tests need only Python 3.12 and `git`. They use disposable Git repositories and synthetic
@@ -188,6 +192,96 @@ judged by the rules already on `main`, not by its own changes: its own tool, tes
 changes are not run by its `verify` job (the first CI run of them is the push after the merge). For
 those pull requests your pasted local run on the head SHA is the only evidence before merge, and
 reviewers re-run it.
+
+### Tool command reference
+
+The exact commands and flags below are the implemented interfaces (read from the tools themselves;
+see `docs/PROMOTION.md` and `docs/RELEASING.md` for the workflows they belong to). The checker tools
+print one line per check (`PASS`/`FAIL name: reason`) and exit 0 when all pass, 1 on any fail, 2 on
+a usage error.
+
+**`tools/check_model_branch.py`** — completeness gate for `model/<model>` PRs (check names:
+`branch/model`, `scope`, `MODEL.json`, `LATEST`, `tree`, `source commit`, `capability contract`,
+`docs and fragment`):
+
+```bash
+python3 tools/check_model_branch.py --repo-root PATH --base REF --head REF \
+  [--branch REF] [--rc-commit SHA] [--tree-dir PATH] [--base-tree-dir PATH] \
+  [--assets-dir PATH] [--local]
+```
+
+`--base`/`--head` are refs in `--repo-root`. `--tree-dir` defaults to `--repo-root`; `--base-tree-dir`
+defaults to reading base files from git objects; `--assets-dir` defaults to `$REXL3_ASSETS_DIR`.
+`--rc-commit` demands the sealed approval's source commit equal it; `--local` additionally downloads
+and digest-checks the dev assets via `tools/fetch_dev_assets.py`.
+
+**`tools/check_pr_rules.py`** — title, branch, path scope and fragment rules (check names:
+`branch`, `title`, `scope`, `verify pin only` for `model/*-approval`, `fragment`). Requires
+`--repo`, `--pr`, `--title`, `--head-ref`, `--token` (or the environment `REXL3_REPO`,
+`REXL3_PR_NUMBER`, `REXL3_TITLE`, `REXL3_HEAD_REF`, `GH_TOKEN`):
+
+```bash
+python3 tools/check_pr_rules.py --repo OWNER/REPO --pr N --title T --head-ref REF --token TOKEN
+```
+
+**`tools/check_local_validation.py`** — evaluates APPROVED maintainer reviews carrying a
+`LOCAL-VALIDATION v1` block for the current head (section 4) and sets the commit status
+`local-validation` on the head SHA. Requires `--repo`, `--pr`, `--head-sha`, `--codeowners`,
+`--token` (or `REXL3_REPO`, `REXL3_PR_NUMBER`, `REXL3_HEAD_SHA`, `REXL3_CODEOWNERS`, `GH_TOKEN`):
+
+```bash
+python3 tools/check_local_validation.py --repo OWNER/REPO --pr N --head-sha SHA \
+  --codeowners PATH --token TOKEN
+```
+
+**`tools/governance_audit.py`** — read-only audit (scheduled daily + manual, not required). Requires
+`--repo` and `--token` (or `REXL3_REPO`, `GH_TOKEN`); `--repo-root` defaults to `.`, `--codeowners`
+defaults to `<repo-root>/.github/CODEOWNERS`. Prints `PASS governance-audit` or one `FAIL <problem>`
+per problem:
+
+```bash
+python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOKEN
+```
+
+**`tools/promote_runtime.py`** — creates the sealed tree and the `model/<model>` PR
+(`docs/PROMOTION.md`). `--version` is an integer `<N>`; `--target-commit` is the exact production base
+commit; `--assets-dir` is a durable, verified dev-asset cache; `--approved`,
+`--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and pin;
+`--download` validates and caches the dev release assets; `--dry-run` verifies and prints without
+writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,
+`--architecture` (repeatable) and `--pack KEY=VALUE` (repeatable) supply the metadata:
+
+```bash
+python3 tools/promote_runtime.py \
+  --family <family> --model <model> --version <N> \
+  --approve-tag approve-<runtime_id>-<N> \
+  --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
+  --assets-dir <durable-dev-assets> [--download] \
+  --approved runtimes/templates/APPROVED.json \
+  --trusted-approvals runtimes/templates/APPROVALS.json \
+  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
+  [--dry-run] [--display-name "Display Name" --engine-family <module> \
+   --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
+```
+
+**`tools/assemble_release_notes.py`** — assembles `releases/v<X.Y.Z>/NOTES.md` from
+`changes/unreleased/` fragments and prepends the `CHANGELOG.md` entry (`docs/RELEASING.md`).
+`--version` is required; `--repo-root` defaults to `.`. Unknown fragment headings, empty fragments and
+duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
+
+```bash
+python3 tools/assemble_release_notes.py --repo-root PATH --version vX.Y.Z
+```
+
+**`tools/cut_release.py`** — the maintainer release ceremony (dry run by default; `--publish` and
+`--verify` are mutually exclusive). Requires `GH_TOKEN`; `--repo` defaults to `REXL3/REXL3`,
+`--repo-root` to `.`. Refusals print `CUT_REFUSED: ...` on stderr and exit 2:
+
+```bash
+python3 tools/cut_release.py --version vX.Y.Z              # dry run (default)
+python3 tools/cut_release.py --version vX.Y.Z --publish    # tag + draft release, verify, publish
+python3 tools/cut_release.py --version vX.Y.Z --verify      # confirm published release matches manifest
+```
 
 ## 7. Agent protocol (binding)
 

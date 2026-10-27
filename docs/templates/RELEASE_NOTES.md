@@ -1,40 +1,38 @@
-# Release notes — v<X.Y.Z>
+# REXL3 {{VERSION}} release notes
 
-<!-- Template. Fragments are assembled into this shape by tools/assemble_release_notes.py from
-     changes/unreleased/<slug>.md (docs/RELEASING.md). A fragment uses only the headings it needs.
-     Fill in below at release time. -->
+<!-- Template for tools/assemble_release_notes.py (docs/RELEASING.md). The placeholders are filled
+     from changes/unreleased/<slug>.md fragments and releases/v<X.Y.Z>/manifest.json; a fragment uses
+     only the headings it needs. Supported models, Assets and Provenance are generated from the
+     manifest. -->
 
 ## Highlights
 
-- <!-- The few sentences a tester needs first. -->
+{{HIGHLIGHTS}}
 
 ## Supported models
 
-| Model | Architecture | Pack | Context | Speculative decoding | Prefix cache | Vision | Evidence |
-|---|---|---|---|---|---|---|---|
-| <!-- e.g. Qwen3.8-27B --> | <!-- qwen3_5 --> | <!-- exl3, bits, draft --> | <!-- tokens --> | <!-- on, proven --> | <!-- on, proven at real contract --> | <!-- tested / does-not-fit --> | <!-- link to receipts --> |
+{{SUPPORTED_MODELS}}
 
 ## New features and improvements
 
-- <!-- Fragment content. -->
+{{NEW_FEATURES}}
 
 ## Bug fixes
 
-- <!-- Fragment content. -->
+{{BUG_FIXES}}
 
 ## Breaking changes and upgrade notes
 
-- <!-- Fragment content. -->
+{{BREAKING_CHANGES}}
 
 ## Known issues
 
-- <!-- From the sealed trees' KNOWN_ISSUES files. -->
+{{KNOWN_ISSUES}}
 
 ## Assets and checksums
 
-- <!-- Release assets and their digests (verified at publish time by tools/cut_release.py). -->
+{{ASSETS}}
 
 ## Provenance
 
-- Engine dev commit / tree / release tag / artifact digests.
-- Model approvals: family, model, version, runtime_id, approval sha256 (each matches the registry).
+{{PROVENANCE}}

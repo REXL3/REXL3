@@ -70,16 +70,40 @@ authenticated `gh`, never in CI. The tool derives dev release tags from `runtime
 `MODEL.json` and the sealed approval, which must agree — never from folder names. A maintainer runs it;
 an agent runs it only on an explicit, quoted maintainer instruction (CONTRIBUTING.md section 7).
 
+```bash
+python3 tools/promote_runtime.py \
+  --family <family> --model <model> --version <N> \
+  --approve-tag approve-<runtime_id>-<N> \
+  --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
+  --assets-dir <durable-dev-assets> [--download] \
+  --approved runtimes/templates/APPROVED.json \
+  --trusted-approvals runtimes/templates/APPROVALS.json \
+  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
+  [--dry-run] [--display-name "Display Name" --engine-family <module> \
+   --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
+```
+
+`--download` validates release and asset ids, sizes, the tag commit, every byte and all evidence and
+caches the verified files. The tool then writes `MODEL.json` (or validates an existing one against the
+derived metadata; a mismatch is a hard refusal, never an overwrite), extracts the tree, writes
+`LATEST`, verifies against the base registry, commits branch `model/<model>` and opens a PR titled
+`FEAT: Promoted <model> v<N>`. `--dry-run` verifies and prints without writing.
+
 ## The model-branch completeness checker
 
 `tools/check_model_branch.py` is the completeness gate for `model/<model>` PRs:
 
 ```
-python3 tools/check_model_branch.py --repo-root PATH --base REF --head REF [--rc-commit SHA] [--local]
+python3 tools/check_model_branch.py --repo-root PATH --base REF --head REF \
+  [--branch REF] [--rc-commit SHA] [--tree-dir PATH] [--base-tree-dir PATH] \
+  [--assets-dir PATH] [--local]
 ```
 
-It prints one line per check (`PASS`/`FAIL name: reason`), exit 0 all pass, 1 any fail, 2 usage error.
-Checks:
+`--base`/`--head` are refs in `--repo-root`. `--tree-dir` defaults to `--repo-root`; `--base-tree-dir`
+defaults to reading base files from git objects; `--assets-dir` defaults to `$REXL3_ASSETS_DIR` (CI
+passes it explicitly). It prints one line per check (`PASS`/`FAIL name: reason`), exit 0 all pass, 1
+any fail, 2 usage error. The check names are `branch/model`, `scope`, `MODEL.json`, `LATEST`, `tree`,
+`source commit`, `capability contract`, `docs and fragment`. Checks:
 
 1. Branch/model: the changed `runtimes/<family>/<model>/` folder is exactly one model and matches the
    branch.
@@ -89,7 +113,7 @@ Checks:
 5. The tree passes `tools/verify_runtime_tree.py` against the registry on the base.
 6. If `--rc-commit` is given, the sealed approval's source commit equals it.
 7. Capability contract from the sealed profile: speculative decoding on, prefix cache on, vision on
-   unless the tree records a does-not-fit justification for vision.
+   unless `MODEL.json` records a `vision_does_not_fit` justification in `pack`.
 8. `docs/packs/<model>.md` and `changes/unreleased/<model>.md` exist and are non-empty.
 
 `--local` additionally downloads and digest-checks the dev assets via `tools/fetch_dev_assets.py`.
@@ -105,7 +129,10 @@ For a `model/<model>` PR, a maintainer other than the author reviews locally bef
 4. On a GB10 host, run the tree's `launch.sh doctor` and `launch.sh smoke`, plus a gate subset
    (capability, context, prefix_cache at minimum).
 5. Post the `LOCAL-VALIDATION v1` block from CONTRIBUTING.md section 4 as an APPROVED review on the
-   current head.
+   current head. CI evaluates it with
+   `python3 tools/check_local_validation.py --repo OWNER/REPO --pr N --head-sha SHA --codeowners PATH --token TOKEN`,
+   which sets the commit status `local-validation` on the head SHA and re-evaluates on push and on
+   review submit/dismiss.
 
 ## What CI checks
 
@@ -133,6 +160,7 @@ workflow-level path or branch filters):
 Production once held `runtimes/dsv41-flash-1017-sage-1.62/v1`, sealed before the receipt format
 (approval schema `rexl3.profile-approval.v1`: gates recorded as strings, no receipts, no engine source
 asset). It was removed from production by maintainer decision, with its release and tag, and returns
-only as a new promoted version when its runtime is finished. The verifier keeps its legacy path
-(`--allow-legacy`) and the registry keeps an empty `legacy` section, so a tree of that schema is
-refused unless a maintainer re-anchors it.
+only as a new promoted version when its runtime is finished. The verifier requires the family/model
+layout and refuses the old flat `runtimes/<runtime-id>/v<N>` layout and v1-approval trees outright
+there is no `--allow-legacy` switch; the registry keeps an empty `legacy` section for the removed
+history, and a tree of that schema can only return as a new sealed version from the dev repository.

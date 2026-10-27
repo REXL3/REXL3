@@ -41,8 +41,10 @@ All events are actor `am423` unless noted.
   the review rule.
 - Tag/release creation was unrestricted: the `protected-tags` ruleset blocked update/deletion of
   existing `prod/*/*` tags but not creation of new ones, and anyone with write could create a release.
-- The agent account (`am423`) holds repository admin, which remains a control gap: admins are eligible
-  bypass actors for rulesets, so the human review rule is not enforced while an agent holds admin.
+- The agent account (`am423`) holds repository admin, which remains the control gap. `main-guard`
+  has **no bypass actors**, so the rulesets DO apply to admins — but repository admin can edit or
+  disable rulesets and change repository settings, and no ruleset can prevent that. Agents must
+  therefore run with non-admin identities (see Open follow-ups).
 
 ## Tonight's actions (2026-10-26, owner-authorized emergency restructure)
 
@@ -64,12 +66,16 @@ All events are actor `am423` unless noted.
 
 ## Emergency-merged PRs
 
-These PRs were merged under the emergency exception without am423's review. The merge coordinator fills
-in the numbers and SHAs.
+These PRs were merged under the emergency exception without am423's review. The merge coordinator
+maintains the table; rows for PRs that are not yet merged are marked "filled at merge time".
 
 | PR | Title | Head SHA | Merged UTC |
 |---|---|---|---|
-|  |  |  |  |
+| #33 | FIX: Removed the unreviewed Qwen3.8-27B release from production | `677a092e` | 2026-10-27 05:52:22 |
+| #34 | FIX: Removed the unreviewed Qwen3.8-27B approvals from the registry | `106c9680` | 2026-10-27 05:50:56 |
+| #35 | FEAT: Restructured production runtime layout and added release and governance checks | filled at merge time | filled at merge time |
+| #31 | DOCS: Replaced the production rules with the model-branch release process | filled at merge time | filled at merge time |
+| #32 | DOCS: Rewrote the production README around engine features and recipes | filled at merge time | filled at merge time |
 
 Retroactive review list: PRs #12 through #28, plus every PR in the table above. The review is a
 maintainer approval of the change itself; where a change has since been superseded by the restructure,

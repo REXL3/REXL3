@@ -108,7 +108,9 @@ def main(argv=None):
         trees = discover(args.root)
         # Zero trees is a pass only while the pinned registry anchors nothing; a registry that anchors a tree
         # which is missing, or a wrong --root, still stops here.
-        anchored = bool(registry.get('approvals')) or bool(registry.get('legacy'))
+        # A legacy anchor is history: its tree may be removed by a reviewed change. A v2 approval anchor is not, so a
+        # registry that anchors one still refuses a root with no trees (a wrong --root or a deleted tree).
+        anchored = bool(registry.get('approvals'))
         e.require(trees or not anchored, 'no runtime trees found but the registry anchors some')
         problems = []
         for tree in trees:

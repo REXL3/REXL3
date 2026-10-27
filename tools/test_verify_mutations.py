@@ -144,9 +144,20 @@ class RealLegacyTree(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('LEGACY history has no trusted anchor', out)
 
-    def test_empty_runtimes_directory_is_refused(self):
+    def test_legacy_anchor_may_lose_its_tree(self):
+        """The registry anchors only the legacy tree, and the tree is gone: a reviewed removal of history passes."""
         shutil.rmtree(self.tree)
         code, out, err = self.cli()
+        self.assertEqual((code, err), (0, ''), out + err)
+        self.assertIn('0 tree(s), 0 problem(s)', out)
+
+    def test_empty_runtimes_directory_is_refused_when_a_v2_approval_is_anchored(self):
+        shutil.rmtree(self.tree)
+        anchored = self.base / 'anchored-registry.json'
+        registry = e.loads(REGISTRY.read_bytes())
+        registry['approvals']['synthetic-demo/v1'] = {'approval_sha256': 'a' * 64, 'source_commit': 'b' * 40, 'source_tree': 'c' * 40}
+        anchored.write_bytes(encoded(registry))
+        code, out, err = self.cli(registry=anchored, pin=sha(anchored.read_bytes()))
         self.assertEqual(code, 2, out + err)
         self.assertIn('no runtime trees found but the registry anchors some', err)
 

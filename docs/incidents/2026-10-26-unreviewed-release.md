@@ -78,6 +78,7 @@ maintains the table; rows for PRs that are not yet merged are marked "filled at 
 | #37 | FIX: Made the governance audit tolerate workflow-token limits and cover the retro range | `a949ad5a` | 2026-10-27 07:00:23 |
 | #39 | FIX: Fixed the incident range parsing for single PR numbers | `656f7f6b` | 2026-10-27 07:04:45 |
 | #40 | FIX: Equated null-echoed ruleset lists and recorded the audit fix PRs | `25d4acfa` | 2026-10-27 07:09:17 |
+| #41 | DOCS: Recorded PR 40 in the incident record | `bdaade5d` | 2026-10-27 07:11:33 |
 | #32 | DOCS: Rewrote the production README around engine features and recipes | `51f99840` | 2026-10-27 06:51:53 |
 | #31 | DOCS: Replaced the production rules with the model-branch release process | this PR | this PR |
 

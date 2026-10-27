@@ -52,6 +52,18 @@ def refusal_detail(**changes):
     return {'case': {'id': 'vision/image_refused'}, 'details': facts, 'error': None}
 
 
+def stage_assets(dest, f, doc):
+    """Copy the sealed release archives into the family/model assets layout and extract bound evidence."""
+    import shutil
+    from tools import release_evidence as e
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ['approval.json'] + [a['archive'] for a in e.approval_assets(doc)]:
+        shutil.copyfile(f.assets / name, dest / name)
+    evidence = doc['evidence_asset']
+    e.extract_files(dest / evidence['archive'], dest, evidence['members'])
+    return dest
+
+
 class ReceiptContract(unittest.TestCase):
     images = True
 

@@ -10,6 +10,7 @@ There is one sheet per runtime id, named `docs/packs/<runtime-id>.md`. The
 
 | Sheet | Runtime | Latest version |
 | --- | --- | --- |
+| [`qwen38-27b-dflash2-exl3-4.00.md`](qwen38-27b-dflash2-exl3-4.00.md) | Qwen3.8-27B with a DFlash2 draft, single node | `v1` |
 
 ## Rules for a sheet
 

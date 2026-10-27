@@ -17,7 +17,7 @@ Engine development, model validation and sealing happen in the development repos
 `REXL3/REXL3-dev`. There is no engine source here. Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: no model is released yet.** The first release (v0.1.0) is being prepared; none of the
+> **Status: no pack is released yet.** The first release (v0.1.0) is being prepared; none of the
 > first-release models below is published. Everything in this README describes how the release will
 > work and how recipes are structured, not something that is already available.
 
@@ -25,7 +25,7 @@ Engine development, model validation and sealing happen in the development repos
 
 | Model | Architecture | Status |
 | --- | --- | --- |
-| Qwen3.8-27B | `qwen3_5` (family `qwen`) | Furthest along: a v2-schema approval exists and is registered; final qualification on the release binary and re-sealing are still required. |
+| Qwen3.8-27B | `qwen3_5` (family `qwen`) | Furthest along: a v2-schema approval existed but was unreviewed, and its registry entry was removed in the restructure; it must be re-reviewed and re-promoted through the model-branch flow. |
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | No runtime entry yet; the pack needs engine validation and a profile/gate recipe. |
 | DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | Runtime entry exists (single-node and two-node profiles); the vision-disabled profile needs restoring and re-sealing before release. |
 | GLM-5.3-Flash | `glm` (glm5_next) | Runtime entry exists; live-server qualification on the release binary is still required. |
@@ -108,8 +108,10 @@ draft method; those live in `MODEL.json` and the sealed approval.
 runtimes/
   <family>/
     <model>/
-      MODEL.json        # reviewed metadata (schema rexl3.prod-model.v1): family, model,
-                        # display name, architectures, engine family, runtime id, pack details
+      MODEL.json        # reviewed metadata (schema rexl3.prod-model.v1): schema, family, model,
+                        # display_name, architectures, engine_family, runtime_id, and pack
+                        # (required key: format; descriptive keys may include bits, draft,
+                        # target_repo, draft_repo, vision_does_not_fit)
       LATEST            # one line: the current sealed version, e.g. v1
       v<N>/             # the sealed tree, produced by tools/promote_runtime.py; never edited
         approval.json   # who approved which bytes: source commit, tree, template, archive hashes
@@ -126,9 +128,9 @@ runtimes/
 ```
 
 `APPROVALS.json` keys are `<family>/<model>/v<N>`; each entry pins the approval hash, the source
-commit and tree, and the runtime id. The verifier (`verify`, section below) requires every tree under
-`runtimes/` to match a registry entry exactly — file inventory, hashes, sizes and modes — and refuses a
-template digest that is not in `APPROVED.json`.
+commit and tree, and the runtime id. The verifier (`verify`, section "Checks and CI" below) requires
+every tree under `runtimes/` to match a registry entry exactly — file inventory, hashes, sizes and
+modes — and refuses a template digest that is not in `APPROVED.json`.
 
 ## Run your own model or recipe (advanced)
 
@@ -244,6 +246,32 @@ Every released model must deliver, and prove at its real context and slot count:
 - **vision on and tested by default**, off only with a proven does-not-fit justification.
 
 `SAGE is our own mixed-precision quantization method for EXL3. The method is not published.`
+
+## Checks and CI
+
+Every PR to `main` must pass four required checks, each of which always reports (job-level conditions
+that succeed as a no-op; never workflow-level path or branch filters):
+
+- `verify` — the production gate: from the protected base revision, it downloads the authenticated dev
+  release assets for the candidate trees (`tools/fetch_dev_assets.py`, tags derived from each registry
+  entry's `runtime_id`), verifies every tree under `runtimes/` against the pinned registry
+  (`tools/verify_runtime_tree.py`), and runs the unit tests. `MODEL.json` must agree with the sealed
+  approval, and the registry must match the `TRUSTED_APPROVALS_SHA256` pin in
+  `.github/workflows/verify.yml`.
+- `pr-rules` — title (`TYPE: Past-tense summary`), branch name, path scope per branch type, and the
+  `changes/unreleased/` fragment rule.
+- `model-completeness` — runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success
+  otherwise.
+- `local-validation` — for model PRs, an APPROVED review by a maintainer other than the author whose
+  body carries a `LOCAL-VALIDATION v1` block for the current head; no-op success for non-model PRs and
+  `model/*-approval` PRs.
+
+`governance-audit` is a scheduled daily plus manual, read-only audit (not required): it fails when live
+releases, merged-PR reviews or live rulesets deviate from the committed policy on `main`.
+
+The workflows read code and policy from the protected base checkout only (`pull_request_target`); a PR
+head is checked out as inert data and never executed. `DEV_ASSETS_TOKEN` is the only secret, used by a
+single download step; actions are pinned by full commit SHA.
 
 ## Reporting a problem
 

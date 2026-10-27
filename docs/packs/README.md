@@ -8,9 +8,7 @@ everything that differs.
 There is one sheet per runtime id, named `docs/packs/<runtime-id>.md`. The
 [README](../../README.md)'s released-packs table links to each sheet.
 
-| Sheet | Runtime | Latest version |
-| --- | --- | --- |
-| [`qwen38-27b-dflash2-exl3-4.00.md`](qwen38-27b-dflash2-exl3-4.00.md) | Qwen3.8-27B with a DFlash2 draft, single node | `v1` |
+No pack sheet exists yet; the first accompanies the `v0.1.0` product release.
 
 ## Rules for a sheet
 

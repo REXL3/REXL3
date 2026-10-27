@@ -37,8 +37,14 @@ def tree_inventory(tree):
     return files
 
 
-def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, family=None, model=None):
-    """Return named problems (empty means PASS). All inputs are read-only."""
+def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, family=None, model=None,
+                precomputed=None):
+    """Return named problems (empty means PASS). All inputs are read-only.
+
+    ``precomputed`` (per-archive approval-listed member inventories) is passed
+    through to the asset verifier; the fresh streaming digest of every archive
+    is still required at this boundary.
+    """
     try:
         tree = e.checked_path(tree)
         family = str(m.model_name(family, 'family'))
@@ -68,7 +74,7 @@ def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=
         asset_approval = e.safe_file(asset_root, 'approval.json')
         e.require(approval_path.read_bytes() == asset_approval.read_bytes(), 'tree/asset approval inequality')
         approved, _ = e.verify_assets(asset_approval, registry=trusted_approvals, approved_templates=approved_templates,
-                                      engine_dir=Path(asset_root) / 'engine', key=key)
+                                      engine_dir=Path(asset_root) / 'engine', key=key, precomputed=precomputed)
         e.require(approved['version'] == number, 'runtime path version mismatch')
         expected = dict(approved['source_asset']['members'])
         expected['approval.json'] = dict(e.record(approval_path), mode=0o644)

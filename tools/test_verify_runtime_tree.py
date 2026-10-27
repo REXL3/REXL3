@@ -135,7 +135,7 @@ class VerifyTest(unittest.TestCase):
 
     def test_verify_tree_tampered_archive_fails_with_and_without_precomputed(self):
         name = self.doc['bundle']['archive']
-        path = self.f.assets / name
+        path = self.assets / FAMILY / MODEL / 'v1' / name
         data = path.read_bytes()
         path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
         self.assertTrue(self.verify())

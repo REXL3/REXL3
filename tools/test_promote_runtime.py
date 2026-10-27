@@ -348,6 +348,137 @@ class PromotionTest(unittest.TestCase):
                                        approved_templates=self.f.approved, key=f'{FAMILY}/{MODEL}/v1')
             self.assertEqual((dest / 'approval.json').read_bytes(), self.approval.read_bytes())
 
+    def test_verify_approval_threads_precomputed(self):
+        precomputed = {'synthetic-demo-1.tar.gz': {'profile.json': {}}}
+        seen = {}
+        def fake_verify_assets(approval_path, **kwargs):
+            seen.update(kwargs)
+            return self.doc, self.f.archive
+        with patch.object(e, 'verify_assets', side_effect=fake_verify_assets):
+            doc, archive = p.verify_approval(self.approval, self.f.approved, self.registry,
+                                              precomputed=precomputed)
+        self.assertIs(seen['precomputed'], precomputed)
+        self.assertEqual((doc, archive), (self.doc, self.f.archive))
+
+    def test_precomputed_for_assets_requires_streaming_digest_equality(self):
+        precomputed = p.precomputed_for_assets(self.doc, self.f.assets)
+        self.assertEqual(set(precomputed), {a['archive'] for a in e.approval_assets(self.doc)})
+        self.assertEqual(precomputed[self.doc['bundle']['archive']], self.doc['bundle']['members'])
+        name = self.doc['bundle']['archive']
+        path = self.f.assets / name
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        with self.assertRaises(ValueError):
+            p.precomputed_for_assets(self.doc, self.f.assets)
+
+    def test_download_first_verification_is_full_and_second_threads_precomputed(self):
+        tag = 'approve-synthetic-demo-1'
+        dest = Path(self.tmp.name) / 'download'
+        seen = []
+        original = p.verify_approval
+        def spy(*args, **kwargs):
+            seen.append((args, kwargs))
+            return original(*args, **kwargs)
+        with patch.object(p, 'verify_approval', side_effect=spy), \
+             patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            got = p.download_release(tag, dest, registry=self.registry,
+                                      approved_templates=self.f.approved,
+                                      key=f'{FAMILY}/{MODEL}/v1')
+        self.assertEqual(got.read_bytes(), self.approval.read_bytes())
+        self.assertEqual(len(seen), 2)
+        self.assertNotIn('precomputed', seen[0][1])
+        precomputed = seen[1][1]['precomputed']
+        self.assertEqual(set(precomputed), {a['archive'] for a in e.approval_assets(self.doc)})
+        self.assertEqual(precomputed[self.doc['bundle']['archive']], self.doc['bundle']['members'])
+
+    def test_verify_approval_precomputed_rejects_tampered_cached_archive(self):
+        tag = 'approve-synthetic-demo-1'
+        dest = Path(self.tmp.name) / 'download'
+        with patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.mock_download):
+            p.download_release(tag, dest, registry=self.registry,
+                                approved_templates=self.f.approved,
+                                key=f'{FAMILY}/{MODEL}/v1')
+        name = self.doc['engine_source_asset']['archive']
+        path = dest / name
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        precomputed = {a['archive']: a['members'] for a in e.approval_assets(self.doc)}
+        with self.assertRaises(ValueError):
+            p.verify_approval(dest / 'approval.json', self.f.approved, self.registry,
+                               key=f'{FAMILY}/{MODEL}/v1', precomputed=precomputed)
+
+    def test_extract_tree_preverified_skips_redecompression_but_keeps_digest(self):
+        dest = Path(self.tmp.name) / 'tree'
+        with patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')):
+            p.extract_tree(self.f.archive, dest, self.doc, approval_path=self.approval,
+                           preverified=True)
+        expected = dict(self.doc['source_asset']['members'])
+        expected['approval.json'] = dict(e.record(dest / 'approval.json'), mode=0o644)
+        self.assertEqual(p.tree_inventory(dest), expected)
+        data = self.f.archive.read_bytes()
+        self.f.archive.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+        with self.assertRaises(ValueError):
+            p.extract_tree(self.f.archive, Path(self.tmp.name) / 'other', self.doc,
+                           approval_path=self.approval, preverified=True)
+
+    def test_prepare_dry_run_uses_preverified_extraction_no_decompression(self):
+        root, commit = self.make_prod_bare()
+        with patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')), \
+             patch.object(p, 'gh', side_effect=AssertionError('no GitHub write expected in dry run')):
+            code = p.prepare_promotion(FAMILY, MODEL, 1, approve_tag='approve-synthetic-demo-1',
+                                       target_commit=commit, prod_checkout=str(root),
+                                       assets_dir=self.assets, registry=self.registry,
+                                       approved_templates=self.f.approved, meta=None, dry_run=True)
+        self.assertEqual(code, 0)
+        self.assertFalse((root / 'runtimes' / FAMILY / MODEL / 'v1').exists())
+
+    def test_prepare_promotion_threads_precomputed_and_skips_redecompression(self):
+        root, commit = self.make_prod_bare()
+        calls = []
+        original_git = p.git
+
+        def gh(*args, **kwargs):
+            calls.append(args)
+            if args[:2] == ('pr', 'create'):
+                return result({'url': 'https://github.com/REXL3/REXL3/pull/99'})
+            if args[:2] == ('pr', 'view'):
+                head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+                return result({'headRefOid': head, 'state': 'OPEN', 'url': 'https://github.com/REXL3/REXL3/pull/99'})
+            if args[0] == 'api':
+                return result({'id': 1})
+            raise AssertionError('unexpected gh call: ' + repr(args))
+
+        with patch.object(p, 'gh', side_effect=gh), patch.object(p, 'git') as git_mock, \
+             patch('tools.release_evidence.inspect_archive',
+                   side_effect=AssertionError('must not run')):
+            def real_git(*args, **kwargs):
+                if args[0] in ('push', 'ls-remote', 'fetch'):
+                    if args[0] == 'ls-remote':
+                        head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                              capture_output=True, text=True, check=True).stdout.strip()
+                        return subprocess.CompletedProcess([], 0, head + '\trefs/heads/model/qwen3.8-27b\n', '')
+                    if args[0] == 'fetch':
+                        raise ValueError('fatal: could not fetch')
+                    return subprocess.CompletedProcess([], 0, '', '')
+                return original_git(*args, **kwargs)
+            git_mock.side_effect = real_git
+            code = p.prepare_promotion(FAMILY, MODEL, 1, approve_tag='approve-synthetic-demo-1',
+                                       target_commit=commit, prod_checkout=str(root),
+                                       assets_dir=self.assets, registry=self.registry,
+                                       approved_templates=self.f.approved, meta=dict(
+                                           display_name='Synthetic Demo', engine_family='synthetic',
+                                           architectures=['SyntheticForConditionalGeneration'],
+                                           pack={'format': 'exl3', 'bits': '4.00'}))
+        self.assertEqual(code, 0)
+        self.assertTrue((root / 'runtimes' / FAMILY / MODEL / 'v1/approval.json').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -447,6 +447,24 @@ class PrecomputedInventoryTest(unittest.TestCase):
             validate_bound_archive(self.f.engine_source_asset, commit=self.f.commit,
                                    tree=self.f.tree, asset=asset, inventory=asset['members'])
 
+    def test_validate_bound_archive_rejects_unlisted_engine_source_member(self):
+        from tools.corresponding_source_identity import validate_bound_archive
+        asset = self.doc['engine_source_asset']
+        files = {}
+        with tarfile.open(self.f.engine_source_asset, 'r:*') as tar:
+            for member in tar:
+                if member.isfile():
+                    files[member.name] = (member.mode, tar.extractfile(member).read())
+        files['crates/server/src/extra.rs'] = (0o644, b'fn extra() {}\n')
+        with tarfile.open(self.f.engine_source_asset, 'w:gz') as out:
+            for name, (mode, data) in sorted(files.items()):
+                info = tarfile.TarInfo(name)
+                info.mode, info.size = mode, len(data)
+                out.addfile(info, io.BytesIO(data))
+        with self.assertRaisesRegex(ValueError, 'unlisted engine source member'):
+            validate_bound_archive(self.f.engine_source_asset, commit=self.f.commit,
+                                   tree=self.f.tree, asset=asset, inventory=asset['members'])
+
 
 if __name__ == '__main__':
     unittest.main()

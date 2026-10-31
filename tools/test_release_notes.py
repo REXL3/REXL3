@@ -49,6 +49,8 @@ class NotesTest(unittest.TestCase):
         changelog = (self.root / 'CHANGELOG.md').read_text()
         self.assertIn(f'[{VERSION}]', changelog)
         self.assertIn('First release.', changelog)
+        self.assertIn('- Models: qwen3.8/qwen3.8-27b v1.', changelog)
+        self.assertNotIn('vv1', changelog)
 
     def test_repeat_assembly_is_idempotent(self):
         n.assemble(str(self.root), VERSION)

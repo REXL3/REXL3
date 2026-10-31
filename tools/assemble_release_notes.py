@@ -118,7 +118,7 @@ def changelog_entry(version, manifest, fragments):
     if multi:
         lines.extend(multi)
         lines.append('')
-    lines.append(f'- Models: ' + ', '.join(f"{x['family']}/{x['model']} v{x['version']}" for x in manifest['models']) + '.')
+    lines.append(f'- Models: ' + ', '.join(f"{x['family']}/{x['model']} {x['version']}" for x in manifest['models']) + '.')
     return '\n'.join(lines)
 
 

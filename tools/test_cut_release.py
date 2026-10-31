@@ -1,6 +1,7 @@
 """cut_release.py: dry-run gates and publish/verify ceremony, fully mocked at the API boundary."""
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,46 @@ VERSION = 'v0.1.0'
 FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
 MERGE = 'c' * 40
 HEX64 = 'd' * 64
+
+# Release asset names spelled out literally: the model version in a manifest is already `v<N>`, so a
+# check derived from the code's own name builder cannot see a doubled `v` (`...-vv3-...`).
+LITERAL_RUNTIME = 'qwen38-27b-dflash2-exl3-4.00'
+LITERAL_NAMES = {
+    'qwen38-27b-dflash2-exl3-4.00-v3-approval.json',
+    'qwen38-27b-dflash2-exl3-4.00-v3-bundle.tar.gz',
+    'qwen38-27b-dflash2-exl3-4.00-v3-source.tar.gz',
+    'qwen38-27b-dflash2-exl3-4.00-v3-engine-source.tar.gz',
+    'qwen38-27b-dflash2-exl3-4.00-v3-evidence.tar.gz',
+    'rexl3-serve.tar.gz',
+}
+PUBLISHED_NAMES = {
+    'synthetic-demo-v1-approval.json',
+    'synthetic-demo-v1-bundle.tar.gz',
+    'synthetic-demo-v1-source.tar.gz',
+    'synthetic-demo-v1-engine-source.tar.gz',
+    'synthetic-demo-v1-evidence.tar.gz',
+    'rexl3-serve.tar.gz',
+}
+# The doubled-v bug, reintroduced: the mutation the literal checks below must catch.
+DOUBLE_V = ('''return f"{item['runtime_id']}-{version}"''', '''return f"{item['runtime_id']}-v{version}"''')
+
+
+def literal_manifest():
+    return {'engine': {'artifacts': {'rexl3-serve.tar.gz': HEX64}},
+            'models': [{'family': FAMILY, 'model': MODEL, 'version': 'v3',
+                        'runtime_id': LITERAL_RUNTIME, 'approval_sha256': HEX64}]}
+
+
+def mutant(old, new):
+    """cut_release.py with one source edit, loaded as a separate module (the real module is untouched)."""
+    source = Path(c.__file__).read_text()
+    if source.count(old) != 1:
+        raise AssertionError('mutation site not found exactly once: ' + old)
+    module = types.ModuleType('cut_release_mutant')
+    module.__file__ = c.__file__
+    module.__package__ = c.__package__
+    exec(compile(source.replace(old, new), c.__file__, 'exec'), module.__dict__)
+    return module
 
 
 def manifest(approval_hash):
@@ -193,6 +234,39 @@ class PublishTest(CutFixture):
         write(self.root, 'runtimes/templates/APPROVALS.json', encoded(registry))
         with self.assertRaises(ValueError):
             self.cut(self.api(), 'publish')
+
+
+class AssetNameTest(CutFixture):
+    def test_model_assets_are_the_literal_release_names(self):
+        self.assertEqual(c.model_assets(literal_manifest()), LITERAL_NAMES)
+
+    def test_publish_uploads_the_literal_release_names(self):
+        api = self.api()
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        self.assertEqual({a['name'] for a in api.releases[VERSION]['assets']}, PUBLISHED_NAMES)
+        self.assertEqual({name for name, _ in api.uploads}, PUBLISHED_NAMES)
+
+    def test_a_version_without_its_v_prefix_is_refused(self):
+        for version in ('3', 'vv3', 3):
+            doc = literal_manifest()
+            doc['models'][0]['version'] = version
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'invalid model version'):
+                c.model_assets(doc)
+
+    def test_the_double_v_mutation_fails_both_literal_checks(self):
+        bad = mutant(*DOUBLE_V)
+        names = bad.model_assets(literal_manifest())
+        self.assertIn('qwen38-27b-dflash2-exl3-4.00-vv3-approval.json', names)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(names, LITERAL_NAMES)
+        # The mutant stays self-consistent, so its own publish and verify gates still pass: only the
+        # literal names catch it.
+        api = self.api()
+        self.assertEqual(bad.cut(api, REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
+        published = {a['name'] for a in api.releases[VERSION]['assets']}
+        self.assertIn('synthetic-demo-vv1-bundle.tar.gz', published)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(published, PUBLISHED_NAMES)
 
 
 class VerifyTest(CutFixture):

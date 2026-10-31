@@ -176,13 +176,21 @@ def check_local_main(repo_root, version, token=None):
     return manifest
 
 
+def asset_prefix(item):
+    """`<runtime_id>-v<N>`: the release asset prefix of one manifest model (its `version` is already `v<N>`)."""
+    version = item['version']
+    e.require(isinstance(version, str) and m.VERSION_RE.fullmatch(version), 'invalid model version: ' + repr(version))
+    return f"{item['runtime_id']}-{version}"
+
+
 def model_assets(manifest):
     """Expected release asset names: five per model (approval + four archives) plus engine artifacts."""
     names = set(manifest['engine']['artifacts'])
     for item in manifest['models']:
-        names.add(f"{item['runtime_id']}-v{item['version']}-approval.json")
+        prefix = asset_prefix(item)
+        names.add(f'{prefix}-approval.json')
         for kind in ('bundle', 'source', 'engine-source', 'evidence'):
-            names.add(f"{item['runtime_id']}-v{item['version']}-{kind}.tar.gz")
+            names.add(f'{prefix}-{kind}.tar.gz')
     return names
 
 
@@ -227,7 +235,7 @@ def download_dev_assets(api, manifest, repo_root):
         e.extract_files(dest / evidence['archive'], dest, evidence['members'])
         e.verify_assets(approval, registry=registry, approved_templates=approved,
                          engine_dir=dest / 'engine' if (dest / 'engine').is_dir() else None, key=key)
-        prefix = f"{item['runtime_id']}-v{item['version']}"
+        prefix = asset_prefix(item)
         (work / (prefix + '-approval.json')).write_bytes(approval.read_bytes())
         for kind, field in (('bundle', 'bundle'), ('source', 'source_asset'), ('engine-source', 'engine_source_asset'),
                             ('evidence', 'evidence_asset')):

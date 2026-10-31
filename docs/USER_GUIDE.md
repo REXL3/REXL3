@@ -23,7 +23,7 @@ then keep the recipe's `KNOWN_ISSUES.md` beside you.
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Rules for changing this repository | Contributors |
 | The bundle's own `README.md`, `docs/SETUP.md`, `docs/TROUBLESHOOTING.md` | The exact command reference inside each release archive | **Wins over this guide** for that release |
 | `KNOWN_ISSUES.md` in the bundle | What was and was not qualified, behaviour to expect | That recipe |
-| `approval.json` (a release asset) | Who approved which bytes, and the archive hashes | Identity of the release |
+| `<runtime-id>-v<N>-approval.json` (a release asset) | Who approved which bytes, and the archive hashes | Identity of the release |
 | [SECURITY](../SECURITY.md) | Reporting a vulnerability, the threat model | Security |
 
 If this guide and the bundle disagree, follow the bundle and tell the maintainers (section 11).
@@ -56,7 +56,10 @@ such as `v0.1.0`. A line starting with `#` inside a code block is a comment.
   where it goes, and verifies every file against the release's lock before use.
 - It never reboots the machine and never changes the GPU driver unless you pass the separate
   `--allow-driver-change` flag after agreeing it with your administrator.
-- It starts the server as your user, bound to `127.0.0.1` only.
+- It starts the server as your user. A single-node profile binds `127.0.0.1` only, and the launcher
+  refuses any other address for it. A two-node profile binds the HTTP API to the leader's `address`
+  from your site file, with no authentication or TLS, so keep both nodes on a private network or
+  firewall the port (section 9).
 - It stops only the process it started. It never uses a broad kill.
 - It stays attached to your terminal while serving (`start` is a foreground command).
 
@@ -66,14 +69,21 @@ For a single-node recipe:
 
 ```bash
 TAG=v0.1.0                        # the exact release tag from the GitHub releases page
+RUNTIME_ID=<runtime-id>           # the prefix of your model's asset names (section 4.2)
 
-gh release download "$TAG" -R REXL3/REXL3 -D /tmp/rexl3-release
-ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/rexl3-release/approval.json'))['bundle']['archive'])")
-sha256sum "/tmp/rexl3-release/$ARCHIVE"        # must equal bundle.sha256 in approval.json
-mkdir -p ~/rexl3 && tar -xzf "/tmp/rexl3-release/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
+DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
+gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
+  -p "${RUNTIME_ID}-*-approval.json" -p "${RUNTIME_ID}-*-bundle.tar.gz"
+APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)   # exactly one of each
+want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
+have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
+[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"   # section 4.3
+mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
+cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
 
 ./launch.sh --yes install-deps          # system packages and a private Python environment
 ./launch.sh doctor                      # read-only checks; must exit 0
+./launch.sh print-command               # what will run, including the profile's --port
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the model
 ./launch.sh --yes start                 # foreground; leave this terminal open
 ```
@@ -81,7 +91,8 @@ mkdir -p ~/rexl3 && tar -xzf "/tmp/rexl3-release/$ARCHIVE" -C ~/rexl3 && cd ~/re
 In a second terminal:
 
 ```bash
-curl -s http://127.0.0.1:8889/v1/models            # the port from the recipe's profile
+PORT=<port>                                          # the --port that print-command showed
+curl -s http://127.0.0.1:$PORT/v1/models
 ```
 
 The rest of this guide explains each step, what success looks like, and what to do when it does not.
@@ -98,39 +109,52 @@ an edit. Pick the version a maintainer told you to test.
 
 ### 4.2 Download the release
 
+A release holds the assets of **every** model in it. For each model there is an approval record,
+`<runtime-id>-v<N>-approval.json`, and a runnable bundle, `<runtime-id>-v<N>-bundle.tar.gz`. The
+`-source.tar.gz`, `-engine-source.tar.gz` and `-evidence.tar.gz` archives with the same prefix, and the
+engine artifacts, are not needed to run a model. `<runtime-id>` is the prefix of your model's asset
+names on the release page (the [README](../README.md) lists the first-release runtime ids). Download
+only your model's two files, into a fresh directory each time:
+
 ```bash
 gh auth status                                     # confirm you are logged in
-gh release download "$TAG" -R REXL3/REXL3 -D /tmp/rexl3-release
-ls -l /tmp/rexl3-release                           # the bundle archive, approval.json, source archives
+DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
+gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
+  -p "${RUNTIME_ID}-*-approval.json" -p "${RUNTIME_ID}-*-bundle.tar.gz"
+ls -l "$DL"                                        # exactly one approval and one bundle
+APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)
 ```
 
-You should see the runnable bundle (a `*.tar.gz`) and `approval.json`. The release may carry more
-than one archive (a source archive for the binaries, evidence), so always take the bundle's name from
-`approval.json` (next step), never a wildcard. Download into a fresh directory each time.
+Without the `-p` patterns, `gh release download` fetches every model's assets. The `bundle.archive`
+field inside the approval is the archive's name in the development release, not the asset's name on
+this release, so never use it to find the downloaded file.
 
 ### 4.3 Verify before you extract
 
-`approval.json` records the archive's SHA-256 and size. Compare them yourself:
+The approval records the bundle's SHA-256 (`bundle.sha256`) and size (`bundle.bytes`). Compare them
+yourself:
 
 ```bash
-ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/rexl3-release/approval.json'))['bundle']['archive'])")
-sha256sum "/tmp/rexl3-release/$ARCHIVE"
-grep -A4 '"bundle"' /tmp/rexl3-release/approval.json
+python3 -c 'import json,sys;b=json.load(open(sys.argv[1]))["bundle"];print(b["sha256"], b["bytes"])' "$APPROVAL"
+sha256sum "$BUNDLE"; stat -c %s "$BUNDLE"
 ```
 
-The two hashes must be identical. If they differ, **stop**: do not extract or run the archive, download
-it again from the release, and if it still differs report it (section 11). For the stricter
-verify-and-extract program (it rejects links, path traversal and duplicates before writing anything),
-use the one in the bundle's `README.md`, section "Download and verify before extracting".
+The hashes and the sizes must be identical. If they differ, **stop**: do not extract or run the
+archive, download it again from the release, and if it still differs report it (section 11). The
+bundle's `README.md`, section "Download and verify before extracting", has a stricter
+verify-and-extract program (it rejects links, path traversal and duplicates before writing anything).
+It expects the two files under the local names `approval.json` and the approval's `bundle.archive`,
+so to use it, copy the two downloaded assets to those names in a fresh directory first.
 
 ### 4.4 Extract
 
 ```bash
-mkdir -p ~/rexl3 && tar -xzf "/tmp/rexl3-release/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
+mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
+cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
 ```
 
-Use a new directory for every version. Never extract over a bundle that is running. Keep the archive
-and `approval.json` next to it: you need them for updates, rollback and bug reports.
+Use a new directory for every version. Never extract over a bundle that is running. Keep the download
+directory (the bundle and its approval file): you need them for updates, rollback and bug reports.
 
 ### 4.5 Install the dependencies, then run `doctor`
 
@@ -196,13 +220,17 @@ means not ready (stopped, preparing, starting or failed). Do not treat a timeout
 
 ### 4.9 Check that it works
 
-From a second terminal on the same host (the server listens on `127.0.0.1` only):
+From a second terminal on the same host (a single-node server listens on `127.0.0.1` only):
 
 ```bash
-BASE=http://127.0.0.1:8889/v1                      # port from the recipe's profile
+PORT=<port>                                        # the profile's --port (print-command shows it)
+BASE=http://127.0.0.1:$PORT/v1
 curl -s $BASE/models | python3 -m json.tool
-curl -s http://127.0.0.1:8889/health/ready         # 200 when ready, 503 while loading or draining
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:$PORT/health/ready   # 200 ready, 503 loading or draining
 ```
+
+Each profile pins its own port, and the first-release profiles use different ports. For a two-node
+profile, use the leader's address in place of `127.0.0.1`.
 
 `/v1/models` shows the model **id to use in requests**, `max_model_len` (the effective limit you must
 stay within) and `configured_max_model_len` (the ceiling the profile asked for). Use the id it prints;
@@ -237,17 +265,22 @@ token counts. Treat a stream that ends without `[DONE]` as incomplete.
 ### 5.3 Thinking (reasoning)
 
 Recipes that reason return their thinking separately: `message.reasoning_content` (streaming:
-`delta.reasoning_content`) holds the thinking and `message.content` holds the answer. Two request
-fields control it:
+`delta.reasoning_content`) holds the thinking and `message.content` holds the answer. Two
+`chat_template_kwargs` fields control it:
 
 ```json
 {"chat_template_kwargs": {"enable_thinking": false}}
-{"reasoning_effort": "low"}
+{"chat_template_kwargs": {"reasoning_effort": "low"}}
 ```
 
+Set the effort **by name inside `chat_template_kwargs`**: every recipe that offers an effort accepts
+it there. Some recipes also accept a top-level `"reasoning_effort"` field, but template-driven families
+(GLM, for example) refuse it with HTTP 400, so do not rely on it. Level names differ per recipe, and
+numbers are refused. A recipe can also ignore `enable_thinking` (a model that always thinks).
+
 Whether a request thinks when it names neither depends on the recipe and server build; `GET /v1/models`
-reports the reasoning controls the recipe exposes, and the recipe's `KNOWN_ISSUES.md` states the
-default. Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
+reports the reasoning controls and level names the recipe exposes, and the recipe's `KNOWN_ISSUES.md`
+states the default. Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
 
 ### 5.4 Sampling, seeds and repeatable output
 
@@ -298,7 +331,8 @@ Recipes that accept images take them inline, as base64 in a data URI, in a messa
 Remote image URLs are not fetched by default. The bundle's own examples use a 256 by 256 pixel image;
 much smaller test images have been misread, so do not judge image support from a tiny picture. The
 recipe's `KNOWN_ISSUES.md` says whether images are supported. A recipe started without vision refuses
-image parts. Video (Nemotron Omni) is a list of frames; audio is refused by every recipe today.
+image parts. Video is not a capability of any first-release profile (`capabilities.video` is `false`
+in every `profile.json`), so treat it as unsupported; audio is refused by every recipe today.
 
 ### 5.8 Concurrency
 
@@ -355,7 +389,7 @@ remains.
 
 **Updating and rolling back.** Treat a new version as a new installation: stop the old bundle, extract
 the new archive into a **new** directory after verifying it (section 4.3), repeat 4.5 to 4.9, and keep
-the old archive and `approval.json` so you can roll back by launching the old exact artifact the same
+the old bundle and its approval file so you can roll back by launching the old exact artifact the same
 way. Never extract over a running bundle and never copy verification records between versions.
 
 ## 7. Performance expectations
@@ -399,14 +433,18 @@ launcher prints an error **token** in capitals; the table lists the common ones 
 | `RUNTIME_BUSY`, `STALE_OR_REUSED_PID_REFUSED` | A previous launch was killed without cleanup | `stop` with the original bundle and profile; `reset-state` only after nothing remains |
 | `finish_reason: length` or empty `content` | Output budget used up, often by thinking | Raise `max_tokens` or lower reasoning effort (5.3) |
 | HTTP 400 on an unfamiliar field | An unsupported request field (5.10) | Read `error.message` and remove the field |
-| The client cannot connect | Wrong host or port, or the server is not ready | Check `status`, `/health/ready`, and the profile's port; the server is loopback-only |
+| The client cannot connect | Wrong host or port, or the server is not ready | Check `status`, `/health/ready`, and the profile's port; a single-node server is loopback-only, a two-node server listens on the leader's address |
 
 ## 9. Security and privacy
 
-- The server has **no authentication and no TLS**. It listens on `127.0.0.1` and the launcher refuses a
-  non-loopback address for a single-node profile. Keep it that way. To reach it from another machine use
+- The server has **no authentication and no TLS**. A single-node profile listens on `127.0.0.1` and the
+  launcher refuses a non-loopback address for it. Keep it that way. To reach it from another machine use
   an SSH tunnel or put your own reverse proxy in front of it that terminates TLS, authenticates clients
   and limits request size and time.
+- A two-node profile is the exception: its HTTP API binds the leader's `address` from your site file,
+  the leader also listens on the site's `tp_port` for the follower, and the follower serves no HTTP.
+  Any client that can reach the leader's port can use the server, so keep both nodes on a private
+  network or firewall the ports.
 - Prompts and answers are held in memory and written to the server log only as the log shows; do not
   paste raw logs, prompts, environment dumps or credentials into a report. `diagnostics` is an
   allow-list for this reason, but read it before you share it.
@@ -419,7 +457,7 @@ launcher prints an error **token** in capitals; the table lists the common ones 
 
 The repository and the launcher are AGPL-3.0-only. Model weights keep their own licence, named in each
 recipe's `model.lock.json`; weights are never stored in this repository. If you receive a release
-archive, its binaries are built from the `source_commit` in `approval.json`; the Corresponding Source
+archive, its binaries are built from the `source_commit` in its approval file; the Corresponding Source
 is attached to the release as a source archive, and you can ask the maintainers for it for any release.
 
 ## 11. Reporting a problem or feedback
@@ -430,12 +468,16 @@ nothing in one that you want kept private. For a quick question, or to compare n
 testers, use the testers' Discord server (your invitation names it); anything you want looked at and
 tracked belongs in an issue. A report needs:
 
-1. The release tag and the archive SHA-256 (from `approval.json`), and the profile you ran.
-2. The exact command and its exit code and error token.
-3. The output of `./launch.sh diagnostics`, after you have read it.
-4. What you expected and what happened, and the steps to repeat it. For a bad answer, the request you
-   sent (remove anything private), the `seed` if you set one, and the `finish_reason`.
-5. What you checked and what you could not check on your machine.
+1. The release tag, the bundle asset name (`<runtime-id>-v<N>-bundle.tar.gz`) and its SHA-256
+   (`bundle.sha256` in the approval file), and the profile you ran.
+2. The server's start line, which names the exact build and settings:
+   `./launch.sh logs --profile <name> --lines 1000 --no-follow | grep 'rexl3 event=start'`.
+3. The exact command and its exit code and error token.
+4. The output of `./launch.sh diagnostics`, after you have read it.
+5. What you expected and what happened, and the steps to repeat it. For a bad answer, the request you
+   sent and the response you got (remove anything private), the `seed` if you set one, and the
+   `finish_reason`.
+6. What you checked and what you could not check on your machine.
 
 Do not include raw logs, prompts or responses you do not want shared, credentials, or SSH keys. For a
 security problem follow [SECURITY](../SECURITY.md) instead: never an issue and never a chat channel.
@@ -453,7 +495,7 @@ security problem follow [SECURITY](../SECURITY.md) instead: never an issue and n
 | Prefix cache | Saved state of earlier prompts reused for a shared beginning |
 | Speculative decoding | The engine proposes several tokens and checks them at once; output is identical to normal decoding |
 | Site file | A JSON file naming your machines and paths, needed for a two-node profile |
-| Approval | `approval.json`: the record binding an archive to its source commit and hashes |
+| Approval | `<runtime-id>-v<N>-approval.json` on the release (`approval.json` in the sealed tree): the record binding an archive to its source commit and hashes |
 
 ## 13. Quick reference
 

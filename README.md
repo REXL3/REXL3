@@ -23,13 +23,16 @@ Engine development, model validation and sealing happen in the development repos
 
 ## First release (v0.1.0) models
 
-| Model | Architecture | Status |
-| --- | --- | --- |
-| Qwen3.8-27B | `qwen3_5` (family `qwen`) | Furthest along: a v2-schema approval existed but was unreviewed, and its registry entry was removed in the restructure; it must be re-reviewed and re-promoted through the model-branch flow. |
-| Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | No runtime entry yet; the pack needs engine validation and a profile/gate recipe. |
-| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | Runtime entry exists (single-node and two-node profiles); the vision-disabled profile needs restoring and re-sealing before release. |
-| GLM-5.3-Flash | `glm` (glm5_next) | Runtime entry exists; live-server qualification on the release binary is still required. |
-| Nemotron-3.5-Super-VL | `nemotron_h_omni` | Family code exists; no runtime entry yet. |
+| Model | Architecture | Runtime id on dev main | Status |
+| --- | --- | --- | --- |
+| Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | Furthest along: a v2-schema approval existed but was unreviewed, and its registry entry was removed in the restructure; it must be re-reviewed and re-promoted through the model-branch flow. |
+| Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | Runtime entry exists on dev main (one single-node profile, 262,144 tokens; images off under a temporary, documented exception); qualification on the release binary, sealing and promotion remain. |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | Runtime entry exists (single-node and two-node profiles); the vision-disabled profile needs restoring and re-sealing before release. |
+| GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | Runtime entry exists; live-server qualification on the release binary is still required. |
+| Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | Runtime entry exists on dev main (one single-node profile, 1,048,576 tokens); qualification on the release binary, sealing and promotion remain. |
+
+The runtime id is the prefix of that model's release asset names. The release page is authoritative:
+a sealed runtime id can differ from the dev main value above.
 
 None of these is released. Qualification on the exact release binary, sealing and promotion are the
 remaining steps; the release notes document what each model's evidence proves.
@@ -61,20 +64,34 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 ## Install and run a recipe
 
 A **recipe** is one sealed runtime tree: the model, its serving profile, and the launcher. Operators
-install a released recipe from the release's assets, never from a development checkout. The steps:
+install a released recipe from the release's assets, never from a development checkout.
+
+A release holds the assets of **every** model in it. Each model has an approval record named
+`<runtime-id>-v<N>-approval.json` and a runnable bundle named `<runtime-id>-v<N>-bundle.tar.gz`, plus
+source and evidence archives you do not need to run it. Download only your model's two files. The
+`bundle.archive` field inside the approval is the archive's name in the development release, not the
+release asset's name, so never use it to find the file. The steps:
 
 ```bash
-# 1. Download the release assets (choose the exact tag, e.g. v0.1.0)
-gh release download v0.1.0 -R REXL3/REXL3 -D /tmp/rexl3-release
+# 1. Download your model's approval and bundle from the exact tag
+TAG=v0.1.0
+RUNTIME_ID=<runtime-id>          # the prefix of your model's asset names on the release page
+DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
+gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
+  -p "${RUNTIME_ID}-*-approval.json" -p "${RUNTIME_ID}-*-bundle.tar.gz"
+APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)   # exactly one of each
 
-# 2. Verify before extracting: the archive's SHA-256 must equal bundle.sha256 in approval.json
-ARCHIVE=$(python3 -c "import json;print(json.load(open('/tmp/rexl3-release/approval.json'))['bundle']['archive'])")
-sha256sum "/tmp/rexl3-release/$ARCHIVE"        # compare with bundle.sha256
+# 2. Verify before extracting: the bundle's SHA-256 must equal bundle.sha256 in the approval
+want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
+have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
+[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"
 
-# 3. Extract the bundle and run the launcher lifecycle
-mkdir -p ~/rexl3 && tar -xzf "/tmp/rexl3-release/$ARCHIVE" -C ~/rexl3 && cd ~/rexl3
+# 3. Extract into a new directory and run the launcher lifecycle
+mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
+cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
 ./launch.sh --yes install-deps                # pinned system packages and a private Python environment
 ./launch.sh doctor                            # read-only checks; must exit 0
+./launch.sh print-command                     # the exact command, including the profile's port
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the pinned model
 ./launch.sh --yes start                       # foreground; verified READY before serving
 ```
@@ -84,15 +101,19 @@ installation only; the model download needs the separate `--accept-model-downloa
 second terminal:
 
 ```bash
-curl -s http://127.0.0.1:8889/v1/models                    # the served model id and effective window
-curl -s http://127.0.0.1:8889/v1/chat/completions \
+PORT=<port>                                                    # from print-command (--port)
+curl -s http://127.0.0.1:$PORT/v1/models                       # the served model id and effective window
+curl -s http://127.0.0.1:$PORT/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"<id from /v1/models>","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512}'
 ```
 
-The default port is 8889; a recipe may pin another in its profile. `./launch.sh status`, `logs`,
-`stop`, `verify` and `diagnostics` operate from a second terminal. The server has no authentication and
-no TLS; keep it on loopback or behind your own proxy (see [SECURITY.md](SECURITY.md)).
+Each profile pins its own port (`http_port` in `profile.json`), and the first-release profiles use
+different ports, so never assume one. `./launch.sh status`, `logs`, `stop`, `verify` and `diagnostics`
+operate from a second terminal. The server has no authentication and no TLS. A single-node profile
+binds `127.0.0.1` only; a two-node profile binds the leader's address from your site file, so keep both
+nodes on a private network or firewall the port (see [SECURITY.md](SECURITY.md) and
+[docs/USER_GUIDE.md](docs/USER_GUIDE.md) section 2.2).
 
 `launch.sh` commands: `doctor`, `install-deps`, `setup`, `print-command`, `start`, `status`, `stop`,
 `logs`, `verify`, `diagnostics`, `reset-state`. `install-deps` and `--yes`/`--allow-driver-change`
@@ -208,16 +229,19 @@ between ranks and refuses a mismatch before any weight is read. Only two ranks a
 Image input is inline base64 in a data URI (`image_url` part). Remote HTTPS image URLs are off unless
 `--image-urls on` (policy-guarded). `--no-vision` disables the tower (accepted only with a recorded
 does-not-fit justification); `--max-image-tokens` bounds image tokens. Towers exist for Qwen, GLM
-(glm5_next, 24-layer), MiniCPM-V-4.7 and Nemotron Omni; Nemotron also accepts video as a frame list
-(`--max-video-frames`, `--max-video-tokens`, `--video-pruning-rate`, `--video-evs-strict`,
-`--no-video`). Audio is refused by every family.
+(glm5_next, 24-layer), MiniCPM-V-4.7 and Nemotron Omni; the Nemotron engine also accepts video as a
+frame list (`--max-video-frames`, `--max-video-tokens`, `--video-pruning-rate`, `--video-evs-strict`,
+`--no-video`), but no first-release profile declares video (`capabilities.video` is `false` in every
+profile). Audio is refused by every family.
 
 ### Reasoning controls
 
 Reasoning models return their thinking separately in `message.reasoning_content` (streaming:
-`delta.reasoning_content`); `message.content` holds the answer. Request fields: `reasoning_effort`
-(the level names depend on the family; `/v1/models` reports the controls the model offers) and
-`chat_template_kwargs.enable_thinking`. Server defaults: `--default-thinking off|template` and
+`delta.reasoning_content`); `message.content` holds the answer. Request fields:
+`chat_template_kwargs.reasoning_effort` (the level names depend on the family; `/v1/models` reports the
+controls the model offers) and `chat_template_kwargs.enable_thinking`. Every model that offers an
+effort accepts it by name in `chat_template_kwargs`; some also accept a top-level `reasoning_effort`,
+and template-driven families such as GLM refuse the top-level field with HTTP 400. Server defaults: `--default-thinking off|template` and
 `--default-reasoning-effort LEVEL` for requests that name neither; `max_reasoning_tokens` caps the
 thought.
 
@@ -276,8 +300,10 @@ single download step; actions are pinned by full commit SHA.
 ## Reporting a problem
 
 Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
-tag and archive hash, the profile, the exact command with its exit code and error token, the output of
-`./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you expected.
+tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
+line, the exact command with its exit code and error token, the request and response for a bad answer,
+the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
+expected.
 Issues are visible to the maintainers and every invited tester; never paste raw logs, prompts,
 credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
 
@@ -288,6 +314,7 @@ are not in this repository: each recipe's `model.lock.json` pins the upstream re
 and that repository's own licence governs the weights. Third-party notices are in each tree's
 `THIRD_PARTY_NOTICES.md` and `sbom/`.
 
-Binaries in a release archive are built from the source commit recorded in the recipe's
-`approval.json`, in the dev repository. Releases attach the engine corresponding source as a release
+Binaries in a release archive are built from the source commit recorded in the recipe's approval
+record (`approval.json` in the sealed tree, `<runtime-id>-v<N>-approval.json` on the release), in the
+dev repository. Releases attach the engine corresponding source as a release
 asset; anyone who receives a binary and needs its Corresponding Source can also ask the maintainers.

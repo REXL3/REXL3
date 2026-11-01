@@ -229,8 +229,9 @@ curl -s $BASE/models | python3 -m json.tool
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:$PORT/health/ready   # 200 ready, 503 loading or draining
 ```
 
-Each profile pins its own port, and the first-release profiles use different ports. For a two-node
-profile, use the leader's address in place of `127.0.0.1`.
+Each profile pins its own port, and two recipes can pin the same port, so take it from `print-command`
+and never assume one; `start` refuses a port another process holds (`PORT_OCCUPIED_OR_UNAVAILABLE`).
+For a two-node profile, use the leader's address in place of `127.0.0.1` (and read section 9 first).
 
 `/v1/models` shows the model **id to use in requests**, `max_model_len` (the effective limit you must
 stay within) and `configured_max_model_len` (the ceiling the profile asked for). Use the id it prints;
@@ -445,6 +446,10 @@ launcher prints an error **token** in capitals; the table lists the common ones 
   the leader also listens on the site's `tp_port` for the follower, and the follower serves no HTTP.
   Any client that can reach the leader's port can use the server, so keep both nodes on a private
   network or firewall the ports.
+- In v0.1.0 the two-node profiles (the 1,048,576-token profiles of GLM-5.3-Flash and
+  DeepSeek-V4.1-Flash-1017) listen on the leader node's network address, not on localhost, and the
+  server has no API key and no request log. Run them only on a private, trusted network, or behind a
+  firewall or an SSH tunnel. An API key option is planned for v0.1.1.
 - Prompts and answers are held in memory and written to the server log only as the log shows; do not
   paste raw logs, prompts, environment dumps or credentials into a report. `diagnostics` is an
   allow-list for this reason, but read it before you share it.

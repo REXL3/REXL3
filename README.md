@@ -23,16 +23,24 @@ Engine development, model validation and sealing happen in the development repos
 
 ## First release (v0.1.0) models
 
-| Model | Architecture | Runtime id on dev main | Status |
-| --- | --- | --- | --- |
-| Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | Furthest along: a v2-schema approval existed but was unreviewed, and its registry entry was removed in the restructure; it must be re-reviewed and re-promoted through the model-branch flow. |
-| Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | Runtime entry exists on dev main (one single-node profile, 262,144 tokens; images off under a temporary, documented exception); qualification on the release binary, sealing and promotion remain. |
-| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | Runtime entry exists (single-node and two-node profiles); the vision-disabled profile needs restoring and re-sealing before release. |
-| GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | Runtime entry exists; live-server qualification on the release binary is still required. |
-| Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | Runtime entry exists on dev main (one single-node profile, 1,048,576 tokens); qualification on the release binary, sealing and promotion remain. |
+| Model | Architecture | Runtime id | Profiles: context, nodes, port | Vision |
+| --- | --- | --- | --- | --- |
+| Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on |
+| Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940; `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off on both profiles |
+| GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
+| Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
+| Ling-3.1-Flash-1019 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k`: 32,768 tokens, one node, port 8889 (the same port as Qwen3.8-27B) | off |
 
-The runtime id is the prefix of that model's release asset names. The release page is authoritative:
-a sealed runtime id can differ from the dev main value above.
+The runtime id is the prefix of that model's release asset names. A model with a single-node and a
+two-node profile is one recipe with one runtime id. The release page and each recipe's sealed
+`profile.json` are authoritative: a sealed runtime id, profile or port can differ from the table above.
+A recipe with vision off says so in its `KNOWN_ISSUES.md`.
+
+**Two-node profiles** (the 1,048,576-token profiles of GLM-5.3-Flash and DeepSeek-V4.1-Flash-1017)
+listen on the leader node's network address, not on localhost, and in v0.1.0 the server has no API key
+and no request log. Run them only on a private, trusted network, or behind a firewall or an SSH tunnel.
+An API key option is planned for v0.1.1.
 
 None of these is released. Qualification on the exact release binary, sealing and promotion are the
 remaining steps; the release notes document what each model's evidence proves.
@@ -108,8 +116,8 @@ curl -s http://127.0.0.1:$PORT/v1/chat/completions \
   -d '{"model":"<id from /v1/models>","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512}'
 ```
 
-Each profile pins its own port (`http_port` in `profile.json`), and the first-release profiles use
-different ports, so never assume one. `./launch.sh status`, `logs`, `stop`, `verify` and `diagnostics`
+Each profile pins its own port (`http_port` in `profile.json`; the model table above lists them), and
+two recipes can pin the same port, so take it from `print-command` and never assume one. `./launch.sh status`, `logs`, `stop`, `verify` and `diagnostics`
 operate from a second terminal. The server has no authentication and no TLS. A single-node profile
 binds `127.0.0.1` only; a two-node profile binds the leader's address from your site file, so keep both
 nodes on a private network or firewall the port (see [SECURITY.md](SECURITY.md) and

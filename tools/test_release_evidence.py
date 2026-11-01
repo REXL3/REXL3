@@ -72,7 +72,7 @@ class ReceiptContract(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.expected = dict(runtime_id='synthetic-demo', profile='single',
+        self.expected = dict(runtime_id='synthetic-demo', profile='single', pack='target',
                              engine_commit='a' * 40, engine_tree='b' * 40,
                              binary_sha256='c' * 64, profile_sha256='d' * 64,
                              model_lock_sha256='e' * 64, release_lock_sha256='f' * 64,
@@ -174,6 +174,14 @@ class ReceiptContract(unittest.TestCase):
                 self.doc[key] = None
                 with self.assertRaises(ValueError):
                     self.validate()
+
+    def test_a_receipt_without_the_pack_identity_key_is_refused(self):
+        del self.doc['pack']
+        with self.assertRaisesRegex(ValueError, 'incomplete receipt identity'):
+            self.validate()
+        self.doc['pack'] = 'Not A Role'
+        with self.assertRaisesRegex(ValueError, 'invalid pack'):
+            self.validate()
 
     def test_evidence_bytes_missing_symlink_and_paths_rejected(self):
         p = self.root / 'doctor.json'

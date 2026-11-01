@@ -24,7 +24,8 @@ GATES = ('doctor', 'lifecycle', 'capability', 'vision', 'context', 'exactness',
          'prefix_cache', 'performance', 'quality')
 IDENTITY_KEYS = ('runtime_id', 'profile', 'engine_commit', 'engine_tree', 'binary_sha256',
                  'profile_sha256', 'model_lock_sha256', 'release_lock_sha256',
-                 'effective_profile_digest', 'effective_profile_source', 'effective_max_context', 'capabilities', 'topology')
+                 'effective_profile_digest', 'effective_profile_source', 'effective_max_context', 'capabilities', 'topology',
+                 'pack')
 HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
@@ -124,7 +125,7 @@ def validate_record(item):
 def validate_identity(doc):
     require(isinstance(doc, dict), 'identity object required')
     require(all(key in doc for key in IDENTITY_KEYS), 'incomplete receipt identity')
-    for key in ('runtime_id', 'profile'):
+    for key in ('runtime_id', 'profile', 'pack'):
         require(isinstance(doc[key], str) and ID.fullmatch(doc[key]), 'invalid ' + key)
     for key in ('engine_commit', 'engine_tree'):
         full_hash(doc[key], HEX40)
@@ -809,6 +810,9 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     manifest = archive_json(archive, 'source.manifest.json')
     require(profile.get('schema') == 'rexl3.runtime-profile.v1' and profile.get('state') == 'final', 'final runtime profile required')
     require(models.get('schema') == 'rexl3.model-lock.v1' and models.get('packs'), 'model lock required')
+    packs = models['packs']
+    require(isinstance(packs, dict) and 'target' in packs and bool(set(packs) - {'draft'}),
+            'model lock needs a target pack and at least one non-draft role')
     require(release.get('schema') == 'rexl3.release.v1' and manifest.get('schema') == 'rexl3.generated-source.v1', 'bundle schema mismatch')
     require(profile.get('runtime_id') == release.get('runtime_id') == runtime_id, 'runtime identity mismatch')
     require(release.get('production_commit') == commit and release.get('production_tree') == tree, 'release source identity mismatch')
@@ -863,6 +867,11 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     require(isinstance(choices, dict) and choices, 'profile choices required')
     for name, choice in choices.items():
         require(isinstance(name, str) and ID.fullmatch(name) and isinstance(choice, dict), 'invalid profile')
+        pack_role = choice.get('pack', 'target')
+        require(isinstance(pack_role, str) and pack_role in packs and pack_role != 'draft',
+                'profile names an unknown pack role')
+        rid = choice.get('runtime_id')
+        require(rid is None or (isinstance(rid, str) and ID.fullmatch(rid)), 'invalid runtime id override')
         require(isinstance(choice.get('files'), dict), 'config inventory required')
         for rel, digest in choice['files'].items():
             require(rel in inv and inv[rel]['sha256'] == digest, 'profile config drift')
@@ -956,7 +965,8 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
         expected = selected['identity']
         validate_identity(expected)
         context, ranks = profile_context(profile['profiles'][name], archive)
-        derived = dict(runtime_id=doc['runtime_id'], profile=name, engine_commit=doc['source_commit'],
+        derived = dict(runtime_id=profile['profiles'][name].get('runtime_id', doc['runtime_id']), profile=name,
+                       pack=profile['profiles'][name].get('pack', 'target'), engine_commit=doc['source_commit'],
                        engine_tree=doc['source_tree'], effective_max_context=context,
                        topology={'ranks': ranks}, capabilities=profile['profiles'][name]['capabilities'],
                        **{k: v for k, v in identities.items() if k != 'source_manifest_sha256'})

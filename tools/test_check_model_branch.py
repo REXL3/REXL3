@@ -24,10 +24,10 @@ def git(repo, *args):
 
 
 class ModelBranchFixture:
-    def __init__(self, root):
+    def __init__(self, root, **seal):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.f = SyntheticSeal(str(self.root))
+        self.f = SyntheticSeal(str(self.root), **seal)
         self.repo = self.f.repo
         self.approval, self.doc, self.registry = self.f.published_fixture_model(FAMILY, MODEL)
         self.registry_path = self.repo / 'runtimes/templates/APPROVALS.json'
@@ -68,8 +68,8 @@ class CheckModelBranchTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def fixture(self, sub='ok'):
-        return ModelBranchFixture(self.tmp.name + '/' + sub)
+    def fixture(self, sub='ok', **seal):
+        return ModelBranchFixture(self.tmp.name + '/' + sub, **seal)
 
     def run_check(self, fx, *args, branch=f'model/{MODEL}'):
         return c.main(['--repo-root', str(fx.repo), '--base', 'HEAD~1', '--head', 'HEAD',
@@ -95,6 +95,16 @@ class CheckModelBranchTest(unittest.TestCase):
         code, lines = self.captured(lambda: self.run_check(fx))
         self.assertEqual(code, 0, '\n'.join(lines))
         self.assertEqual([line for line in lines if line.startswith('FAIL')], [])
+
+    def test_a_model_whose_profiles_pin_their_own_pack_and_runtime_id_passes(self):
+        # The DeepSeek shape: a second profile with its own lock role and runtime id (dev #159).
+        fx = self.fixture('per-profile', alt_profile=dict(pack='alt', runtime_id='synthetic-alt'))
+        fx.init()
+        fx.add_model()
+        fx.commit('model')
+        code, lines = self.captured(lambda: self.run_check(fx))
+        self.assertEqual(code, 0, '\n'.join(lines))
+        self.assertIn('PASS tree', lines)
 
     def test_failing_case_for_every_check(self):
         cases = {

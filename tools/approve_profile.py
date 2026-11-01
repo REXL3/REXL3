@@ -74,7 +74,8 @@ def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_as
         e.require(name in profile['profiles'] and name not in selected, 'unknown/duplicate receipt profile')
         choice = profile['profiles'][name]
         context, ranks = e.profile_context(choice, archive)
-        expected = dict(runtime_id=runtime_id, profile=name, engine_commit=commit, engine_tree=tree,
+        expected = dict(runtime_id=choice.get('runtime_id', runtime_id), profile=name,
+            pack=choice.get('pack', 'target'), engine_commit=commit, engine_tree=tree,
             effective_profile_digest=receipt['effective_profile_digest'], effective_profile_source='owned-launcher-observation',
             effective_max_context=context, capabilities=choice['capabilities'], topology={'ranks': ranks},
             **{k: v for k, v in identities.items() if k != 'source_manifest_sha256'})

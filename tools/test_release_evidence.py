@@ -107,6 +107,9 @@ class ReceiptContract(unittest.TestCase):
                             'env': {'SYNTHETIC_FIXTURE': '1'}, 'ready': True}]}
         p = write(self.root, 'identity.json', encoded(observation))
         self.doc['identity_receipt'] = {'path': p.name, 'sha256': sha(p.read_bytes())}
+        if not self.images:
+            self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                                expires='2099-12-31', reason='synthetic owner exception')
         self.receipt = self.root / 'receipt.json'
 
     def test_naked_digest_is_not_observation(self):
@@ -126,6 +129,35 @@ class ReceiptContract(unittest.TestCase):
                 self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
                 with self.assertRaises(ValueError):
                     self.validate()
+
+    def test_vision_on_accepts_a_valid_exception_record(self):
+        # A vision-on release under an exception (images accepted, colour answers excused) carries its record.
+        self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                            expires='2099-12-31', reason='synthetic owner exception')
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_vision_on_refuses_an_expired_exception_record(self):
+        self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                            expires='2020-01-01', reason='synthetic owner exception')
+        with self.assertRaisesRegex(ValueError, 'expired on 2020-01-01'):
+            self.validate()
+
+    def test_vision_on_refuses_a_malformed_exception_record(self):
+        self.doc['vision_exception'] = dict(granted_by='mallory', granted='2026-10-25',
+                                            expires='2099-12-31', reason='synthetic owner exception')
+        with self.assertRaisesRegex(ValueError, 'granted_by must be am423 or vcruz305'):
+            self.validate()
+        self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25', expires='2099-12-31')
+        with self.assertRaisesRegex(ValueError, 'must carry granted_by'):
+            self.validate()
+
+    def test_a_record_is_required_only_when_vision_is_off(self):
+        self.doc.pop('vision_exception', None)
+        if self.images:
+            self.assertEqual(self.validate(), self.doc)
+        else:
+            with self.assertRaisesRegex(ValueError, 'documented owner vision exception'):
+                self.validate()
 
     def api(self):
         spec = importlib.util.find_spec('tools.release_evidence')
@@ -330,6 +362,28 @@ class VisionOffReceiptContract(ReceiptContract):
             self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'exactly one bare --no-vision'):
                 self.validate()
+
+    def test_vision_off_refuses_a_missing_exception_record(self):
+        del self.doc['vision_exception']
+        with self.assertRaisesRegex(ValueError, 'documented owner vision exception'):
+            self.validate()
+
+    def test_vision_off_refuses_an_expired_exception_record(self):
+        self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                            expires='2020-01-01', reason='synthetic owner exception')
+        with self.assertRaisesRegex(ValueError, 'expired on 2020-01-01'):
+            self.validate()
+
+    def test_vision_off_refuses_a_malformed_exception_record(self):
+        base = dict(granted_by='am423', granted='2026-10-25', expires='2099-12-31',
+                    reason='synthetic owner exception')
+        for change in ({'granted_by': 'mallory'}, {'granted': '2026-99-99'}, {'expires': 'not-a-date'},
+                       {'reason': ' '}, {'tracking': 'x'}):
+            with self.subTest(change=change):
+                self.setUp()
+                self.doc['vision_exception'] = dict(base, **change)
+                with self.assertRaises(ValueError):
+                    self.validate()
 
 
 class ArchiveContract(unittest.TestCase):

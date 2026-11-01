@@ -24,10 +24,10 @@ def git(repo, *args):
 
 
 class ModelBranchFixture:
-    def __init__(self, root):
+    def __init__(self, root, **seal):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.f = SyntheticSeal(str(self.root))
+        self.f = SyntheticSeal(str(self.root), **seal)
         self.repo = self.f.repo
         self.approval, self.doc, self.registry = self.f.published_fixture_model(FAMILY, MODEL)
         self.registry_path = self.repo / 'runtimes/templates/APPROVALS.json'
@@ -68,8 +68,8 @@ class CheckModelBranchTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def fixture(self, sub='ok'):
-        return ModelBranchFixture(self.tmp.name + '/' + sub)
+    def fixture(self, sub='ok', **seal):
+        return ModelBranchFixture(self.tmp.name + '/' + sub, **seal)
 
     def run_check(self, fx, *args, branch=f'model/{MODEL}'):
         return c.main(['--repo-root', str(fx.repo), '--base', 'HEAD~1', '--head', 'HEAD',
@@ -141,6 +141,111 @@ class CheckModelBranchTest(unittest.TestCase):
         code, lines = self.captured(lambda: self.run_check(fx, branch='engine/topic'))
         self.assertEqual(code, 0, '\n'.join(lines))
         self.assertTrue(all(line.startswith('PASS') for line in lines), lines)
+
+
+def vision_off_profile(*names):
+    caps = {key: key not in ('audio', 'video', 'json_schema', 'images') for key in (
+        'text', 'sse', 'reasoning', 'tools', 'images', 'video', 'audio', 'json_schema', 'prefix_cache')}
+    return {'schema': 'rexl3.runtime-profile.v1', 'state': 'final', 'profiles': {
+        name: {'kind': 'single', 'argv': ['--draft', '@DRAFT_DIR@', '--spec', 'auto', '--no-vision'],
+               'capabilities': dict(caps)}
+        for name in names}}
+
+
+OWNER_EXCEPTION = dict(granted_by='am423', granted='2026-11-01', expires='2099-12-31',
+                       reason='synthetic owner exception')
+LOCK = {'schema': 'rexl3.model-lock.v1', 'packs': {'target': {'repo': 'synthetic/model'},
+                                                   'draft': {'repo': 'synthetic/draft'}}}
+
+
+class VisionExceptionContractTest(unittest.TestCase):
+    """Vision off: a does-not-fit justification, or an unexpired owner exception sealed in every receipt."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def vision_problems(self, exceptions, names=('single',), model_doc=None):
+        profile = vision_off_profile(*names)
+        problems = c.resolve_vision_off(c.capability_problems(profile, model_doc, models=LOCK), profile, exceptions)
+        return [problem for problem in problems if problem.startswith('vision is off')]
+
+    def test_the_resolved_finding_is_the_one_capability_problems_reports(self):
+        self.assertEqual(c.capability_problems(vision_off_profile('single'), None, models=LOCK), [c.VISION_OFF_PROBLEM])
+        self.assertEqual(c.resolve_vision_off(['other'], vision_off_profile('single'), None), ['other'])
+
+    def test_a_valid_owner_exception_on_every_profile_is_accepted(self):
+        self.assertEqual(self.vision_problems({'single': OWNER_EXCEPTION}), [])
+        self.assertEqual(self.vision_problems({'single': OWNER_EXCEPTION, 'tp2': dict(OWNER_EXCEPTION,
+                                               granted_by='vcruz305')}, names=('single', 'tp2')), [])
+
+    def test_a_missing_expired_or_malformed_exception_is_refused(self):
+        cases = {
+            'no receipts read': None,
+            'no record': {'single': None},
+            'expired': {'single': dict(OWNER_EXCEPTION, expires='2020-01-01')},
+            'not a maintainer': {'single': dict(OWNER_EXCEPTION, granted_by='mallory')},
+            'no reason': {'single': dict(OWNER_EXCEPTION, reason=' ')},
+            'bad date': {'single': dict(OWNER_EXCEPTION, expires='2026-13-01')},
+            'extra field': {'single': dict(OWNER_EXCEPTION, tracking='x')},
+        }
+        for name, exceptions in cases.items():
+            with self.subTest(case=name):
+                problems = self.vision_problems(exceptions)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('no valid owner vision exception is sealed (single: ', problems[0])
+
+    def test_every_vision_off_profile_needs_its_own_exception(self):
+        problems = self.vision_problems({'single': OWNER_EXCEPTION}, names=('single', 'tp2'))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(tp2: ', problems[0])
+        self.assertNotIn('single: ', problems[0])
+
+    def test_a_does_not_fit_justification_still_suffices(self):
+        model_doc = {'pack': {'format': 'exl3', 'vision_does_not_fit': 'measured: the tower does not fit'}}
+        self.assertEqual(self.vision_problems(None, model_doc=model_doc), [])
+
+    def test_sealed_receipts_are_read_only_when_their_bytes_match_the_approval(self):
+        receipt = write(Path(self.tmp.name), 'r/qualification.json', encoded({'vision_exception': OWNER_EXCEPTION}))
+        approval = {'profiles': {'single': {'receipt': {'path': 'r/qualification.json',
+                                                        'sha256': sha(receipt.read_bytes())}}}}
+        self.assertEqual(c.sealed_vision_exceptions(approval, Path(self.tmp.name)), {'single': OWNER_EXCEPTION})
+        approval['profiles']['single']['receipt']['sha256'] = '0' * 64
+        self.assertEqual(c.sealed_vision_exceptions(approval, Path(self.tmp.name)), {'single': None})
+        self.assertEqual(c.sealed_vision_exceptions(None, Path(self.tmp.name)), {})
+        self.assertEqual(c.sealed_vision_exceptions(approval, None), {})
+
+    def run_check(self, fx):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = c.main(['--repo-root', str(fx.repo), '--base', 'HEAD~1', '--head', 'HEAD',
+                           '--branch', f'model/{MODEL}', '--assets-dir', str(fx.assets)])
+        return code, out.getvalue().splitlines()
+
+    def test_a_vision_off_model_branch_passes_with_the_sealed_owner_exception(self):
+        fx = ModelBranchFixture(self.tmp.name + '/vision-off', images=False)
+        self.assertNotIn('vision_does_not_fit', fx.f.model_doc(FAMILY, MODEL)['pack'])
+        fx.init()
+        fx.add_model()
+        fx.commit('model')
+        code, lines = self.run_check(fx)
+        self.assertEqual(code, 0, '\n'.join(lines))
+        self.assertIn('PASS capability contract', lines)
+
+    def test_a_tampered_exception_in_the_assets_fails_the_tree_and_the_contract(self):
+        fx = ModelBranchFixture(self.tmp.name + '/tampered', images=False)
+        fx.init()
+        fx.add_model()
+        fx.commit('model')
+        receipt_path = fx.assets / FAMILY / MODEL / 'v1' / 'qualification.json'
+        receipt = e.load_json(receipt_path)
+        receipt['vision_exception'] = dict(OWNER_EXCEPTION, expires='2020-01-01')
+        receipt_path.write_bytes(encoded(receipt))
+        code, lines = self.run_check(fx)
+        self.assertEqual(code, 1, '\n'.join(lines))
+        self.assertTrue(any(line.startswith('FAIL tree') for line in lines), lines)
+        self.assertTrue(any(line.startswith('FAIL capability contract') and 'no valid owner vision exception' in line
+                            for line in lines), lines)
 
 
 if __name__ == '__main__':

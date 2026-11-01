@@ -72,8 +72,11 @@ First-release map (priority order):
 - `architectures` (list of HF architecture class names), `engine_family` (dev module name),
 - `runtime_id` (dev runtime id used for dev release tags `approve-<runtime_id>-<n>`),
 - `pack` (object; required key `format`, e.g. "exl3"; other descriptive keys such as `bits`,
-  `draft`, `target_repo`, `draft_repo`, and `vision_does_not_fit` (a string recording a proven
-  does-not-fit justification when vision is off) are allowed).
+  `draft`, `target_repo`, `draft_repo`, and `vision_does_not_fit` (a string recording why the vision
+  tower does not fit, when vision is off) are allowed). A release with vision off also carries an
+  unexpired owner vision exception (`granted_by` am423 or vcruz305, `granted`, `expires`, `reason`)
+  in each vision-off profile's sealed qualification receipt; production accepts it in place of a
+  does-not-fit proof.
 
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
 keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The

@@ -167,6 +167,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     tree_path = None
     model_doc = None
     approval_doc = None
+    asset_root = None
     if model is not None:
         # MODEL.json check (validity vs its folder)
         try:
@@ -210,6 +211,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             if assets_dir is None:
                 raise CheckError('no authenticated dev assets (run --local or provide --assets-dir)')
             tree_dir_path = Path(tree_dir) / 'runtimes' / family / model / f'v{version}'
+            asset_root = Path(assets_dir) / family / model / f'v{version}'
             problems = verify_tree(tree_dir_path, approved_raw, trusted_approvals=registry_raw,
                                    assets_dir=assets_dir, family=family, model=model)
             approval_path = tree_dir_path / 'approval.json'
@@ -237,6 +239,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             profile = e.loads(profile_bytes)
             models = e.loads(head_bytes(tree_path + '/model.lock.json'))
             problems = capability_problems(profile, model_doc, models=models)
+            problems = resolve_vision_off(problems, profile, sealed_vision_exceptions(approval_doc, asset_root))
             report('capability contract', not problems, '' if not problems else '; '.join(problems))
         except (CheckError, ValueError) as error:
             report('capability contract', False, str(error))
@@ -295,6 +298,53 @@ def capability_problems(profile, model_doc, models=None):
         if not isinstance(justification, str) or not justification.strip():
             problems.append('vision is off and MODEL.json records no does-not-fit justification')
     return problems
+
+
+def sealed_vision_exceptions(approval_doc, asset_root):
+    """{profile: the owner vision-exception record its sealed qualification receipt carries, or None}.
+
+    Read from the authenticated dev assets the tree check verified; each receipt's bytes must equal the
+    digest the sealed approval names, or that profile proves no exception. No approval or assets: {}.
+    """
+    if not isinstance(approval_doc, dict) or asset_root is None or not isinstance(approval_doc.get('profiles'), dict):
+        return {}
+    found = {}
+    for name, selected in approval_doc['profiles'].items():
+        try:
+            ref = selected['receipt']
+            path = e.safe_file(asset_root, ref['path'])
+            e.require(e.sha256_file(path) == e.full_hash(ref['sha256']), 'receipt bytes drift')
+            found[name] = e.load_json(path).get('vision_exception')
+        except (KeyError, TypeError, ValueError, OSError):
+            found[name] = None
+    return found
+
+
+# The capability_problems finding for a model with vision off on every profile and no does-not-fit
+# justification. An unexpired owner vision exception sealed in every profile's receipt resolves it.
+VISION_OFF_PROBLEM = 'vision is off and MODEL.json records no does-not-fit justification'
+
+
+def resolve_vision_off(problems, profile, vision_exceptions):
+    """Accept an owner vision exception in place of a does-not-fit justification.
+
+    ``vision_exceptions`` maps profile -> record (sealed_vision_exceptions). The VISION_OFF_PROBLEM
+    finding is dropped when every profile's record passes release_evidence.validate_vision_exception;
+    otherwise it stays, naming each profile whose record is missing, expired or malformed.
+    """
+    if VISION_OFF_PROBLEM not in problems:
+        return problems
+    refused = []
+    for name in profile['profiles']:
+        try:
+            e.validate_vision_exception((vision_exceptions or {}).get(name))
+        except ValueError as error:
+            refused.append(f'{name}: {error}')
+    rest = [problem for problem in problems if problem != VISION_OFF_PROBLEM]
+    if refused:
+        rest.append(VISION_OFF_PROBLEM + ' and no valid owner vision exception is sealed ('
+                    + '; '.join(refused) + ')')
+    return rest
 
 
 def _write_temp(data):

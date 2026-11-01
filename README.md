@@ -227,8 +227,8 @@ between ranks and refuses a mismatch before any weight is read. Only two ranks a
 ### Vision
 
 Image input is inline base64 in a data URI (`image_url` part). Remote HTTPS image URLs are off unless
-`--image-urls on` (policy-guarded). `--no-vision` disables the tower (accepted only with a recorded
-does-not-fit justification); `--max-image-tokens` bounds image tokens. Towers exist for Qwen, GLM
+`--image-urls on` (policy-guarded). `--no-vision` disables the tower (a released profile runs it only
+under an owner vision exception; see the capability contract below); `--max-image-tokens` bounds image tokens. Towers exist for Qwen, GLM
 (glm5_next, 24-layer), MiniCPM-V-4.7 and Nemotron Omni; the Nemotron engine also accepts video as a
 frame list (`--max-video-frames`, `--max-video-tokens`, `--video-pruning-rate`, `--video-evs-strict`,
 `--no-video`), but no first-release profile declares video (`capabilities.video` is `false` in every
@@ -267,7 +267,11 @@ Every released model must deliver, and prove at its real context and slot count:
 
 - **speculative decoding on**, proven — drafted output is byte-identical to serial;
 - **prefix cache on**, proven at the real contract;
-- **vision on and tested by default**, off only with a proven does-not-fit justification.
+- **vision on and tested by default**; off only under an **owner vision exception**: a record in each
+  vision-off profile's sealed qualification receipt naming the maintainer who granted it (am423 or
+  vcruz305), the grant date, an expiry date and the reason. The verifier refuses a vision-off receipt
+  without one, or with an expired or malformed one. A `vision_does_not_fit` note in `MODEL.json` may
+  record why the tower does not fit.
 
 `SAGE is our own mixed-precision quantization method for EXL3. The method is not published.`
 

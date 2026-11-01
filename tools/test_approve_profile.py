@@ -145,6 +145,9 @@ class SyntheticSeal:
                         **{k: identity[k] for k in ('binary_sha256', 'engine_commit', 'engine_tree')})])
         write(self.assets, 'identity.json', encoded(observation))
         self.receipt = dict(schema=e.RECEIPT_SCHEMA, **identity, gates={}, identity_receipt={'path': 'identity.json', 'sha256': sha(encoded(observation))})
+        if not images:
+            self.receipt['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                                    expires='2099-12-31', reason='synthetic owner exception')
         for gate in GATES:
             case = {'name': 'synthetic', 'status': 'PASS', 'modality': 'image' if gate == 'vision' else 'system', 'expectation': 'supported'}
             extra = []
@@ -395,4 +398,27 @@ class VisionOffApprovalTest(unittest.TestCase):
         fixture.receipt['gates']['vision']['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
         fixture.receipt_path.write_bytes(encoded(fixture.receipt))
         with self.assertRaisesRegex(ValueError, 'positive supported image evidence required'):
+            fixture.seal()
+
+    def test_vision_off_seal_refuses_a_missing_exception_record(self):
+        fixture = self.fixture()
+        del fixture.receipt['vision_exception']
+        fixture.receipt_path.write_bytes(encoded(fixture.receipt))
+        with self.assertRaisesRegex(ValueError, 'documented owner vision exception'):
+            fixture.seal()
+
+    def test_vision_off_seal_refuses_an_expired_exception_record(self):
+        fixture = self.fixture()
+        fixture.receipt['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
+                                                   expires='2020-01-01', reason='stale exception')
+        fixture.receipt_path.write_bytes(encoded(fixture.receipt))
+        with self.assertRaisesRegex(ValueError, 'expired on 2020-01-01'):
+            fixture.seal()
+
+    def test_vision_off_seal_refuses_a_malformed_exception_record(self):
+        fixture = self.fixture()
+        fixture.receipt['vision_exception'] = dict(granted_by='mallory', granted='2026-10-25',
+                                                   expires='2099-12-31', reason='forged')
+        fixture.receipt_path.write_bytes(encoded(fixture.receipt))
+        with self.assertRaisesRegex(ValueError, 'granted_by must be am423 or vcruz305'):
             fixture.seal()

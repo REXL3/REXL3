@@ -5,6 +5,7 @@ registry authorize promotion. Never execute code from incoming bundles.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import gzip
 import ipaddress
@@ -28,6 +29,11 @@ IDENTITY_KEYS = ('runtime_id', 'profile', 'engine_commit', 'engine_tree', 'binar
 HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
+# The owner-exception record a vision-off release must carry in its qualification
+# receipt (same fields the baseline gate's capability_exceptions validates, minus
+# tracking). Speculation and prefix-cache exceptions are never granted.
+VISION_EXCEPTION_KEYS = ('granted_by', 'granted', 'expires', 'reason')
+VISION_EXCEPTION_GRANTERS = ('am423', 'vcruz305')
 MAX_FILES, MAX_BYTES, MAX_FILE_BYTES = 10000, 8 * 1024**3, 2 * 1024**3
 MAX_JSON_BYTES = 16 * 1024**2
 # Native executables a runtime may take from an engine release instead of carrying them in its bundle.
@@ -450,6 +456,33 @@ def _require_clean_image_refusal(case, refs, root):
             'server must stay healthy after the image refusal')
 
 
+def validate_vision_exception(record, *, today=None):
+    """Require a complete, unexpired owner vision-exception record.
+
+    A vision-off release must carry one (owner's rule: vision may be off only
+    with a documented owner exception; speculation and the prefix cache never
+    get exceptions). Dates compare against the run date the same way the
+    baseline gate compares `capability_exceptions`: an exception whose expiry
+    is strictly before today is expired and grants nothing.
+    """
+    require(isinstance(record, dict) and set(record) == set(VISION_EXCEPTION_KEYS),
+            'vision exception must carry granted_by, granted, expires and reason')
+    require(record['granted_by'] in VISION_EXCEPTION_GRANTERS,
+            'vision exception granted_by must be am423 or vcruz305')
+    require(isinstance(record['reason'], str) and record['reason'].strip(), 'vision exception needs a reason')
+    try:
+        expires = datetime.date.fromisoformat(str(record['expires']))
+    except (TypeError, ValueError):
+        require(False, 'vision exception dates must be YYYY-MM-DD')
+        raise AssertionError('unreachable') from None
+    try:
+        datetime.date.fromisoformat(str(record['granted']))
+    except (TypeError, ValueError):
+        require(False, 'vision exception dates must be YYYY-MM-DD')
+        raise AssertionError('unreachable') from None
+    require(expires >= (today or datetime.date.today()), 'vision exception expired on %s' % record['expires'])
+
+
 def validate_receipt(path, *, evidence_root, expected):
     """Validate typed PASS counts, every referenced byte, identity and raw case summaries.
 
@@ -468,6 +501,13 @@ def validate_receipt(path, *, evidence_root, expected):
     validate_identity(doc)
     validate_identity(expected)
     require(all(doc[key] == expected[key] for key in IDENTITY_KEYS), 'receipt identity drift')
+    if expected['capabilities'].get('images') is False:
+        require(doc.get('vision_exception') is not None,
+                'vision-off release requires a documented owner vision exception (granted_by, granted, expires, reason)')
+    if doc.get('vision_exception') is not None:
+        # also for a vision-ON release under an exception (the qualifier emits a record only for those): an expired or
+        # malformed record must not seal, whatever the capability
+        validate_vision_exception(doc['vision_exception'])
     ref = doc.get('identity_receipt')
     require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'identity receipt required; naked digest refused')
     observation = safe_file(root, ref['path'])

@@ -17,6 +17,155 @@ from tools.test_release_evidence import encoded, sha, write
 FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
 
 
+# Every serving profile on REXL3-dev main fe729abf: the argv copied verbatim from
+# runtimes/<family>/<model>/profile.json and the roles of that entry's model.lock.json packs.
+DEV_MAIN_PROFILES = {
+    # runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/profile.json, profile dsv41-single-262k
+    'dsv41-single-262k': (
+        ['--model', '@MODEL_DIR@', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@', '--slots', '1',
+         '--max-model-len', '262144', '--kv-dtype', 'q4', '--no-video', '--spec', 'auto', '--prefix-cache',
+         'on', '--served-model-name', 'DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw'],
+        ('target', 'dsv41-1.62')),
+    # runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/profile.json, profile dsv41-tp2-1m
+    'dsv41-tp2-1m': (
+        ['--model', '@MODEL_DIR@', '--slots', '1', '--max-model-len', '1048576', '--kv-dtype', 'q4',
+         '--no-video', '--spec', 'auto', '--prefix-cache', 'on', '--served-model-name',
+         'DSV4.1-Flash-1017-SAGE-EXL3-1.62bpw', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@',
+         '--tp-ranks', '2', '--tp-rank', '0', '--tp-peer', '@NODES@:@TP_PORT@', '--tp-connect-timeout',
+         '300', '--tp-ready-timeout', '900', '--tp-peer-timeout', '60', '--shutdown-grace', '5'],
+        ('target', 'dsv41-1.62')),
+    # runtimes/glm-5.3/glm-5.3-flash/profile.json, profile glm53-flash-single
+    'glm53-flash-single': (
+        ['--model', '@MODEL_DIR@', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@', '--slots', '1',
+         '--max-model-len', '262144', '--spec', 'auto', '--prefix-cache', 'on', '--prefix-cache-mib', '3584',
+         '--served-model-name', 'GLM-5.3-Flash-EXL3-2.25bpw-sm121'],
+        ('target',)),
+    # runtimes/glm-5.3/glm-5.3-flash/profile.json, profile glm53-flash-tp2-1m
+    'glm53-flash-tp2-1m': (
+        ['--model', '@MODEL_DIR@', '--slots', '1', '--max-model-len', '1048576', '--kv-tokens', '1048576',
+         '--spec', 'auto', '--prefix-cache', 'on', '--prefix-cache-mib', '13440', '--served-model-name',
+         'GLM-5.3-Flash-EXL3-2.25bpw-sm121', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@', '--tp-ranks',
+         '2', '--tp-rank', '0', '--tp-peer', '@NODES@:@TP_PORT@', '--tp-connect-timeout', '300',
+         '--tp-ready-timeout', '900', '--tp-peer-timeout', '60', '--shutdown-grace', '5'],
+        ('target',)),
+    # runtimes/glm-5.3/red-snow-5.3-flash/profile.json, profile redsnow-single
+    'redsnow-single': (
+        ['--model', '@MODEL_DIR@', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@', '--slots', '1',
+         '--max-model-len', '262144', '--no-vision', '--spec', 'auto', '--prefix-cache', 'on',
+         '--prefix-cache-mib', '1024', '--served-model-name', 'RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw'],
+        ('target',)),
+    # runtimes/ling-3.1/ling-3.1-flash-1019/profile.json, profile ling31-single-32k
+    # (no model.lock.json on dev main yet; the target role is assumed)
+    'ling31-single-32k': (
+        ['--model', '@MODEL_DIR@', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@', '--max-model-len',
+         '32768', '--slots', '1', '--spec', 'mtp', '--prefix-cache', 'on', '--heartbeat-stale-secs', '1800',
+         '--request-timeout', '7200', '--served-model-name', 'Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw'],
+        ('target',)),
+    # runtimes/nemotron-3.5/nemotron-3.5-super-vl/profile.json, profile nemotron35-super-vl-single-1m
+    'nemotron35-super-vl-single-1m': (
+        ['--model', '@MODEL_DIR@', '--slots', '16', '--max-model-len', '1048576', '--spec', 'auto',
+         '--prefix-cache', 'on', '--request-timeout', '7200', '--queue-timeout', '6900',
+         '--served-model-name', 'nemotron-3.5-super-vl', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@'],
+        ('target',)),
+    # runtimes/qwen3.8/qwen3.8-27b/profile.json, profile qwen38-single-262k
+    'qwen38-single-262k': (
+        ['--model', '@MODEL_DIR@', '--draft', '@DRAFT_DIR@', '--host', '@HTTP_HOST@', '--port',
+         '@HTTP_PORT@', '--slots', '6', '--max-model-len', '262144', '--spec', 'auto', '--prefix-cache',
+         'on', '--prefix-cache-mib', '40960', '--default-reasoning-effort', 'low', '--served-model-name',
+         'qwen38-27b-exl3'],
+        ('target', 'draft')),
+    # runtimes/qwen3.8/qwen3.8-flash-next/profile.json, profile qwen38-flash-next-single-262k
+    'qwen38-flash-next-single-262k': (
+        ['--model', '@MODEL_DIR@', '--max-model-len', '262144', '--spec', 'mtp', '--prefix-cache', 'on',
+         '--prefix-cache-mib', '22528', '--no-vision', '--served-model-name', 'default', '--slots', '2',
+         '--queue-timeout', '1500', '--host', '@HTTP_HOST@', '--port', '@HTTP_PORT@'],
+        ('target',)),
+}
+
+
+def sealed_profile(argv):
+    """A sealed profile doc with one choice whose only open capability question is speculation."""
+    caps = {key: key not in ('audio', 'video', 'json_schema') for key in (
+        'text', 'sse', 'reasoning', 'tools', 'images', 'video', 'audio', 'json_schema', 'prefix_cache')}
+    return {'schema': 'rexl3.runtime-profile.v1', 'state': 'final',
+            'profiles': {'choice': {'kind': 'single', 'argv': list(argv), 'capabilities': caps}}}
+
+
+def lock(*roles):
+    return {'schema': 'rexl3.model-lock.v1', 'packs': {role: {'repo': 'synthetic/' + role} for role in roles}}
+
+
+class SpeculationRuleTest(unittest.TestCase):
+    """The capability contract reads speculative decoding the way the engine parses argv."""
+
+    def spec_problems(self, argv, roles=('target',)):
+        problems = c.capability_problems(sealed_profile(argv), None, models=lock(*roles))
+        return [problem for problem in problems if 'speculative decoding' in problem]
+
+    def test_every_dev_main_profile_counts_as_speculative(self):
+        for name, (argv, roles) in DEV_MAIN_PROFILES.items():
+            with self.subTest(profile=name):
+                self.assertEqual(c.capability_problems(sealed_profile(argv), None, models=lock(*roles)), [])
+
+    def test_spec_auto_and_mtp_count_without_a_draft_pack(self):
+        for mode in ('auto', 'mtp'):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.spec_problems(['--max-model-len', '262144', '--spec', mode]), [])
+
+    def test_argv_that_does_not_draft_with_a_model_fails(self):
+        cases = {
+            'no flag and no draft pack': [],
+            'spec none': ['--spec', 'none'],
+            'spec copy': ['--spec', 'copy'],
+            'no-drafts': ['--spec', 'auto', '--no-drafts'],
+            'no-drafts first': ['--no-drafts', '--spec', 'mtp'],
+            'last spec wins': ['--spec', 'mtp', '--spec', 'none'],
+            'draft with copy': ['--draft', '@DRAFT_DIR@', '--spec', 'copy'],
+            'draft with none': ['--draft', '@DRAFT_DIR@', '--spec', 'none'],
+            'draft with no-drafts': ['--draft', '@DRAFT_DIR@', '--no-drafts'],
+            'spec without a value': ['--max-model-len', '262144', '--spec'],
+            'spec followed by a flag': ['--spec', '--prefix-cache', 'on'],
+            'draft without a value': ['--draft'],
+            'unknown spec value': ['--spec', 'off'],
+            'spec value is case-sensitive': ['--spec', 'AUTO'],
+            'no equals form in the engine': ['--spec=auto'],
+            'not a list': '--spec auto',
+        }
+        for name, argv in cases.items():
+            with self.subTest(case=name):
+                problems = c.capability_problems(
+                    {'schema': 'rexl3.runtime-profile.v1', 'state': 'final', 'profiles': {'choice': dict(
+                        sealed_profile([])['profiles']['choice'], argv=argv)}}, None, models=lock('target'))
+                self.assertEqual(problems, ['profile choice: speculative decoding is not on and proven'])
+
+    def test_the_last_spec_value_wins(self):
+        self.assertEqual(self.spec_problems(['--spec', 'none', '--spec', 'auto']), [])
+
+    def test_an_alternate_target_pack_is_not_a_draft(self):
+        argv, roles = DEV_MAIN_PROFILES['dsv41-tp2-1m']
+        self.assertEqual(roles, ('target', 'dsv41-1.62'))
+        at = argv.index('--spec')
+        without_spec = argv[:at] + argv[at + 2:]
+        serial = argv[:at + 1] + ['none'] + argv[at + 2:]
+        for name, mutated in (('no --spec', without_spec), ('--spec none', serial)):
+            with self.subTest(argv=name):
+                self.assertEqual(self.spec_problems(mutated, roles),
+                                 ['profile choice: speculative decoding is not on and proven'])
+
+    def test_a_draft_role_in_the_lock_still_counts_unless_drafting_is_off(self):
+        self.assertEqual(self.spec_problems(['--max-model-len', '262144'], ('target', 'draft')), [])
+        self.assertEqual(self.spec_problems(['--max-model-len', '262144', '--no-drafts'], ('target', 'draft')),
+                         ['profile choice: speculative decoding is not on and proven'])
+        self.assertEqual(self.spec_problems(['--spec', 'copy'], ('target', 'draft')),
+                         ['profile choice: speculative decoding is not on and proven'])
+
+    def test_every_choice_is_checked_on_its_own(self):
+        profile = sealed_profile(DEV_MAIN_PROFILES['glm53-flash-single'][0])
+        profile['profiles']['second'] = dict(profile['profiles']['choice'], argv=['--spec', 'none'])
+        self.assertEqual(c.capability_problems(profile, None, models=lock('target')),
+                         ['profile second: speculative decoding is not on and proven'])
+
+
 def git(repo, *args):
     return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=test', '-c',
                            'user.email=test@example.invalid', *map(str, args)],
@@ -105,6 +254,7 @@ class CheckModelBranchTest(unittest.TestCase):
             'tree': ([], 'tree'),
             'source commit': (['--rc-commit', '0' * 40], 'source commit'),
             'capability contract': ([], 'capability contract'),
+            'capability contract (speculation)': ([], 'capability contract'),
             'docs and fragment': ([], 'docs and fragment'),
         }
         for name, (extra, check_name) in cases.items():
@@ -123,6 +273,10 @@ class CheckModelBranchTest(unittest.TestCase):
                 elif name == 'capability contract':
                     profile = e.load_json(fx.tree / 'profile.json')
                     profile['profiles']['single']['capabilities']['prefix_cache'] = False
+                    write(fx.tree, 'profile.json', encoded(profile))
+                elif name == 'capability contract (speculation)':
+                    profile = e.load_json(fx.tree / 'profile.json')
+                    profile['profiles']['single']['argv'].append('--no-drafts')
                     write(fx.tree, 'profile.json', encoded(profile))
                 elif name == 'docs and fragment':
                     (fx.repo / f'changes/unreleased/{MODEL}.md').unlink()

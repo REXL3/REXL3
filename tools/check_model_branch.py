@@ -259,6 +259,45 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     return results
 
 
+# The engine's `--spec` values (dev crates/spec/src/mode.rs). `auto` lets the arbiter use every drafter
+# the family offers (its MTP head or its draft pack) and `mtp` drafts with the MTP head; those are the
+# speculative decoding the capability contract requires. `copy` (prompt lookup, no model compute) and
+# `none` (serial) are not.
+SPEC_MODES = ('auto', 'mtp', 'copy', 'none')
+SPECULATIVE_MODES = ('auto', 'mtp')
+
+
+def speculation_on(argv, *, draft_pack=False):
+    """Does a sealed profile argv run speculative decoding, read the way the engine parses it?
+
+    The engine takes `--spec VALUE` (the last occurrence wins; the default is `auto`), `--draft DIR`, and
+    `--no-drafts` (no drafting whatever the mode). The contract needs speculation declared in the sealed
+    profile, not left to the engine default: `--spec auto|mtp`, `--draft DIR`, or a `draft` role in the
+    model lock (``draft_pack``). The effective mode must then be one of SPECULATIVE_MODES with drafting
+    on. A `--spec` or `--draft` without a value, or an unknown `--spec` value, fails closed.
+    """
+    if not isinstance(argv, list) or not all(isinstance(token, str) for token in argv):
+        return False
+    mode, declared, drafting = 'auto', bool(draft_pack), True
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ('--spec', '--draft'):
+            if index + 1 >= len(argv) or argv[index + 1].startswith('--') or not argv[index + 1]:
+                return False
+            if token == '--spec':
+                if argv[index + 1] not in SPEC_MODES:
+                    return False
+                mode = argv[index + 1]
+            declared = True
+            index += 2
+            continue
+        if token == '--no-drafts':
+            drafting = False
+        index += 1
+    return declared and drafting and mode in SPECULATIVE_MODES
+
+
 def capability_problems(profile, model_doc, models=None):
     problems = []
     e.require(isinstance(profile, dict) and profile.get('schema') == 'rexl3.runtime-profile.v1'
@@ -270,10 +309,9 @@ def capability_problems(profile, model_doc, models=None):
     if isinstance(models, dict):
         packs = models.get('packs')
         if isinstance(packs, dict):
+            # Only the `draft` role is a drafter. One runtime entry may pin a pack per profile (dev #159),
+            # so another non-target role is an alternate target pack, not a draft.
             draft_pack = bool(packs.get('draft'))
-            non_target = [k for k in packs if k != 'target']
-            if non_target:
-                draft_pack = True
     vision_on = False
     for name, choice in profiles.items():
         if not isinstance(choice, dict):
@@ -285,8 +323,7 @@ def capability_problems(profile, model_doc, models=None):
             continue
         if caps.get('prefix_cache') is not True:
             problems.append(f'profile {name}: prefix cache is not on and proven')
-        argv = choice.get('argv')
-        if not (isinstance(argv, list) and '--draft' in argv) and not draft_pack:
+        if not speculation_on(choice.get('argv'), draft_pack=draft_pack):
             problems.append(f'profile {name}: speculative decoding is not on and proven')
         if caps.get('images') is True:
             vision_on = True

@@ -30,7 +30,8 @@ Engine development, model validation and sealing happen in the development repos
 | DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940; `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off on both profiles |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
-| Ling-3.1-Flash-1019 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k`: 32,768 tokens, one node, port 8889 (the same port as Qwen3.8-27B) | off |
+
+Ling-3.1-Flash-1019 is not in v0.1.0; it is planned for a later release.
 
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
 two-node profile is one recipe with one runtime id. The release page and each recipe's sealed

@@ -66,7 +66,6 @@ two-node profile is one folder, one runtime id and one sealed version:
 | 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` (one node, 262K), `dsv41-tp2-1m` (two nodes, 1M), both on the 1.55 bpw pack | `deepseek_v41` |
 | 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
 | 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
-| 6 | Ling-3.1-Flash-1019 | `runtimes/ling-3.1/ling-3.1-flash-1019/` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k` (one node, 32K) | `bailing_moe_v3` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
 

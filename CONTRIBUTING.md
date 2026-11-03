@@ -272,8 +272,9 @@ python3 tools/promote_runtime.py \
 
 **`tools/assemble_release_notes.py`** — assembles `releases/v<X.Y.Z>/NOTES.md` from
 `changes/unreleased/` fragments and prepends the `CHANGELOG.md` entry (`docs/RELEASING.md`).
-`--version` is required; `--repo-root` defaults to `.`. Unknown fragment headings, empty fragments and
-duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
+`--version` is required; `--repo-root` defaults to `.`. `changes/unreleased/README.md` is not a fragment
+and is skipped. A file there not named `<slug>.md` (lowercase kebab-case), unknown fragment headings,
+empty fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
 
 ```bash
 python3 tools/assemble_release_notes.py --repo-root PATH --version vX.Y.Z

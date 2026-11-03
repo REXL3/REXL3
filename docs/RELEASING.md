@@ -47,8 +47,10 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
   checksums; Provenance. A fragment uses only the headings it needs (Highlights; New features and
   improvements; Bug fixes; Breaking changes and upgrade notes; Known issues); the Supported models,
   Assets and Provenance sections are generated from `releases/v<X.Y.Z>/manifest.json`. The tool writes
-  `releases/v<X.Y.Z>/NOTES.md` and prepends the `CHANGELOG.md` entry; unknown headings, empty
-  fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2).
+  `releases/v<X.Y.Z>/NOTES.md` and prepends the `CHANGELOG.md` entry. `changes/unreleased/README.md`
+  holds the fragment rules and is skipped; any other file not named `<slug>.md` (lowercase kebab-case),
+  unknown headings, empty fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr,
+  exit 2).
 
 ## The cut_release ceremony (maintainers only)
 

@@ -82,6 +82,34 @@ class NotesTest(unittest.TestCase):
         write(self.root, 'changes/unreleased/slug-2.md', b'## Highlights\n- two.\n')
         n.assemble(str(self.root), VERSION)
 
+    def test_the_rules_readme_is_not_a_fragment(self):
+        # changes/unreleased/README.md documents the fragment rules with headings of its own; it used to be read
+        # as a fragment and refused every assembly with "unknown heading".
+        rules = Path(n.__file__).resolve().parent.parent / 'changes/unreleased/README.md'
+        self.assertTrue(rules.is_file())
+        write(self.root, 'changes/unreleased/README.md', rules.read_bytes())
+        write(self.root, 'changes/unreleased/qwen3.8-27b.md', b'## Known issues\n- A dotted slug is a fragment.\n')
+        self.assertEqual(n.assemble(str(self.root), VERSION), 0)
+        notes = (self.root / f'releases/{VERSION}/NOTES.md').read_text()
+        self.assertIn('First release.', notes)
+        self.assertNotIn('When a fragment is required', notes)
+        self.assertIn('- A dotted slug is a fragment.', n.parse_fragments(self.fragments)['KNOWN_ISSUES'])
+
+    def test_a_file_not_named_as_a_slug_is_refused(self):
+        for name in ('Fix_Thing.md', 'Readme.md', 'bad--slug.md'):
+            with self.subTest(name=name):
+                path = self.fragments / name
+                path.write_bytes(b'## Bug fixes\n- a fix.\n')
+                with self.assertRaisesRegex(ValueError, 'not a lowercase kebab-case'):
+                    n.assemble(str(self.root), VERSION)
+                path.unlink()
+
+    def test_only_the_rules_readme_is_no_fragments(self):
+        (self.fragments / 'slug.md').unlink()
+        write(self.root, 'changes/unreleased/README.md', b'# Release-notes fragments\n\n## Rules\n\n- rules.\n')
+        with self.assertRaisesRegex(ValueError, 'no fragments'):
+            n.assemble(str(self.root), VERSION)
+
     def test_manifest_schema_is_enforced(self):
         bad = manifest()
         bad['engine']['dev_commit'] = 'short'

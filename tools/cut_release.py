@@ -194,8 +194,71 @@ def model_assets(manifest):
     return names
 
 
+def dev_tag_commit(api, tag):
+    """The commit a dev tag resolves to: a lightweight tag, or a chain of at most five annotated tags."""
+    data = api.get(f'/repos/{DEV_REPO}/git/ref/tags/{urllib.parse.quote(tag, safe="")}')
+    for _ in range(5):
+        target = data.get('object') if isinstance(data, dict) else None
+        e.require(isinstance(target, dict), 'dev tag missing: ' + tag)
+        e.full_hash(target.get('sha'), e.HEX40)
+        if target.get('type') == 'commit':
+            return target['sha']
+        e.require(target.get('type') == 'tag', 'dev tag does not resolve to a commit: ' + tag)
+        data = api.get(f'/repos/{DEV_REPO}/git/tags/{target["sha"]}')
+    raise ValueError('annotated tag chain limit: ' + tag)
+
+
+def stable_engine_release(release):
+    return (release.get('id'), release.get('tag_name'), release.get('draft'), release.get('prerelease'),
+            [(a.get('id'), a.get('name'), a.get('size'), a.get('digest')) for a in release.get('assets', [])])
+
+
+def stage_engine_binaries(api, approval, dest, engine_tag):
+    """Download the native executables an approval leaves to the dev engine release into ``dest``.
+
+    The same checks as promote_runtime.fetch_engine, over this tool's REST client: the release is the one
+    the manifest names and is published, each asset exists under its exact name with the approved size,
+    GitHub digest and bytes, the tag resolves to the approval's source commit, and the release does not
+    change while it is read. Returns None for an approval whose bundle carries its own executables.
+    """
+    engine = approval.get('engine_binaries')
+    if engine is None:
+        return None
+    records = e.validate_engine_binaries(engine)
+    tag = next(iter(records.values()))['release_tag']
+    e.require(tag == engine_tag, f'approval takes its engine from {tag}, the manifest names {engine_tag}')
+    path = f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(tag, safe="")}'
+    release = api.get(path)
+    e.require(isinstance(release, dict) and release.get('tag_name') == tag, 'dev engine release missing: ' + tag)
+    e.require(release.get('draft') is False and release.get('prerelease') is False, 'dev engine release is not published: ' + tag)
+    remote = {asset.get('name'): asset for asset in release.get('assets', [])}
+    dest.mkdir()
+    for item in records.values():
+        asset = remote.get(item['asset'])
+        e.require(isinstance(asset, dict) and type(asset.get('id')) is int and asset.get('size') == item['bytes'],
+                  'engine release asset missing or size differs: ' + item['asset'])
+        e.require(asset.get('digest') in (None, 'sha256:' + item['sha256']), 'engine release asset digest differs: ' + item['asset'])
+        data = api.download(f'/repos/{DEV_REPO}/releases/assets/{asset["id"]}')
+        e.require(isinstance(data, bytes) and len(data) == item['bytes'] and hashlib_hex(data) == item['sha256'],
+                  'engine asset bytes differ from the approval: ' + item['asset'])
+        target = dest / item['asset']
+        with target.open('xb') as stream:
+            stream.write(data)
+        target.chmod(0o755)
+    e.require(dev_tag_commit(api, tag) == approval['source_commit'], 'engine release tag does not name the approved engine commit')
+    after = api.get(path)
+    e.require(isinstance(after, dict) and stable_engine_release(after) == stable_engine_release(release),
+              'dev engine release changed while downloading: ' + tag)
+    return dest
+
+
 def download_dev_assets(api, manifest, repo_root):
     """Download the dev release for every model and verify it against the prod registry (local files).
+
+    Each model is staged in its own directory, as fetch_dev_assets gives each tree its own asset
+    directory: receipts of different runtimes share member paths with different bytes. An approval
+    whose bundle leaves the native executables to the dev engine release is verified with those
+    executables, downloaded into the stage's ``engine/`` directory.
 
     Returns a flat directory with the release asset files named exactly as they will be uploaded.
     """
@@ -203,6 +266,7 @@ def download_dev_assets(api, manifest, repo_root):
     registry = e.load_json(root / 'runtimes/templates/APPROVALS.json')
     approved = e.load_json(root / 'runtimes/templates/APPROVED.json')['templates']
     work = Path(tempfile.mkdtemp(prefix='.cut-release-'))
+    engine_tag = manifest['engine']['engine_release_tag']
     for item in manifest['models']:
         tag = f"approve-{item['runtime_id']}-{int(item['version'][1:])}"
         key = m.registry_key(item['family'], item['model'], int(item['version'][1:]))
@@ -212,8 +276,8 @@ def download_dev_assets(api, manifest, repo_root):
         release = api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(tag, safe="")}')
         if release is None:
             raise ValueError('dev release missing: ' + tag)
-        dest = work / '.stage'
-        dest.mkdir(parents=True, exist_ok=True)
+        dest = work / '.stage' / item['family'] / item['model'] / item['version']
+        dest.mkdir(parents=True)
         for asset in release.get('assets', []):
             name = asset.get('name')
             if not name or '/' in name:
@@ -232,9 +296,11 @@ def download_dev_assets(api, manifest, repo_root):
         doc = e.load_json(approval)
         # The bound evidence (receipts, observations, raw files) travels inside evidence.tar.gz.
         evidence = doc['evidence_asset']
+        e.require(not any(name == 'engine' or name.startswith('engine/') for name in evidence['members']),
+                  'evidence collides with the engine directory')
         e.extract_files(dest / evidence['archive'], dest, evidence['members'])
-        e.verify_assets(approval, registry=registry, approved_templates=approved,
-                         engine_dir=dest / 'engine' if (dest / 'engine').is_dir() else None, key=key)
+        engine_dir = stage_engine_binaries(api, doc, dest / 'engine', engine_tag)
+        e.verify_assets(approval, registry=registry, approved_templates=approved, engine_dir=engine_dir, key=key)
         prefix = asset_prefix(item)
         (work / (prefix + '-approval.json')).write_bytes(approval.read_bytes())
         for kind, field in (('bundle', 'bundle'), ('source', 'source_asset'), ('engine-source', 'engine_source_asset'),

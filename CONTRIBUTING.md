@@ -63,10 +63,8 @@ two-node profile is one folder, one runtime id and one sealed version:
 |---|---|---|---|---|---|
 | 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` (one node, 262K) | `qwen` (qwen3_5) |
 | 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (one node, 262K) | `qwen_flash_next` (qwen4_exp) |
-| 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` (one node, 262K), `dsv41-tp2-1m` (two nodes, 1M), both on the 1.55 bpw pack | `deepseek_v41` |
-| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
-| 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
-| 6 | Ling-3.1-Flash-1019 | `runtimes/ling-3.1/ling-3.1-flash-1019/` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k` (one node, 32K) | `bailing_moe_v3` |
+| 3 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
+| 4 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
 

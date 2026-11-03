@@ -51,8 +51,8 @@ There is **one versioned product release** — the engine and its recipes ship t
 per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0 is the
-  five-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash,
-  Nemotron-3.5-Super-VL). Each model enters prod through its own `model/<model>` PR, validated
+  four-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL);
+  v0.1.1 is planned to carry DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019. Each model enters prod through its own `model/<model>` PR, validated
   (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
   only after every in-scope model PR has been validated and merged. No model gets its own release or
   release candidate; a later release may add a single newly validated model as a new version only

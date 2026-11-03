@@ -251,7 +251,8 @@ python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOK
 
 **`tools/promote_runtime.py`** — creates the sealed tree and the `model/<model>` PR
 (`docs/PROMOTION.md`). `--version` is an integer `<N>`; `--target-commit` is the exact production base
-commit; `--assets-dir` is a durable, verified dev-asset cache; `--approved`,
+commit; `--assets-dir` is the root of a durable, verified dev-asset cache, one model version per
+`<family>/<model>/v<N>/` (the directory `--download` fills and the promotion reads); `--approved`,
 `--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and pin;
 `--download` validates and caches the dev release assets; `--dry-run` verifies and prints without
 writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,

@@ -69,7 +69,8 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0 is the
   five-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (`tp1`),
-  GLM-5.3-Flash and Nemotron-3.5-Super-VL); v0.1.1 is planned to carry Ling-3.1-Flash-1019.
+  GLM-5.3-Flash and Nemotron-3.5-Super-VL); v0.1.1 is planned to carry Ling-3.1-Flash-1019 and
+  DeepSeek's `dsv41-tp2-1m` two-node profile.
   Each model enters prod through its own `model/<model>` PR, validated
   (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
   only after every in-scope model PR has been validated and merged. No model gets its own release or

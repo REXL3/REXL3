@@ -326,22 +326,23 @@ class CorrespondingSourceSealTest(unittest.TestCase):
             subprocess.run(['git', '-C', str(prod), *args], check=True, capture_output=True)
         base = e.git(prod, 'rev-parse', 'HEAD').decode().strip()
         e.git(prod, 'update-ref', 'refs/remotes/origin/main', base)
-        with patch.object(p, 'gh', side_effect=AssertionError('no publication/network')):
-            self.assertEqual(p.prepare_promotion(family, model, 1,
-                approve_tag='approve-synthetic-demo-1',
-                target_commit=base, prod_checkout=prod, assets_dir=str(durable),
-                registry=registry, approved_templates=self.f.approved, meta=None, dry_run=True), 0)
-        tree = prod / 'runtimes' / family / model / 'v1'
-        p.extract_tree(durable / doc['bundle']['archive'], tree, doc, approval_path=path)
-        write(tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(family, model)))
-        write(tree.parent, 'LATEST', b'v1\n')
-        from tools.test_release_evidence import encoded
+        # The consumer's verified asset cache: one model version per <family>/<model>/v<N>/ (as --download writes it).
         assets_model = self.root / 'assets-model'
         dest_m = assets_model / family / model / 'v1'
         dest_m.mkdir(parents=True)
         for name in ['approval.json'] + [a['archive'] for a in e.approval_assets(doc)]:
             shutil.copyfile(durable / name, dest_m / name)
         e.extract_files(dest_m / doc['evidence_asset']['archive'], dest_m, doc['evidence_asset']['members'])
+        with patch.object(p, 'gh', side_effect=AssertionError('no publication/network')):
+            self.assertEqual(p.prepare_promotion(family, model, 1,
+                approve_tag='approve-synthetic-demo-1',
+                target_commit=base, prod_checkout=prod, assets_dir=str(assets_model),
+                registry=registry, approved_templates=self.f.approved, meta=None, dry_run=True), 0)
+        tree = prod / 'runtimes' / family / model / 'v1'
+        p.extract_tree(durable / doc['bundle']['archive'], tree, doc, approval_path=path)
+        write(tree.parent, 'MODEL.json', e.json_bytes(self.f.model_doc(family, model)))
+        write(tree.parent, 'LATEST', b'v1\n')
+        from tools.test_release_evidence import encoded
         self.assertEqual(v.verify_tree(tree, self.f.approved, trusted_approvals=registry,
                                       assets_dir=str(assets_model), family=family, model=model), [])
         self.assertEqual({asset['archive'] for asset in p.approval_assets(doc)},

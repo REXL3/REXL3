@@ -37,8 +37,9 @@ released:
 
 - a **final runtime entry** (the release-candidate runtime, not a work-in-progress one);
 - the **capability contract proven**: speculative decoding on with counters above 0; prefix cache on
-  and proven at the real contract (the real context and slots); vision on and tested, or off only with
-  a proven does-not-fit recorded in the tree;
+  and proven at the real contract (the real context and slots); vision on and tested, or off only
+  under an unexpired owner vision exception sealed in each vision-off profile's qualification receipt
+  (accepted in place of a proven does-not-fit);
 - **exactness** passed;
 - **long context** passed;
 - **GB10 receipts on the RC commit**: doctor, smoke and a gate subset run on a GB10 host, attached to
@@ -84,7 +85,8 @@ python3 tools/promote_runtime.py \
 ```
 
 `--download` validates release and asset ids, sizes, the tag commit, every byte and all evidence and
-caches the verified files. The tool then writes `MODEL.json` (or validates an existing one against the
+caches the verified files in `<assets-dir>/<family>/<model>/v<N>/` (with the engine release's executables in
+its `engine/`), the directory the promotion then reads. The tool then writes `MODEL.json` (or validates an existing one against the
 derived metadata; a mismatch is a hard refusal, never an overwrite), extracts the tree, writes
 `LATEST`, verifies against the base registry, commits branch `model/<model>` and opens a PR titled
 `FEAT: Promoted <model> v<N>`. `--dry-run` verifies and prints without writing.
@@ -113,7 +115,9 @@ any fail, 2 usage error. The check names are `branch/model`, `scope`, `MODEL.jso
 5. The tree passes `tools/verify_runtime_tree.py` against the registry on the base.
 6. If `--rc-commit` is given, the sealed approval's source commit equals it.
 7. Capability contract from the sealed profile: speculative decoding on, prefix cache on, vision on
-   unless `MODEL.json` records a `vision_does_not_fit` justification in `pack`.
+   unless `MODEL.json` records a `vision_does_not_fit` justification in `pack` or every profile's
+   sealed qualification receipt carries an unexpired owner vision exception (step 5 already refuses a
+   vision-off receipt without a valid one).
 8. `docs/packs/<model>.md` and `changes/unreleased/<model>.md` exist and are non-empty.
 
 `--local` additionally downloads and digest-checks the dev assets via `tools/fetch_dev_assets.py`.

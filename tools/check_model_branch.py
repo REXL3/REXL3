@@ -167,6 +167,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     tree_path = None
     model_doc = None
     approval_doc = None
+    asset_root = None
     if model is not None:
         # MODEL.json check (validity vs its folder)
         try:
@@ -210,6 +211,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             if assets_dir is None:
                 raise CheckError('no authenticated dev assets (run --local or provide --assets-dir)')
             tree_dir_path = Path(tree_dir) / 'runtimes' / family / model / f'v{version}'
+            asset_root = Path(assets_dir) / family / model / f'v{version}'
             problems = verify_tree(tree_dir_path, approved_raw, trusted_approvals=registry_raw,
                                    assets_dir=assets_dir, family=family, model=model)
             approval_path = tree_dir_path / 'approval.json'
@@ -237,6 +239,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             profile = e.loads(profile_bytes)
             models = e.loads(head_bytes(tree_path + '/model.lock.json'))
             problems = capability_problems(profile, model_doc, models=models)
+            problems = resolve_vision_off(problems, profile, sealed_vision_exceptions(approval_doc, asset_root))
             report('capability contract', not problems, '' if not problems else '; '.join(problems))
         except (CheckError, ValueError) as error:
             report('capability contract', False, str(error))
@@ -259,6 +262,45 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     return results
 
 
+# The engine's `--spec` values (dev crates/spec/src/mode.rs). `auto` lets the arbiter use every drafter
+# the family offers (its MTP head or its draft pack) and `mtp` drafts with the MTP head; those are the
+# speculative decoding the capability contract requires. `copy` (prompt lookup, no model compute) and
+# `none` (serial) are not.
+SPEC_MODES = ('auto', 'mtp', 'copy', 'none')
+SPECULATIVE_MODES = ('auto', 'mtp')
+
+
+def speculation_on(argv, *, draft_pack=False):
+    """Does a sealed profile argv run speculative decoding, read the way the engine parses it?
+
+    The engine takes `--spec VALUE` (the last occurrence wins; the default is `auto`), `--draft DIR`, and
+    `--no-drafts` (no drafting whatever the mode). The contract needs speculation declared in the sealed
+    profile, not left to the engine default: `--spec auto|mtp`, `--draft DIR`, or a `draft` role in the
+    model lock (``draft_pack``). The effective mode must then be one of SPECULATIVE_MODES with drafting
+    on. A `--spec` or `--draft` without a value, or an unknown `--spec` value, fails closed.
+    """
+    if not isinstance(argv, list) or not all(isinstance(token, str) for token in argv):
+        return False
+    mode, declared, drafting = 'auto', bool(draft_pack), True
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ('--spec', '--draft'):
+            if index + 1 >= len(argv) or argv[index + 1].startswith('--') or not argv[index + 1]:
+                return False
+            if token == '--spec':
+                if argv[index + 1] not in SPEC_MODES:
+                    return False
+                mode = argv[index + 1]
+            declared = True
+            index += 2
+            continue
+        if token == '--no-drafts':
+            drafting = False
+        index += 1
+    return declared and drafting and mode in SPECULATIVE_MODES
+
+
 def capability_problems(profile, model_doc, models=None):
     problems = []
     e.require(isinstance(profile, dict) and profile.get('schema') == 'rexl3.runtime-profile.v1'
@@ -270,10 +312,9 @@ def capability_problems(profile, model_doc, models=None):
     if isinstance(models, dict):
         packs = models.get('packs')
         if isinstance(packs, dict):
+            # Only the `draft` role is a drafter. One runtime entry may pin a pack per profile (dev #159),
+            # so another non-target role is an alternate target pack, not a draft.
             draft_pack = bool(packs.get('draft'))
-            non_target = [k for k in packs if k != 'target']
-            if non_target:
-                draft_pack = True
     vision_on = False
     for name, choice in profiles.items():
         if not isinstance(choice, dict):
@@ -285,8 +326,7 @@ def capability_problems(profile, model_doc, models=None):
             continue
         if caps.get('prefix_cache') is not True:
             problems.append(f'profile {name}: prefix cache is not on and proven')
-        argv = choice.get('argv')
-        if not (isinstance(argv, list) and '--draft' in argv) and not draft_pack:
+        if not speculation_on(choice.get('argv'), draft_pack=draft_pack):
             problems.append(f'profile {name}: speculative decoding is not on and proven')
         if caps.get('images') is True:
             vision_on = True
@@ -295,6 +335,53 @@ def capability_problems(profile, model_doc, models=None):
         if not isinstance(justification, str) or not justification.strip():
             problems.append('vision is off and MODEL.json records no does-not-fit justification')
     return problems
+
+
+def sealed_vision_exceptions(approval_doc, asset_root):
+    """{profile: the owner vision-exception record its sealed qualification receipt carries, or None}.
+
+    Read from the authenticated dev assets the tree check verified; each receipt's bytes must equal the
+    digest the sealed approval names, or that profile proves no exception. No approval or assets: {}.
+    """
+    if not isinstance(approval_doc, dict) or asset_root is None or not isinstance(approval_doc.get('profiles'), dict):
+        return {}
+    found = {}
+    for name, selected in approval_doc['profiles'].items():
+        try:
+            ref = selected['receipt']
+            path = e.safe_file(asset_root, ref['path'])
+            e.require(e.sha256_file(path) == e.full_hash(ref['sha256']), 'receipt bytes drift')
+            found[name] = e.load_json(path).get('vision_exception')
+        except (KeyError, TypeError, ValueError, OSError):
+            found[name] = None
+    return found
+
+
+# The capability_problems finding for a model with vision off on every profile and no does-not-fit
+# justification. An unexpired owner vision exception sealed in every profile's receipt resolves it.
+VISION_OFF_PROBLEM = 'vision is off and MODEL.json records no does-not-fit justification'
+
+
+def resolve_vision_off(problems, profile, vision_exceptions):
+    """Accept an owner vision exception in place of a does-not-fit justification.
+
+    ``vision_exceptions`` maps profile -> record (sealed_vision_exceptions). The VISION_OFF_PROBLEM
+    finding is dropped when every profile's record passes release_evidence.validate_vision_exception;
+    otherwise it stays, naming each profile whose record is missing, expired or malformed.
+    """
+    if VISION_OFF_PROBLEM not in problems:
+        return problems
+    refused = []
+    for name in profile['profiles']:
+        try:
+            e.validate_vision_exception((vision_exceptions or {}).get(name))
+        except ValueError as error:
+            refused.append(f'{name}: {error}')
+    rest = [problem for problem in problems if problem != VISION_OFF_PROBLEM]
+    if refused:
+        rest.append(VISION_OFF_PROBLEM + ' and no valid owner vision exception is sealed ('
+                    + '; '.join(refused) + ')')
+    return rest
 
 
 def _write_temp(data):

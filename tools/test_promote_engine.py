@@ -151,6 +151,75 @@ class PromoteEngineTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.download_release('approve-synthetic-demo-1', dest, registry=registry, approved_templates=self.f.approved)
 
+    def test_a_route_b_download_then_promotion_read_the_cached_release_and_engine(self):
+        # v0.1.0 runtimes leave their executables to the engine release: --download caches the approval release and
+        # the engine binaries under <cache>/<family>/<model>/v<N>/{,engine/}, and the promotion must verify from there.
+        family, model = 'qwen3.8', 'qwen3.8-27b'
+        _, release_meta, names = self.publish_assets()
+        approval = self.f.assets / 'approval.json'
+        registry = {'schema': 'rexl3.approval-registry.v1', 'legacy': {}, 'approvals': {f'{family}/{model}/v1': {
+            'approval_sha256': sha(approval.read_bytes()), 'runtime_id': self.approval['runtime_id'],
+            'source_commit': self.f.commit, 'source_tree': self.f.tree}}}
+        policy = Path(self.tmp.name) / 'policy'
+        approved_path = write(policy, 'APPROVED.json', e.json_bytes({'templates': self.f.approved}))
+        registry_path = write(policy, 'APPROVALS.json', e.json_bytes(registry))
+        root = Path(self.tmp.name) / 'production'
+        root.mkdir()
+        for args in [('init', '-q'), ('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
+                     'commit', '--allow-empty', '-qm', 'synthetic production base')]:
+            subprocess.run(['git', '-C', str(root), *args], capture_output=True, check=True)
+        commit = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(['git', '-C', str(root), 'update-ref', 'refs/remotes/origin/main', commit], check=True)
+        head = lambda: subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True,
+                                      check=True).stdout.strip()
+
+        def metadata(tag, repo, **kwargs):
+            return release_meta if tag == release_meta['tag_name'] else self.meta
+
+        def gh(*args, **kwargs):
+            if args[:2] == ('release', 'download'):
+                target = Path(args[args.index('-D') + 1])
+                if '-p' in args:
+                    shutil.copy(self.remote / args[args.index('-p') + 1], target)
+                else:
+                    for name in names:
+                        shutil.copy(self.f.assets / name, target / name)
+                return subprocess.CompletedProcess([], 0, '', '')
+            if args[:2] == ('pr', 'create'):
+                return subprocess.CompletedProcess([], 0, '', '')
+            if args[:2] == ('pr', 'view'):
+                return subprocess.CompletedProcess([], 0, json.dumps({'headRefOid': head(), 'state': 'OPEN', 'url': 'u'}), '')
+            raise AssertionError('unexpected gh call: ' + repr(args))
+
+        original_git = p.git
+
+        def git(*args, **kwargs):
+            if args[0] == 'ls-remote':
+                return subprocess.CompletedProcess([], 0, head() + '\trefs/heads/model/qwen3.8-27b\n', '')
+            if args[0] == 'fetch':
+                raise ValueError('fatal: could not fetch')
+            if args[0] == 'push':
+                return subprocess.CompletedProcess([], 0, '', '')
+            return original_git(*args, **kwargs)
+
+        cache = Path(self.tmp.name) / 'cache'
+        argv = ['--family', family, '--model', model, '--version', '1', '--approve-tag', 'approve-synthetic-demo-1',
+                '--target-commit', commit, '--prod-checkout', str(root), '--assets-dir', str(cache), '--download',
+                '--approved', str(approved_path), '--trusted-approvals', str(registry_path),
+                '--trusted-approvals-sha256', sha(registry_path.read_bytes()),
+                '--display-name', 'Synthetic Demo', '--engine-family', 'synthetic', '--pack-format', 'exl3',
+                '--architecture', 'SyntheticForConditionalGeneration']
+        with patch.object(p, 'release_metadata', side_effect=metadata), patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=gh), patch.object(p, 'git', side_effect=git):
+            self.assertEqual(p.main(argv + ['--dry-run']), 0)
+            self.assertEqual(p.main(argv), 0)
+        release = cache / family / model / 'v1'
+        self.assertEqual((release / 'engine' / self.asset).read_bytes(), self.binary.read_bytes())
+        self.assertFalse((cache / 'approval.json').exists() or (cache / 'engine').exists())
+        tree = root / 'runtimes' / family / model / 'v1'
+        self.assertEqual((tree / 'approval.json').read_bytes(), approval.read_bytes())
+        self.assertFalse((tree / 'bin').exists(), 'the executables stay in the engine release')
+
 
 if __name__ == '__main__':
     unittest.main()

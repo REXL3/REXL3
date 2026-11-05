@@ -369,6 +369,11 @@ def _prepare_model_branch(root, model, target_commit):
     return branch
 
 
+def model_assets_dir(assets_dir, family, model, version):
+    """<assets_dir>/<family>/<model>/v<N>: one model version's verified dev release assets in the cache."""
+    return Path(assets_dir) / family / model / f'v{version}'
+
+
 def prepare_promotion(family, model, version, *, approve_tag, target_commit, prod_checkout, assets_dir,
                       registry, approved_templates, meta, dry_run=False):
     key = m.registry_key(family, model, version)
@@ -377,10 +382,13 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     runtime_id = entry.get('runtime_id')
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
-    approval_path = e.safe_file(assets_dir, 'approval.json')
-    precomputed = precomputed_for_assets(e.load_json(approval_path), assets_dir)
+    # `assets_dir` is the cache root. This model's verified dev assets live in <family>/<model>/v<N>/ beneath it:
+    # where --download writes them (main) and where verify_tree reads them, as in CI's fetch_dev_assets layout.
+    release_dir = model_assets_dir(assets_dir, family, model, version)
+    approval_path = e.safe_file(release_dir, 'approval.json')
+    precomputed = precomputed_for_assets(e.load_json(approval_path), release_dir)
     approval, archive = verify_approval(approval_path, approved_templates, registry,
-                                        engine_dir=Path(assets_dir) / 'engine', key=key,
+                                        engine_dir=release_dir / 'engine', key=key,
                                         precomputed=precomputed)
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) ==
               (runtime_id, version, approve_tag), 'promotion identity mismatch')
@@ -445,7 +453,8 @@ def main(argv=None):
     parser.add_argument('--version', type=int, required=True)
     parser.add_argument('--target-commit', required=True, help='exact production base commit')
     parser.add_argument('--prod-checkout', required=True, help='owned clean checkout; fetch origin/main before use')
-    parser.add_argument('--assets-dir', required=True, help='durable verified dev asset cache')
+    parser.add_argument('--assets-dir', required=True,
+                        help='durable verified dev asset cache root; a model version lives in <family>/<model>/v<N>/')
     parser.add_argument('--download', action='store_true')
     parser.add_argument('--approved', required=True, help='protected template allow-list JSON')
     parser.add_argument('--trusted-approvals', required=True)
@@ -471,16 +480,19 @@ def main(argv=None):
                 pack[key] = value
             meta = dict(display_name=args.display_name, engine_family=args.engine_family,
                         architectures=args.architecture, pack=pack)
-            m.model_json_doc(family=args.family, model=args.model, **meta)
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
         approved = e.load_json(args.approved)['templates']
+        key = m.registry_key(args.family, args.model, args.version)
+        entry = registry.get('approvals', {}).get(key)
+        e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
+        runtime_id = entry.get('runtime_id')
+        if meta is not None:
+            # Shape check before any download. MODEL.json carries the registry entry's runtime_id (prepare_promotion
+            # derives it the same way); checking without it refused every promotion that passed metadata flags.
+            m.model_json_doc(family=args.family, model=args.model, runtime_id=runtime_id, **meta)
         if args.download:
-            key = m.registry_key(args.family, args.model, args.version)
-            entry = registry.get('approvals', {}).get(key)
-            e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
-            runtime_id = entry.get('runtime_id')
             validate_request(runtime_id, args.approve_tag, args.version)
-            download_release(args.approve_tag, Path(args.assets_dir) / args.family / args.model / f'v{args.version}',
+            download_release(args.approve_tag, model_assets_dir(args.assets_dir, args.family, args.model, args.version),
                              registry=registry, approved_templates=approved, key=key)
         return prepare_promotion(args.family, args.model, args.version, approve_tag=args.approve_tag,
             target_commit=args.target_commit, prod_checkout=args.prod_checkout, assets_dir=args.assets_dir,

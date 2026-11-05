@@ -210,6 +210,87 @@ class PromotionTest(unittest.TestCase):
                                 assets_dir=self.assets, registry=self.registry,
                                 approved_templates=self.f.approved, meta=None)
 
+    # ---- the CLI: --download into the cache, then the promotion from that same cache
+
+    def cli_policy(self):
+        """Write the allow-list and the registry the CLI reads; return their paths and the registry pin."""
+        policy = Path(self.tmp.name) / 'policy'
+        approved = write(policy, 'APPROVED.json', e.json_bytes({'templates': self.f.approved}))
+        registry = write(policy, 'APPROVALS.json', e.json_bytes(self.registry))
+        return approved, registry, e.sha256_file(registry)
+
+    def cli_gh(self, root, tag):
+        def gh(*args, **kwargs):
+            if args[:2] == ('release', 'download'):
+                return self.mock_download(*args, **kwargs)
+            if args[:2] == ('pr', 'create'):
+                return result({'url': 'https://github.com/REXL3/REXL3/pull/99'})
+            if args[:2] == ('pr', 'view'):
+                head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+                return result({'headRefOid': head, 'state': 'OPEN', 'url': 'https://github.com/REXL3/REXL3/pull/99'})
+            raise AssertionError('unexpected gh call: ' + repr(args))
+        return gh
+
+    def cli_git(self, root):
+        original_git = p.git
+
+        def git(*args, **kwargs):
+            if args[0] == 'ls-remote':
+                head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+                return subprocess.CompletedProcess([], 0, head + '\trefs/heads/model/qwen3.8-27b\n', '')
+            if args[0] == 'fetch':
+                raise ValueError('fatal: could not fetch')       # a new model: no remote model branch yet
+            if args[0] == 'push':
+                return subprocess.CompletedProcess([], 0, '', '')
+            return original_git(*args, **kwargs)
+        return git
+
+    def test_download_then_promotion_from_the_same_cache_directory(self):
+        # The documented command: --download caches the dev release under <cache>/<family>/<model>/v<N>/ and the
+        # promotion reads it there. The promotion used to read approval.json, the archives and engine/ from the
+        # cache root and refused with "missing/nonregular/hardlinked file: approval.json".
+        root, commit = self.make_prod_bare()
+        cache = Path(self.tmp.name) / 'cache'
+        approved, registry, pin = self.cli_policy()
+        tag = 'approve-synthetic-demo-1'
+        argv = ['--family', FAMILY, '--model', MODEL, '--version', '1', '--approve-tag', tag,
+                '--target-commit', commit, '--prod-checkout', str(root), '--assets-dir', str(cache), '--download',
+                '--approved', str(approved), '--trusted-approvals', str(registry), '--trusted-approvals-sha256', pin,
+                '--display-name', 'Synthetic Demo', '--engine-family', 'synthetic', '--pack-format', 'exl3',
+                '--architecture', 'SyntheticForConditionalGeneration', '--pack', 'bits=4.00']
+        with patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.cli_gh(root, tag)), patch.object(p, 'git', side_effect=self.cli_git(root)):
+            self.assertEqual(p.main(argv + ['--dry-run']), 0)
+            self.assertFalse((root / 'runtimes').exists(), 'a dry run writes nothing in the checkout')
+            self.assertEqual(p.main(argv), 0)
+        release = cache / FAMILY / MODEL / 'v1'
+        self.assertEqual((release / 'approval.json').read_bytes(), self.approval.read_bytes())
+        self.assertFalse((cache / 'approval.json').exists(), 'nothing is read from or copied to the cache root')
+        tree = root / 'runtimes' / FAMILY / MODEL
+        self.assertEqual((tree / 'v1' / 'approval.json').read_bytes(), self.approval.read_bytes())
+        self.assertEqual((tree / 'LATEST').read_text(), 'v1\n')
+        self.assertEqual(e.load_json(tree / 'MODEL.json')['runtime_id'], 'synthetic-demo')
+        current = subprocess.run(['git', '-C', str(root), 'rev-parse', '--abbrev-ref', 'HEAD'],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(current, 'model/qwen3.8-27b')
+
+    def test_metadata_flags_are_checked_with_the_registry_runtime_id_before_any_download(self):
+        approved, registry, pin = self.cli_policy()
+        base = ['--family', FAMILY, '--model', MODEL, '--version', '1', '--approve-tag', 'approve-synthetic-demo-1',
+                '--target-commit', 'a' * 40, '--prod-checkout', self.tmp.name, '--assets-dir', self.assets, '--download',
+                '--approved', str(approved), '--trusted-approvals', str(registry), '--trusted-approvals-sha256', pin,
+                '--display-name', 'Synthetic Demo', '--pack-format', 'exl3', '--architecture', 'SyntheticForConditionalGeneration']
+        with patch.object(p, 'download_release') as download, patch.object(p, 'prepare_promotion', return_value=0) as prepare:
+            self.assertEqual(p.main(base + ['--engine-family', 'synthetic']), 0)
+            self.assertEqual(download.call_count, 1)
+            self.assertEqual(prepare.call_args.kwargs['meta']['engine_family'], 'synthetic')
+            download.reset_mock()
+            self.assertEqual(p.main(base + ['--engine-family', 'Not An Id']), 2)      # bad metadata: refused first
+            download.assert_not_called()
+
     # ---- download path unchanged (dev releases only)
 
     def metadata(self, tag):

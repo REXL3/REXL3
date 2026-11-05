@@ -56,15 +56,15 @@ Naming:
   `<model>` folder, for example RED-SNOW-5.3-Flash lives at
   `runtimes/glm-5.3/red-snow-5.3-flash/` rather than being a second GLM-5.3-Flash pack.
 
-First-release map (priority order):
+First-release map (priority order). Each row is one prod model; a model with a single-node and a
+two-node profile is one folder, one runtime id and one sealed version:
 
-| Priority | Model | prod folder | dev runtime id(s) | dev engine module |
-|---|---|---|---|---|
-| 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen` (qwen3_5) |
-| 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | none yet | `qwen_flash_next` (qwen4_exp) |
-| 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.62` | `deepseek_v41` |
-| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm` |
-| 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | none yet | `nemotron_h_omni` |
+| Priority | Model | prod folder | dev runtime id | dev profiles | dev engine module |
+|---|---|---|---|---|---|
+| 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` (one node, 262K) | `qwen` (qwen3_5) |
+| 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (one node, 262K) | `qwen_flash_next` (qwen4_exp) |
+| 3 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
+| 4 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
 
@@ -72,8 +72,11 @@ First-release map (priority order):
 - `architectures` (list of HF architecture class names), `engine_family` (dev module name),
 - `runtime_id` (dev runtime id used for dev release tags `approve-<runtime_id>-<n>`),
 - `pack` (object; required key `format`, e.g. "exl3"; other descriptive keys such as `bits`,
-  `draft`, `target_repo`, `draft_repo`, and `vision_does_not_fit` (a string recording a proven
-  does-not-fit justification when vision is off) are allowed).
+  `draft`, `target_repo`, `draft_repo`, and `vision_does_not_fit` (a string recording why the vision
+  tower does not fit, when vision is off) are allowed). A release with vision off also carries an
+  unexpired owner vision exception (`granted_by` am423 or vcruz305, `granted`, `expires`, `reason`)
+  in each vision-off profile's sealed qualification receipt; production accepts it in place of a
+  does-not-fit proof.
 
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
 keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The
@@ -252,7 +255,8 @@ python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOK
 
 **`tools/promote_runtime.py`** — creates the sealed tree and the `model/<model>` PR
 (`docs/PROMOTION.md`). `--version` is an integer `<N>`; `--target-commit` is the exact production base
-commit; `--assets-dir` is a durable, verified dev-asset cache; `--approved`,
+commit; `--assets-dir` is the root of a durable, verified dev-asset cache, one model version per
+`<family>/<model>/v<N>/` (the directory `--download` fills and the promotion reads); `--approved`,
 `--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and pin;
 `--download` validates and caches the dev release assets; `--dry-run` verifies and prints without
 writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,
@@ -273,8 +277,9 @@ python3 tools/promote_runtime.py \
 
 **`tools/assemble_release_notes.py`** — assembles `releases/v<X.Y.Z>/NOTES.md` from
 `changes/unreleased/` fragments and prepends the `CHANGELOG.md` entry (`docs/RELEASING.md`).
-`--version` is required; `--repo-root` defaults to `.`. Unknown fragment headings, empty fragments and
-duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
+`--version` is required; `--repo-root` defaults to `.`. `changes/unreleased/README.md` is not a fragment
+and is skipped. A file there not named `<slug>.md` (lowercase kebab-case), unknown fragment headings,
+empty fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
 
 ```bash
 python3 tools/assemble_release_notes.py --repo-root PATH --version vX.Y.Z

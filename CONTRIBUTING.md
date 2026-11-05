@@ -94,8 +94,9 @@ agree), never from folder names.
 | `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
 
 - A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0 is
-  the five-model group (section 2); it is cut only after all five model PRs are validated by the
-  non-submitting maintainer and merged. Each `model/<model>` PR holds all the commits that make that
+  the four-model group (section 2); it is cut only after all four model PRs are validated by the
+  non-submitting maintainer and merged. v0.1.1 is planned to carry DeepSeek-V4.1-Flash-1017 and
+  Ling-3.1-Flash-1019. Each `model/<model>` PR holds all the commits that make that
   model work; a later release may add a single newly validated model as a new version only after
   v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
   release candidate.

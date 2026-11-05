@@ -167,6 +167,19 @@ def check_local_main(repo_root, version, token=None):
         tree = folder / item['version']
         if not (tree / 'approval.json').is_file():
             raise ValueError(f'sealed tree missing: {folder / item["version"]}')
+        if item.get('carried_forward'):
+            # The carried approval was sealed against an earlier engine release; it must name that
+            # exact release (never a re-sealed forgery) and its commit prefix.
+            approval = e.load_json(tree / 'approval.json')
+            engine = approval.get('engine_binaries')
+            if engine is not None:
+                e.validate_engine_binaries(engine)
+                e.require({record['release_tag'] for record in engine.values()} == {item['qualified_engine_release_tag']},
+                          'carried-forward approval names another engine release than '
+                          + item['qualified_engine_release_tag'])
+                e.full_hash(approval['source_commit'], e.HEX40)
+                e.require(item['qualified_engine_release_tag'].endswith('-' + approval['source_commit'][:8]),
+                          'carried-forward qualified engine release tag does not name the approval commit')
         key = m.registry_key(item['family'], item['model'], int(item['version'][1:]))
         entry = registry.get('approvals', {}).get(key)
         if not isinstance(entry, dict) or entry.get('approval_sha256') != item['approval_sha256']:
@@ -266,8 +279,12 @@ def download_dev_assets(api, manifest, repo_root):
     registry = e.load_json(root / 'runtimes/templates/APPROVALS.json')
     approved = e.load_json(root / 'runtimes/templates/APPROVED.json')['templates']
     work = Path(tempfile.mkdtemp(prefix='.cut-release-'))
-    engine_tag = manifest['engine']['engine_release_tag']
     for item in manifest['models']:
+        engine_tag = manifest['engine']['engine_release_tag']
+        if item.get('carried_forward'):
+            # A carried-forward model was sealed against an earlier engine release; stage the binaries
+            # from that exact release so its approval verifies against the engine it was sealed with.
+            engine_tag = item['qualified_engine_release_tag']
         tag = f"approve-{item['runtime_id']}-{int(item['version'][1:])}"
         key = m.registry_key(item['family'], item['model'], int(item['version'][1:]))
         entry = registry.get('approvals', {}).get(key)

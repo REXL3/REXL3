@@ -1,5 +1,6 @@
 """cut_release.py: dry-run gates and publish/verify ceremony, fully mocked at the API boundary."""
 import json
+import re
 import shutil
 import tempfile
 import types
@@ -308,18 +309,24 @@ def publish_model(seal, first_id, **seal_changes):
     return doc, path, release, {first_id + i: (seal.assets / name).read_bytes() for i, name in enumerate(names)}
 
 
-def prod_root(root, registry, approved, models, engine_tag, artifacts):
-    """A prod checkout as cut_release reads it: registry, allow-list, one sealed tree per model, manifest, notes."""
+def prod_root(root, registry, approved, models, engine_tag, artifacts, carries=None):
+    """A prod checkout as cut_release reads it: registry, allow-list, one sealed tree per model, manifest, notes.
+
+    ``carries`` maps (family, model) to the carried-forward entry fields for that model.
+    """
     write(root, 'runtimes/templates/APPROVALS.json', encoded(registry))
     write(root, 'runtimes/templates/APPROVED.json', encoded({'schema': 'rexl3.approved-templates.v1', 'templates': approved}))
     entries = []
-    for family, model, version, path, seal in models:
+    for family, model, version, path, seal, *rest in models:
         tree = root / 'runtimes' / family / model / version
         write(tree, 'approval.json', path.read_bytes())
         write(tree.parent, 'MODEL.json', e.json_bytes(seal.model_doc(family, model)))
         write(tree.parent, 'LATEST', (version + '\n').encode())
-        entries.append({'family': family, 'model': model, 'version': version, 'runtime_id': 'synthetic-demo',
-                        'approval_sha256': sha(path.read_bytes())})
+        entry = {'family': family, 'model': model, 'version': version, 'runtime_id': 'synthetic-demo',
+                 'approval_sha256': sha(path.read_bytes())}
+        if carries and (family, model) in carries:
+            entry.update(carries[(family, model)])
+        entries.append(entry)
     doc = {'schema': 'rexl3.release-manifest.v1', 'version': VERSION,
            'engine': {'dev_commit': 'a' * 40, 'dev_tree': 'b' * 40, 'engine_release_tag': engine_tag, 'artifacts': artifacts},
            'models': entries, 'notes': 'first release'}
@@ -521,6 +528,130 @@ class SeparateStageTest(unittest.TestCase):
                      "dest = work / '.stage'\n        dest.mkdir(parents=True, exist_ok=True)")
         with self.assertRaisesRegex(ValueError, 'destination conflict'):
             bad.download_dev_assets(self.api(), self.manifest, self.root)
+
+
+class CarryForwardCutTest(unittest.TestCase):
+    """One freshly qualified model and one carried-forward model (T0) in the same release, each sealed against
+    its own engine release (decision D37): the carried approval's engine binaries must come from the qualified
+    release, never from the release's primary engine tag."""
+
+    SECOND = ('qwen3.8', 'qwen3.8-flash-next')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        # cut_release's work directories (mkdtemp) land in this test's directory and go with it
+        stage_root = patch.object(tempfile, 'tempdir', self.tmp.name)
+        stage_root.start()
+        self.addCleanup(stage_root.stop)
+        (base / 'carried').mkdir()
+        (base / 'fresh').mkdir()
+        self.carried = SyntheticSeal(base / 'carried')
+        self.fresh = SyntheticSeal(base / 'fresh', edit_lock=lambda packs: packs['target'].update(revision='e' * 40))
+        self.old_tag = 'engine-v0.1.2-' + self.carried.commit[:8]
+        self.new_tag = 'engine-v0.1.2-' + self.fresh.commit[:8]
+        self.old_asset = 'rexl3-serve-0.1.2-%s-linux-aarch64-sm121' % self.carried.commit[:8]
+        self.new_asset = 'rexl3-serve-0.1.2-%s-linux-aarch64-sm121' % self.fresh.commit[:8]
+        old_remote = base / 'old-engine'
+        old_remote.mkdir()
+        (old_remote / self.old_asset).write_bytes(self.carried.bundle['bin/rexl3-serve'])
+        (old_remote / self.old_asset).chmod(0o755)
+        new_remote = base / 'new-engine'
+        new_remote.mkdir()
+        (new_remote / self.new_asset).write_bytes(self.fresh.bundle['bin/rexl3-serve'])
+        (new_remote / self.new_asset).chmod(0o755)
+        stripped_old = base / 'stripped-old' / self.carried.archive.name
+        stripped_old.parent.mkdir()
+        self.carried.tar(stripped_old, {k: v for k, v in self.carried.bundle.items() if not k.startswith('bin/')})
+        stripped_new = base / 'stripped-new' / self.fresh.archive.name
+        stripped_new.parent.mkdir()
+        self.fresh.tar(stripped_new, {k: v for k, v in self.fresh.bundle.items() if not k.startswith('bin/')})
+        doc_a, path_a, release_a, assets_a = publish_model(
+            self.carried, 1, archive=stripped_old,
+            engine_binary_files={'bin/rexl3-serve': old_remote / self.old_asset}, engine_release_tag=self.old_tag)
+        doc_b, path_b, release_b, assets_b = publish_model(
+            self.fresh, 21, version=2, archive=stripped_new,
+            engine_binary_files={'bin/rexl3-serve': new_remote / self.new_asset}, engine_release_tag=self.new_tag)
+        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {
+            f'{FAMILY}/{MODEL}/v1': {'approval_sha256': sha(path_a.read_bytes()), 'source_commit': self.carried.commit,
+                                     'source_tree': self.carried.tree, 'runtime_id': 'synthetic-demo'},
+            f'{self.SECOND[0]}/{self.SECOND[1]}/v2': {'approval_sha256': sha(path_b.read_bytes()), 'source_commit': self.fresh.commit,
+                                                      'source_tree': self.fresh.tree, 'runtime_id': 'synthetic-demo'}}}
+        self.root = base / 'prod'
+        self.manifest = prod_root(
+            self.root, registry, self.carried.approved,
+            [(FAMILY, MODEL, 'v1', path_a, self.carried), (*self.SECOND, 'v2', path_b, self.fresh)],
+            self.new_tag, {self.new_asset: sha(self.fresh.bundle['bin/rexl3-serve'])},
+            carries={(FAMILY, MODEL): {'carried_forward': True, 'qualified_engine_release_tag': self.old_tag,
+                                       'qualification_tier': 'T0', 'scope_diff_base': '0' * 40}})
+        self.old_engine_release = {'id': 61, 'tag_name': self.old_tag, 'draft': False, 'prerelease': False,
+                                   'assets': [{'id': 101, 'name': self.old_asset, 'size': len(self.carried.bundle['bin/rexl3-serve']),
+                                               'digest': 'sha256:' + sha(self.carried.bundle['bin/rexl3-serve'])}]}
+        self.new_engine_release = {'id': 62, 'tag_name': self.new_tag, 'draft': False, 'prerelease': False,
+                                   'assets': [{'id': 102, 'name': self.new_asset, 'size': len(self.fresh.bundle['bin/rexl3-serve']),
+                                               'digest': 'sha256:' + sha(self.fresh.bundle['bin/rexl3-serve'])}]}
+        self.fixtures = {'assets': {**assets_a, **assets_b, 101: self.carried.bundle['bin/rexl3-serve'],
+                                    102: self.fresh.bundle['bin/rexl3-serve']}}
+        self.dev_releases = {release_a['tag_name']: release_a, release_b['tag_name']: release_b,
+                             self.old_tag: self.old_engine_release, self.new_tag: self.new_engine_release}
+        self.dev_tags = {self.old_tag: self.carried.commit, self.new_tag: self.fresh.commit}
+
+    def api(self):
+        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'am423'}}],
+                             self.dev_releases, self.dev_tags)
+
+    def test_download_stages_each_models_own_engine_binaries(self):
+        work = c.download_dev_assets(self.api(), self.manifest, self.root)
+        self.addCleanup(shutil.rmtree, work, True)
+        carried_engine = work / '.stage' / FAMILY / MODEL / 'v1' / 'engine' / self.old_asset
+        fresh_engine = work / '.stage' / self.SECOND[0] / self.SECOND[1] / 'v2' / 'engine' / self.new_asset
+        self.assertEqual(carried_engine.read_bytes(), self.carried.bundle['bin/rexl3-serve'])
+        self.assertEqual(fresh_engine.read_bytes(), self.fresh.bundle['bin/rexl3-serve'])
+        self.assertEqual({p.name for p in work.iterdir() if p.is_file()}, c.model_assets(self.manifest))
+
+    def test_publish_with_carried_forward_uploads_all_assets(self):
+        api = self.api()
+        self.assertEqual(c.cut(api, REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
+        release = api.releases[VERSION]
+        self.assertIs(release['draft'], False)
+        self.assertEqual({a['name'] for a in release['assets']}, c.model_assets(self.manifest))
+        self.assertEqual(dict(api.uploads)[self.new_asset], self.fresh.bundle['bin/rexl3-serve'])
+
+    def test_check_local_main_refuses_when_the_carried_approval_names_another_engine_release(self):
+        self.manifest['models'][0]['qualified_engine_release_tag'] = self.new_tag
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'names another engine release'):
+            c.check_local_main(str(self.root), VERSION)
+
+    def test_check_local_main_refuses_when_qualified_tag_does_not_name_the_approval_commit(self):
+        # A forged/falsified carried approval whose engine release tag does not name its own source
+        # commit must be refused locally, before any API resolution.
+        forged_tag = 'engine-v0.1.2-99999999'
+        self.manifest['models'][0]['qualified_engine_release_tag'] = forged_tag
+        tree = self.root / 'runtimes' / FAMILY / MODEL / 'v1'
+        doc = e.load_json(tree / 'approval.json')
+        doc['engine_binaries']['bin/rexl3-serve']['release_tag'] = forged_tag
+        write(tree, 'approval.json', encoded(doc))
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'does not name the approval commit'):
+            c.check_local_main(str(self.root), VERSION)
+
+    def test_download_refuses_when_the_carried_approval_names_another_engine_release(self):
+        self.manifest['models'][0]['qualified_engine_release_tag'] = self.new_tag
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'the manifest names ' + re.escape(self.new_tag)):
+            c.download_dev_assets(self.api(), self.manifest, self.root)
+
+    def test_carried_forward_qualified_engine_release_missing_is_refused(self):
+        del self.dev_releases[self.old_tag]
+        with self.assertRaisesRegex(ValueError, 'dev engine release missing: ' + self.old_tag):
+            c.download_dev_assets(self.api(), self.manifest, self.root)
+
+    def test_carried_forward_qualified_tag_on_wrong_commit_is_refused(self):
+        self.dev_tags[self.old_tag] = '0' * 40
+        with self.assertRaisesRegex(ValueError, 'does not name the approved engine commit'):
+            c.download_dev_assets(self.api(), self.manifest, self.root)
 
 
 class VerifyTest(CutFixture):

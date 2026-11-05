@@ -11,6 +11,13 @@ except ImportError:
 MANIFEST_SCHEMA = 'rexl3.release-manifest.v1'
 MODEL_KEYS = ('family', 'model', 'version', 'runtime_id', 'approval_sha256')
 ENGINE_KEYS = ('dev_commit', 'dev_tree', 'engine_release_tag', 'artifacts')
+# Change-scoped carry-forward (decision D37): a model whose family/kernel scope is untouched by the
+# newer engine commits in this release carries forward its prior sealed approval instead of re-running
+# a full qualification chain (T0/T1/T2). T3 (model math/weights/sampling changes or a new model) never
+# carries forward and must re-seal. The qualified engine release tag must be the exact dev engine
+# release the carried approval was sealed against.
+QUALIFICATION_TIERS = ('T0', 'T1', 'T2')
+CARRY_FORWARD_KEYS = ('qualified_engine_release_tag', 'qualification_tier', 'scope_diff_base')
 
 
 def validate_manifest(doc, version):
@@ -38,6 +45,16 @@ def validate_manifest(doc, version):
         e.require(isinstance(item['version'], str) and m.VERSION_RE.fullmatch(item['version']), 'invalid model version')
         e.require(isinstance(item['runtime_id'], str) and e.ID.fullmatch(item['runtime_id']), 'invalid runtime_id')
         e.full_hash(item['approval_sha256'])
+        carried = item.get('carried_forward')
+        if carried is True:
+            e.require(all(key in item for key in CARRY_FORWARD_KEYS), 'incomplete carried-forward model entry')
+            e.require(isinstance(item['qualified_engine_release_tag'], str)
+                      and e.ENGINE_TAG.fullmatch(item['qualified_engine_release_tag']), 'invalid qualified engine release tag')
+            e.require(item['qualification_tier'] in QUALIFICATION_TIERS, 'invalid qualification tier')
+            e.full_hash(item['scope_diff_base'], e.HEX40)
+        else:
+            e.require(carried is None, 'carried_forward must be true when present')
+            e.require(not any(key in item for key in CARRY_FORWARD_KEYS), 'carry-forward fields require carried_forward: true')
     e.require(isinstance(doc.get('notes'), str) and doc['notes'].strip(), 'manifest notes required')
     return doc
 

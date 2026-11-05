@@ -17,8 +17,10 @@ never by agents, never by automation. Agents never create, edit, publish or dele
 
 A release is cut from an explicitly agreed group of models listed in the release manifest
 (`releases/v<X.Y.Z>/manifest.json`). v0.1.0 is the five-model group: Qwen3.8-27B,
-Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (its `tp1` profile, 1.55 bpw, single node),
-GLM-5.3-Flash and Nemotron-3.5-Super-VL. v0.1.1 is planned to carry Ling-3.1-Flash-1019.
+Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (its single-node `tp1` profile,
+`dsv41-single-262k`, 1.55 bpw), GLM-5.3-Flash and Nemotron-3.5-Super-VL. DeepSeek's
+`tp1` profile is being qualified and sealed for v0.1.0; its two-node
+`dsv41-tp2-1m` profile and Ling-3.1-Flash-1019 are planned for v0.1.1.
 
 - Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
   that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
@@ -27,20 +29,25 @@ GLM-5.3-Flash and Nemotron-3.5-Super-VL. v0.1.1 is planned to carry Ling-3.1-Fla
 - No model gets its own release or release candidate.
 - Only AFTER v0.1.0 is released may a later release contain a single newly validated model as a new
   version; it is never phrased as a release candidate for one model.
-- A model whose family/kernel scope is untouched by the newer engine commits in this release
-  carries forward its prior sealed approval and receipts instead of re-running full chains
-  (change-scoped qualification, tiers T0/T1/T2: untouched carry-forward, shared-server
-  golden-token smoke, bit-exact kernel perf+exactness with Q200 reuse). Only a change to a
-  model's own math/weights/sampling, or a newly added model, requires a full re-qualification
-  chain (T3).
-- For v0.1.0 (decision D37): the four models sealed on the `799fa750` freeze carry forward as T0
-  with zero re-runs; DeepSeek-V4.1-Flash-1017 joins with its `tp1` profile sealed against #229's
-  V57 chunk-invariant attention.
-- Runtime units (decision D38): single-node (`tp1`) and two-node (`tp2`) profiles of a model are
-  packaged, sealed and promoted as independent runtime units — `<model>` for `tp1`, `<model>-tp2`
-  for `tp2` — so a `tp1` release never waits on `tp2`. When `tp2` shares the same weights and
-  engine scope as `tp1`, it carries forward `tp1`'s `Q200` quality receipt and runs only
-  topology-dependent gates (2-rank lifecycle, doctor, 1M context, `tp2` perf/exactness).
+- Change-scoped qualification tiers:
+  - **T0** (untouched scope): the model's family/kernel scope is untouched by the newer engine
+    commits, so its prior sealed approval travels as-is in the release manifest
+    (`carried_forward: true`, `qualification_tier: "T0"`).
+  - **T1 / T2** (shared-glue smoke / gate-scoped re-run): the required gates re-run on the new
+    engine binary, unaffected gate receipts carry forward (`carried_gates`), and a NEW approval is
+    sealed on the new engine build.
+  - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
+    `Q200` runs again; nothing carries forward.
+- For v0.1.0: the four approvals sealed on the `799fa750` freeze (Qwen3.8-27B,
+  Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL) carry forward as T0 with zero
+  re-runs. GLM's v0.1.0 approval is its already-sealed combined approval 1
+  (`glm53-flash-2.25bpw-sm121`), covering both `glm53-flash-single` and
+  `glm53-flash-tp2-1m`; the `<model>` (`tp1`) / `<model>-tp2` (`tp2`) split applies to DeepSeek
+  and to subsequent GLM versions.
+- Runtime units: single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units —
+  `<model>` for `tp1`, `<model>-tp2` for `tp2` — packaged, sealed and promoted separately, so a
+  `tp1` release never waits on its `tp2` sibling. Each unit seals its own qualification receipts on
+  its own runtime id and topology; a receipt is never reused across runtime ids or topologies.
 
 ## The group freeze on dev
 
@@ -49,9 +56,9 @@ GLM-5.3-Flash and Nemotron-3.5-Super-VL. v0.1.1 is planned to carry Ling-3.1-Fla
   matching dev source tag), created by maintainers after all in-scope model PRs are validated by
   the non-submitting maintainer and merged.
 - The dev freeze commit exists only so the whole group is validated on one engine build; it is never
-  a release and is never per model. Every model in the release is sealed from the SAME freeze commit,
-  or carries forward a sealed approval from a prior freeze whose newer engine commits do not touch
-  that model's scope (T0/T1/T2 in "Grouped releases").
+  a release and is never per model. Every model is either sealed on the freeze commit, or carries
+  forward a previously sealed approval whose newer engine commits do not touch its scope (T0), or
+  re-seals on the new engine build with carried gate receipts (T1/T2).
 - The dev workspace version is set to `<X.Y.Z>` at the freeze; the next dev cycle uses
   `<X.(Y+1).0>-dev`. Earlier 0.1.1/0.1.2 labels were internal builds.
 
@@ -61,7 +68,11 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
 
 - `releases/v<X.Y.Z>/manifest.json` — schema `rexl3.release-manifest.v1`: `version`, `engine`
   {`dev_commit`, `dev_tree`, `engine_release_tag`, artifact digests}, `models` [{`family`, `model`,
-  `version` (v<N>), `runtime_id`, `approval_sha256`}], `notes`.
+  `version` (v<N>), `runtime_id`, `approval_sha256`, and for a carried-forward model
+  `carried_forward`, `qualified_engine_release_tag`, `qualification_tier`, `scope_diff_base`}],
+  `notes`. The release PR attaches the release-scope classification (`tools/release_scope.py
+  classify` output) for each model, naming its tier and its scope base (the exact commit the tier
+  was assessed against).
 - `releases/v<X.Y.Z>/NOTES.md` — the assembled release notes.
 - The `CHANGELOG.md` entry.
 - It deletes the consumed `changes/unreleased/*.md` fragments.
@@ -114,18 +125,18 @@ rulesets or settings):
 
 ## Release checklist
 
-Before the candidate:
+Before the release:
 
 - [ ] Every first-release model meets the definition of done in `docs/PROMOTION.md` (final runtime
-      entry, capability contract proven, exactness, long context, GB10 receipts on the RC commit,
-      `KNOWN_ISSUES`, approval sealed from the RC commit).
+      entry, capability contract proven, exactness, long context, GB10 receipts on the freeze
+      commit, `KNOWN_ISSUES`, approval sealed from the freeze commit).
 - [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut at the merged
       bump (no release-candidate tags).
-- [ ] All models in the release are sealed from the SAME dev freeze commit, or carry forward a
-      sealed approval from a prior freeze whose engine commits do not touch their scope (with a
-      verified scope-empty diff / golden-token parity); GB10 receipts exist for every sealed
-      commit. The freeze exists only so the whole group is validated on one engine build; it is
-      never a release and is never per model.
+- [ ] Every model is sealed on the dev freeze commit, or carries forward a previously sealed approval
+      whose newer engine commits do not touch its scope (T0), or re-seals on the new engine build
+      with carried gate receipts (T1/T2); GB10 receipts exist for every sealed build. The freeze
+      exists only so the whole group is validated on one engine build; it is never a release and is
+      never per model.
 
 At the release PR:
 

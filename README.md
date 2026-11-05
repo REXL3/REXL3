@@ -27,18 +27,21 @@ Engine development, model validation and sealing happen in the development repos
 | --- | --- | --- | --- | --- |
 | Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on |
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
-| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node (`tp1`), port 8940; its `dsv41-tp2-1m` two-node profile is a separate `tp2` runtime unit, not in v0.1.0 | off |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node (`tp1`), port 8940; its `dsv41-tp2-1m` two-node profile is a separate `tp2` runtime unit, planned for v0.1.1 | off |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
 
-Ling-3.1-Flash-1019 is not in v0.1.0; it is planned for v0.1.1.
+Ling-3.1-Flash-1019 is not in v0.1.0; it is planned for v0.1.1, together with DeepSeek's
+`dsv41-tp2-1m` two-node profile.
 
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
 two-node profile ships as two independent runtime units: `tp1` (single node) as `<model>`, and `tp2`
 (two nodes) as `<model>-tp2`. They are packaged, sealed and approved separately, so a `tp1` unit never
-waits on its `tp2` sibling (decision D38). The release page and each recipe's sealed `profile.json` are
-authoritative: a sealed runtime id, profile or port can differ from the table above. A recipe with
-vision off says so in its `KNOWN_ISSUES.md`.
+waits on its `tp2` sibling. In v0.1.0 the GLM-5.3-Flash approval is the combined approval 1
+(`glm53-flash-2.25bpw-sm121`) covering both `glm53-flash-single` and `glm53-flash-tp2-1m`; the
+`<model>` / `<model>-tp2` split starts with DeepSeek and applies to subsequent GLM versions. The
+release page and each recipe's sealed `profile.json` are authoritative: a sealed runtime id, profile
+or port can differ from the table above. A recipe with vision off says so in its `KNOWN_ISSUES.md`.
 
 **The `tp2` two-node profile in v0.1.0** (GLM-5.3-Flash's 1,048,576-token profile,
 `glm53-flash-tp2-1m`) listens on the leader node's network address, not on localhost, and in v0.1.0
@@ -72,8 +75,10 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
   only after every in-scope model PR has been validated and merged. No model gets its own release or
   release candidate; a later release may add a single newly validated model as a new version only
   after v0.1.0 is released.
-- All models in a release are sealed from the same dev freeze commit; the freeze exists only so the
-  whole group is validated on one engine build, and is never a release per model.
+- Every model in a release is either sealed on the dev freeze commit, or carries forward a previously
+  sealed approval whose newer engine commits do not touch its scope, or re-seals on the new engine
+  build with carried gate receipts; the freeze exists only so the whole group is validated on one
+  engine build, and is never a release per model.
 - A release is a `v<X.Y.Z>` tag on the prod repository. Per-runtime releases are retired; a release
   contains the bundle archives for every recipe in it, their `approval.json` records, and the engine
   corresponding source.

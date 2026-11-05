@@ -58,8 +58,9 @@ Naming:
 
 First-release map (priority order). Each row is one prod model. A model with a single-node and a
 two-node profile ships as two independent runtime units: `tp1` (single node) is `<model>`, `tp2`
-(two nodes) is `<model>-tp2`, packaged, sealed and promoted separately (decision D38), so a `tp1`
-unit never waits on its `tp2` sibling:
+(two nodes) is `<model>-tp2`, packaged, sealed and promoted separately, so a `tp1` unit never
+waits on its `tp2` sibling. In v0.1.0 GLM-5.3-Flash ships its combined approval 1 covering both
+profiles; the split starts with DeepSeek and applies to subsequent GLM versions:
 
 | Priority | Model | prod folder | dev runtime id | dev profiles | dev engine module |
 |---|---|---|---|---|---|
@@ -98,19 +99,21 @@ agree), never from folder names.
 
 - A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0 is
   the five-model group (section 2); it is cut only after all five model PRs are validated by the
-  non-submitting maintainer and merged. v0.1.1 is planned to carry Ling-3.1-Flash-1019.
+  non-submitting maintainer and merged. v0.1.1 is planned to carry Ling-3.1-Flash-1019 and
+  DeepSeek-V4.1-Flash-1017's `dsv41-tp2-1m` two-node profile.
   Each `model/<model>` PR holds all the commits that make that
   model work; a later release may add a single newly validated model as a new version only after
   v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
-  release candidate. A model whose family/kernel scope is untouched by the newer engine commits in
-  a release carries forward its prior sealed approval and receipts (change-scoped qualification
-  tiers T0/T1/T2) without a redundant full chain; only model math/weights/sampling changes or a new
-  model require full re-qualification (T3).
+  release candidate. Change-scoped qualification: a model whose family/kernel scope is untouched by
+  the newer engine commits carries forward its prior sealed approval (T0, `carried_forward: true`
+  in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
+  unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
+  model math/weights/sampling changes or a new model require the full nine-gate chain plus `Q200`
+  (T3).
 - Single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units (section 2): each
   is packaged, sealed and promoted separately, so a `tp1` model's release never waits on its `tp2`
-  sibling (decision D38). When `tp2` shares the same weights and engine scope as `tp1`, it carries
-  forward `tp1`'s `Q200` quality receipt and runs only topology-dependent gates (2-rank lifecycle,
-  doctor, 1M context, `tp2` perf/exactness).
+  sibling. Each unit seals its own qualification receipts on its own runtime id and topology; a
+  receipt is never reused across runtime ids or topologies.
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.

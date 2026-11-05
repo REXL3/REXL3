@@ -7,11 +7,12 @@ VERSION = 'v0.1.1'
 HEX40 = '0' * 40
 HEX64 = 'd' * 64
 ENGINE_TAG = 'engine-v0.1.1-11111111'
+DEV_COMMIT = '11111111' * 5  # first 8 hex must equal ENGINE_TAG's commit suffix
 
 
 def base_manifest():
     return {'schema': 'rexl3.release-manifest.v1', 'version': VERSION,
-            'engine': {'dev_commit': 'a' * 40, 'dev_tree': 'b' * 40,
+            'engine': {'dev_commit': DEV_COMMIT, 'dev_tree': 'b' * 40,
                        'engine_release_tag': ENGINE_TAG,
                        'artifacts': {'rexl3-serve.tar.gz': HEX64}},
             'models': [{'family': 'qwen3.8', 'model': 'qwen3.8-27b', 'version': 'v1',
@@ -70,8 +71,19 @@ class ManifestSchemaTest(unittest.TestCase):
     def test_carried_forward_false_with_carry_forward_fields_is_rejected(self):
         doc = carried_manifest()
         doc['models'][0]['carried_forward'] = False
-        with self.assertRaisesRegex(ValueError, 'carried_forward must be true when present'):
+        with self.assertRaisesRegex(ValueError, 'carry-forward fields require carried_forward: true'):
             validate_manifest(doc, VERSION)
+
+    def test_carried_forward_null_is_rejected(self):
+        doc = carried_manifest()
+        doc['models'][0]['carried_forward'] = None
+        with self.assertRaisesRegex(ValueError, 'carried_forward must be a boolean'):
+            validate_manifest(doc, VERSION)
+
+    def test_carried_forward_false_without_carry_fields_is_accepted(self):
+        doc = base_manifest()
+        doc['models'][0]['carried_forward'] = False
+        self.assertEqual(validate_manifest(doc, VERSION), doc)
 
     def test_carry_forward_fields_without_carried_forward_are_rejected(self):
         doc = base_manifest()
@@ -93,6 +105,22 @@ class ManifestSchemaTest(unittest.TestCase):
         for base in ('abc', '1' * 39, '1' * 41, None):
             with self.subTest(base=base), self.assertRaises(ValueError):
                 validate_manifest(carried_manifest(scope_diff_base=base), VERSION)
+
+    def test_duplicate_family_model_entries_are_rejected(self):
+        for extra in ({'version': 'v2'}, {'carried_forward': True,
+                                           'qualified_engine_release_tag': 'engine-v0.1.0-22222222',
+                                           'qualification_tier': 'T0', 'scope_diff_base': HEX40}):
+            with self.subTest(extra=extra):
+                doc = base_manifest()
+                doc['models'].append(dict(doc['models'][0], **extra))
+                with self.assertRaisesRegex(ValueError, r'duplicate \(family, model\) entry'):
+                    validate_manifest(doc, VERSION)
+
+    def test_engine_dev_commit_prefix_must_match_the_release_tag_commit(self):
+        doc = base_manifest()
+        doc['engine']['dev_commit'] = 'a' * 40
+        with self.assertRaisesRegex(ValueError, 'dev_commit prefix must match the engine release tag commit'):
+            validate_manifest(doc, VERSION)
 
 
 if __name__ == '__main__':

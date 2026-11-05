@@ -64,7 +64,7 @@ def mutant(old, new):
 
 def manifest(approval_hash):
     return {'schema': 'rexl3.release-manifest.v1', 'version': VERSION,
-            'engine': {'dev_commit': 'a' * 40, 'dev_tree': 'b' * 40,
+            'engine': {'dev_commit': '4208d848' * 5, 'dev_tree': 'b' * 40,
                        'engine_release_tag': 'engine-v0.1.2-4208d848',
                        'artifacts': {'rexl3-serve.tar.gz': HEX64}},
             'models': [{'family': FAMILY, 'model': MODEL, 'version': 'v1',
@@ -110,6 +110,8 @@ class FakeApi(c.Api):
             if not self.immutable:
                 raise ValueError('GitHub API 403')
             return b'{"enabled": true}'
+        if '/compare/' in path:
+            return {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0}
         raise AssertionError('unexpected GET ' + path)
 
     def post(self, path, data, **kwargs):
@@ -328,7 +330,8 @@ def prod_root(root, registry, approved, models, engine_tag, artifacts, carries=N
             entry.update(carries[(family, model)])
         entries.append(entry)
     doc = {'schema': 'rexl3.release-manifest.v1', 'version': VERSION,
-           'engine': {'dev_commit': 'a' * 40, 'dev_tree': 'b' * 40, 'engine_release_tag': engine_tag, 'artifacts': artifacts},
+           'engine': {'dev_commit': (engine_tag[-8:] * 5), 'dev_tree': 'b' * 40,
+                      'engine_release_tag': engine_tag, 'artifacts': artifacts},
            'models': entries, 'notes': 'first release'}
     write(root, f'releases/{VERSION}/manifest.json', encoded(doc))
     write(root, f'releases/{VERSION}/NOTES.md', b'# notes\n')
@@ -584,7 +587,7 @@ class CarryForwardCutTest(unittest.TestCase):
             [(FAMILY, MODEL, 'v1', path_a, self.carried), (*self.SECOND, 'v2', path_b, self.fresh)],
             self.new_tag, {self.new_asset: sha(self.fresh.bundle['bin/rexl3-serve'])},
             carries={(FAMILY, MODEL): {'carried_forward': True, 'qualified_engine_release_tag': self.old_tag,
-                                       'qualification_tier': 'T0', 'scope_diff_base': '0' * 40}})
+                                       'qualification_tier': 'T0', 'scope_diff_base': self.carried.commit}})
         self.old_engine_release = {'id': 61, 'tag_name': self.old_tag, 'draft': False, 'prerelease': False,
                                    'assets': [{'id': 101, 'name': self.old_asset, 'size': len(self.carried.bundle['bin/rexl3-serve']),
                                                'digest': 'sha256:' + sha(self.carried.bundle['bin/rexl3-serve'])}]}
@@ -608,14 +611,16 @@ class CarryForwardCutTest(unittest.TestCase):
         fresh_engine = work / '.stage' / self.SECOND[0] / self.SECOND[1] / 'v2' / 'engine' / self.new_asset
         self.assertEqual(carried_engine.read_bytes(), self.carried.bundle['bin/rexl3-serve'])
         self.assertEqual(fresh_engine.read_bytes(), self.fresh.bundle['bin/rexl3-serve'])
-        self.assertEqual({p.name for p in work.iterdir() if p.is_file()}, c.model_assets(self.manifest))
+        self.assertEqual({p.name for p in work.iterdir() if p.is_file()}, c.model_assets(self.manifest, self.root))
 
     def test_publish_with_carried_forward_uploads_all_assets(self):
         api = self.api()
         self.assertEqual(c.cut(api, REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
         release = api.releases[VERSION]
         self.assertIs(release['draft'], False)
-        self.assertEqual({a['name'] for a in release['assets']}, c.model_assets(self.manifest))
+        self.assertEqual({a['name'] for a in release['assets']}, c.model_assets(self.manifest, self.root))
+        self.assertIn(self.old_asset, {a['name'] for a in release['assets']})
+        self.assertEqual(dict(api.uploads)[self.old_asset], self.carried.bundle['bin/rexl3-serve'])
         self.assertEqual(dict(api.uploads)[self.new_asset], self.fresh.bundle['bin/rexl3-serve'])
 
     def test_check_local_main_refuses_when_the_carried_approval_names_another_engine_release(self):
@@ -637,6 +642,13 @@ class CarryForwardCutTest(unittest.TestCase):
         doc = e.load_json(tree / 'approval.json')
         doc['engine_binaries']['bin/rexl3-serve']['release_tag'] = forged_tag
         write(tree, 'approval.json', encoded(doc))
+        # The carried checks trust the pinned registry bytes first: re-anchor the tampered local
+        # approval so the forged tag check is what trips.
+        new_hash = e.sha256_file(tree / 'approval.json')
+        registry = e.load_json(self.root / 'runtimes/templates/APPROVALS.json')
+        registry['approvals'][f'{FAMILY}/{MODEL}/v1']['approval_sha256'] = new_hash
+        write(self.root, 'runtimes/templates/APPROVALS.json', encoded(registry))
+        self.manifest['models'][0]['approval_sha256'] = new_hash
         write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
         with self.assertRaisesRegex(ValueError, 'does not name the approval commit'):
             c.check_local_main(str(self.root), VERSION)

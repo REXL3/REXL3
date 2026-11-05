@@ -267,30 +267,28 @@ class SyntheticSeal:
             'approval_sha256': sha(path.read_bytes()), 'source_commit': self.commit, 'source_tree': self.tree}}}
         return path, doc, registry
 
-    def rewrite_engine_build(self):
-        """Rewrite the synthetic receipt onto an earlier engine build (D40): the
-        document, its identity observation and every gate case summary switch to
-        alternate engine-build hashes while the pack/profile-bound identity stays."""
+    def rewrite_engine_build_gates(self, *gates, rerun=('exactness', 'prefix_cache')):
+        """Declare ``gates`` carried from an earlier build; rewrite only their raw evidence.
+
+        The receipt document and its identity observation stay on the engine build being sealed;
+        only the declared gates' raw case summaries move to the pinned source build (a T2
+        gate-scoped re-run composition).
+        """
         alt = {k: ('f' * len(self.receipt[k]) if k in ('engine_commit', 'engine_tree')
                    else '9' * len(self.receipt[k]) if k in ('binary_sha256', 'release_lock_sha256')
                    else self.receipt[k]) for k in e.IDENTITY_KEYS}
-        obs_path = self.assets / self.receipt['identity_receipt']['path']
-        obs = json.loads(obs_path.read_bytes())
-        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
-            self.receipt[k] = alt[k]
-            obs[k] = alt[k]
-        for rank in obs.get('ranks', []):
-            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
-                rank[k] = alt[k]
-        obs_path.write_bytes(encoded(obs))
-        self.receipt['identity_receipt']['sha256'] = sha(obs_path.read_bytes())
-        for gate in GATES:
+        for gate in gates:
             raw_path = self.assets / self.receipt['gates'][gate]['evidence'][0]['path']
             raw = json.loads(raw_path.read_bytes())
             for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
                 raw[k] = alt[k]
             raw_path.write_bytes(encoded(raw))
             self.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+        self.receipt['carried_gates'] = {gate: {
+            'source_engine_commit': alt['engine_commit'],
+            'source_engine_tree': alt['engine_tree'],
+            'source_binary_sha256': alt['binary_sha256'],
+            'rerun_gates': list(rerun)} for gate in gates}
         self.receipt_path = write(self.assets, 'qualification.json', encoded(self.receipt))
         self.kwargs['receipts'] = [self.receipt_path]
 
@@ -330,13 +328,11 @@ class ApprovalTest(unittest.TestCase):
         self.assertEqual(doc['identities']['profile_sha256'], sha(self.f.source['profile.json']))
 
     def test_seal_accepts_a_carried_forward_receipt_from_an_earlier_engine_build(self):
-        # D40: gate receipts are bound to the model pack (model_lock_sha256) and
-        # profile, not to the engine binary build. An approval may therefore seal a
-        # receipt whose engine-build fields (engine_commit/engine_tree/binary_sha256/
-        # release_lock_sha256) came from an earlier engine build — e.g. DeepSeek
-        # V23's Q200 and other N3 receipts from 799fa750 composing with the #229
-        # exactness/prefix_cache re-run on the new binary.
-        self.f.rewrite_engine_build()
+        # A T2 gate-scoped re-run: exactness/prefix_cache are fresh on the engine build being
+        # sealed and the other gates carry forward from the pinned earlier build, declared in the
+        # receipt. The sealed approval's profile identity names the current engine commit, and the
+        # carried declaration travels inside the receipt so verification accepts it.
+        self.f.rewrite_engine_build_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
         doc = self.f.seal()
         self.assertEqual(doc['profiles']['single']['identity']['engine_commit'], self.f.commit)
         self.assertEqual(doc['profiles']['single']['receipt']['sha256'],
@@ -346,10 +342,19 @@ class ApprovalTest(unittest.TestCase):
                         approved_templates=self.f.approved, engine_dir=None)
 
     def test_seal_refuses_a_carried_forward_receipt_with_pack_drift(self):
-        # D40 keeps the pack/profile binding strict: a receipt for a different
-        # model pack stays refused even when the rest of the identity matches.
-        self.f.rewrite_engine_build()
+        # Even with a valid carried_gates declaration the pack/profile binding stays strict.
+        self.f.rewrite_engine_build_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
         self.f.receipt['model_lock_sha256'] = 'e' * 64
+        self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+        self.f.kwargs['receipts'] = [self.f.receipt_path]
+        with self.assertRaises(ValueError):
+            self.f.seal()
+
+    def test_seal_refuses_a_fully_drifted_receipt_without_a_declaration(self):
+        # Every gate's raw evidence on another build, with no carried_gates declaration, cannot
+        # seal: undeclared cross-engine-build gate evidence stays refused.
+        self.f.rewrite_engine_build_gates(*GATES, rerun=('doctor',))
+        del self.f.receipt['carried_gates']
         self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
         self.f.kwargs['receipts'] = [self.f.receipt_path]
         with self.assertRaises(ValueError):
@@ -385,9 +390,10 @@ class ApprovalTest(unittest.TestCase):
 
     def test_manifest_release_model_and_profile_drift(self):
         # profile/model/source manifest are pack/source-bound: drift stays refused.
-        # release.lock.json is an engine-build key (release_lock_sha256) and may
-        # differ across builds under D40 (see next test).
-        for name in ('source.manifest.json', 'profile.json', 'model.lock.json'):
+        # release.lock.json is an engine-build key (release_lock_sha256) and must match exactly
+        # too: a receipt is strict on every identity key unless it declares carried_gates
+        # (see the scoped carry-forward tests).
+        for name in ('source.manifest.json', 'profile.json', 'model.lock.json', 'release.lock.json'):
             with self.subTest(name=name):
                 bundle = copy.deepcopy(self.f.bundle)
                 bundle[name] += b' '
@@ -395,16 +401,15 @@ class ApprovalTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.f.seal()
 
-    def test_release_lock_may_differ_across_engine_builds(self):
-        # D40: release.lock.json is engine-build identity (release_lock_sha256),
-        # not part of a receipt's pack/profile binding — a carried-forward receipt
-        # from an earlier engine build legitimately carries an older release lock.
+    def test_release_lock_drift_is_refused_without_a_carried_declaration(self):
+        # release.lock.json is engine-build identity (release_lock_sha256). A receipt is strict on
+        # every identity key by default, so a bundle whose release lock differs from the receipt is
+        # refused unless the receipt declares the gate carried from that earlier build.
         bundle = copy.deepcopy(self.f.bundle)
         bundle['release.lock.json'] += b' '
         self.f.tar(self.f.archive, bundle)
-        doc = self.f.seal()
-        self.assertNotEqual(doc['identities']['release_lock_sha256'],
-                            sha(self.f.bundle['release.lock.json']))
+        with self.assertRaises(ValueError):
+            self.f.seal()
 
     def _reseal_with_release(self, **changes):
         release = copy.deepcopy(self.f.release)

@@ -171,20 +171,99 @@ class ReceiptContract(unittest.TestCase):
     def test_valid_actual_files(self):
         self.assertEqual(self.validate(), self.doc)
 
-    def rewrite_engine_build(self):
-        """Rewrite the whole receipt onto an earlier engine build (D40).
+    def other_build(self):
+        return {k: ('f' * len(self.expected[k]) if k in ('engine_commit', 'engine_tree')
+                    else '9' * len(self.expected[k]) if k in ('binary_sha256', 'release_lock_sha256')
+                    else self.expected[k]) for k in self.api().IDENTITY_KEYS}
 
-        The document, its identity observation (including every rank) and every
-        gate case summary switch to alternate engine-build hashes while the
-        pack/profile-bound identity stays intact.
+    def carry_gates(self, *gates, rerun=('exactness', 'prefix_cache'), source=None):
+        """Declare ``gates`` carried from an earlier build and rewrite only their raw evidence.
+
+        The receipt document and its identity observation stay on the shipped build; only the
+        declared gates' raw case summaries move to the pinned source build.
         """
-        def alt(value, fill):
-            return fill * len(value)
+        other = source or self.other_build()
+        for gate in gates:
+            p = self.root / (gate + '.json')
+            raw = json.loads(p.read_bytes())
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+                raw[k] = other[k]
+            p.write_bytes(encoded(raw))
+            self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+        self.doc['carried_gates'] = {gate: {
+            'source_engine_commit': other['engine_commit'],
+            'source_engine_tree': other['engine_tree'],
+            'source_binary_sha256': other['binary_sha256'],
+            'rerun_gates': list(rerun)} for gate in gates}
 
-        other = {k: (alt(self.expected[k], 'f') if k in ('engine_commit', 'engine_tree')
-                     else alt(self.expected[k], '9') if k in ('binary_sha256', 'release_lock_sha256')
-                     else self.expected[k])
-                 for k in self.api().IDENTITY_KEYS}
+    def test_receipt_is_strict_on_the_shipped_build_by_default(self):
+        # No carried_gates declaration: raw gate evidence from any other build is refused.
+        for gate in GATES:
+            with self.subTest(gate=gate):
+                self.setUp()
+                self.rewrite_one_gate_build(gate)
+                with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+                    self.validate()
+
+    def rewrite_one_gate_build(self, gate):
+        other = self.other_build()
+        p = self.root / (gate + '.json')
+        raw = json.loads(p.read_bytes())
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            raw[k] = other[k]
+        p.write_bytes(encoded(raw))
+        self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+
+    def test_carry_forward_from_earlier_engine_build_is_accepted(self):
+        # A T2 gate-scoped re-run: exactness/prefix_cache are fresh on the shipped build and the
+        # other gates carry forward from the pinned earlier build.
+        self.carry_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_carried_gates_require_a_fresh_rerun_gate_on_the_target_build(self):
+        self.carry_gates('doctor', rerun=())
+        with self.assertRaisesRegex(ValueError, 'rerun_gates must name at least one'):
+            self.validate()
+
+    def test_a_carried_gate_must_not_also_be_rerun_gate(self):
+        self.carry_gates('doctor', rerun=('doctor', 'exactness'))
+        with self.assertRaisesRegex(ValueError, 'must not also be re-run'):
+            self.validate()
+
+    def test_a_carried_gate_raw_evidence_must_name_the_declared_source_build(self):
+        # The declaration pins source build `other`; the doctor gate's raw evidence names a THIRD build.
+        third = self.other_build()
+        third['engine_commit'] = '7' * 40
+        third['engine_tree'] = '7' * 40
+        third['binary_sha256'] = '8' * 64
+        self.carry_gates('doctor')
+        p = self.root / 'doctor.json'
+        raw = json.loads(p.read_bytes())
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            raw[k] = third[k]
+        p.write_bytes(encoded(raw))
+        self.doc['gates']['doctor']['evidence'][0]['sha256'] = sha(p.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+            self.validate()
+
+    def test_an_undeclared_gate_cannot_carry_forward(self):
+        # One carried gate does not allow the other eight to drift.
+        self.carry_gates('doctor')
+        self.rewrite_one_gate_build('vision')
+        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+            self.validate()
+
+    def test_carried_gates_cannot_move_the_document_or_observation(self):
+        # The receipt document and its identity observation stay strictly on the shipped build.
+        self.carry_gates('doctor')
+        other = self.other_build()
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            self.doc[k] = other[k]
+        self.receipt.write_bytes(encoded(self.doc))
+        with self.assertRaisesRegex(ValueError, 'receipt identity drift'):
+            self.validate()
+        self.setUp()
+        self.carry_gates('doctor')
         path = self.root / 'identity.json'
         obs = json.loads(path.read_bytes())
         for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
@@ -194,27 +273,12 @@ class ReceiptContract(unittest.TestCase):
                 rank[k] = other[k]
         path.write_bytes(encoded(obs))
         self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
-        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
-            self.doc[k] = other[k]
-        for gate in GATES:
-            p = self.root / (gate + '.json')
-            raw = json.loads(p.read_bytes())
-            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
-                raw[k] = other[k]
-            p.write_bytes(encoded(raw))
-            self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
-
-    def test_carry_forward_from_earlier_engine_build_is_accepted(self):
-        # D40: receipts are bound to the model pack (model_lock_sha256) and profile,
-        # not to the engine binary build — the same pack/profile on an earlier
-        # engine build validates against the current expected identity.
-        self.rewrite_engine_build()
-        self.assertEqual(self.validate(), self.doc)
+        with self.assertRaisesRegex(ValueError, 'observation identity drift'):
+            self.validate()
 
     def test_carry_forward_pack_or_profile_drift_is_still_rejected(self):
-        # D40 keeps the pack/profile binding strict: a different model lock, profile
-        # or runtime must still fail even when the engine build differs.
-        self.rewrite_engine_build()
+        # Even with a valid carried_gates declaration the pack/profile binding stays strict.
+        self.carry_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
         for field, value in (('model_lock_sha256', 'e' * 63 + '0'),
                              ('profile_sha256', 'd' * 63 + '0'),
                              ('runtime_id', 'other-runtime')):
@@ -225,19 +289,10 @@ class ReceiptContract(unittest.TestCase):
                     self.validate()
                 self.doc[field] = saved
 
-    def test_carry_forward_doc_and_observation_must_name_the_same_build(self):
-        # A receipt may carry forward from an earlier build, but the document and
-        # its own identity observation must describe the same build.
-        self.rewrite_engine_build()
-        self.doc['engine_commit'] = 'a' * 40  # doc claims the current build, observation the earlier
-        with self.assertRaisesRegex(ValueError, 'receipt engine identity drift vs identity observation'):
-            self.validate()
-
     def test_carry_forward_rank_binary_must_match_the_observation(self):
-        self.rewrite_engine_build()
         path = self.root / 'identity.json'
         obs = json.loads(path.read_bytes())
-        obs['ranks'][0]['binary_sha256'] = 'c' * 64  # contradicts the observation's own claim
+        obs['ranks'][0]['binary_sha256'] = '9' * 64  # contradicts the observation's own claim
         path.write_bytes(encoded(obs))
         self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
         with self.assertRaisesRegex(ValueError, 'installed rank binary/source drift'):

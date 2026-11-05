@@ -168,6 +168,14 @@ def check_local_main(repo_root, version, token=None):
         if not (tree / 'approval.json').is_file():
             raise ValueError(f'sealed tree missing: {folder / item["version"]}')
         if item.get('carried_forward'):
+            # Carry-forward means "the family/kernel scope is untouched by the engine commits SINCE
+            # the approval was sealed" — so the qualified engine release must be an EARLIER release
+            # than the release's primary engine tag. Carrying forward from the SAME engine release
+            # this release ships is nonsensical (it would mark a model as untouched while the engine
+            # tag advanced), so refuse it before any trust check.
+            e.require(item['qualified_engine_release_tag'] != manifest['engine']['engine_release_tag'],
+                      'carried-forward model must name an earlier engine release than the release '
+                      'primary engine tag (self carry-forward is not a carry-forward)')
             # The carried approval was sealed against an earlier engine release; it must name that
             # exact release (never a re-sealed forgery) and its commit prefix.
             approval = e.load_json(tree / 'approval.json')

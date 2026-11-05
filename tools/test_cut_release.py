@@ -619,7 +619,11 @@ class CarryForwardCutTest(unittest.TestCase):
         self.assertEqual(dict(api.uploads)[self.new_asset], self.fresh.bundle['bin/rexl3-serve'])
 
     def test_check_local_main_refuses_when_the_carried_approval_names_another_engine_release(self):
-        self.manifest['models'][0]['qualified_engine_release_tag'] = self.new_tag
+        # The manifest points at a THIRD engine release (distinct from both the approval's old_tag and
+        # the release's primary new_tag), so the approval's own tag is neither -> "names another engine
+        # release". (Using new_tag here would instead trip the self-carry-forward rule.)
+        third_tag = 'engine-v0.1.2-' + 'ab' * 4
+        self.manifest['models'][0]['qualified_engine_release_tag'] = third_tag
         write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
         with self.assertRaisesRegex(ValueError, 'names another engine release'):
             c.check_local_main(str(self.root), VERSION)
@@ -647,6 +651,20 @@ class CarryForwardCutTest(unittest.TestCase):
         del self.dev_releases[self.old_tag]
         with self.assertRaisesRegex(ValueError, 'dev engine release missing: ' + self.old_tag):
             c.download_dev_assets(self.api(), self.manifest, self.root)
+
+    def test_check_local_main_refuses_self_carry_forward(self):
+        # A carried-forward model whose qualified engine release equals the release's primary engine
+        # tag is not a carry-forward (the scope was NOT untouched since that tag). Refuse locally.
+        self.manifest['models'][0]['qualified_engine_release_tag'] = self.new_tag
+        # make the carried approval agree so ONLY the self-carry-forward rule can trip
+        tree = self.root / 'runtimes' / FAMILY / MODEL / 'v1'
+        doc = e.load_json(tree / 'approval.json')
+        doc['engine_binaries']['bin/rexl3-serve']['release_tag'] = self.new_tag
+        doc['source_commit'] = self.fresh.commit
+        write(tree, 'approval.json', encoded(doc))
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'self carry-forward'):
+            c.check_local_main(str(self.root), VERSION)
 
     def test_carried_forward_qualified_tag_on_wrong_commit_is_refused(self):
         self.dev_tags[self.old_tag] = '0' * 40

@@ -27,20 +27,23 @@ Engine development, model validation and sealing happen in the development repos
 | --- | --- | --- | --- | --- |
 | Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on |
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node (`tp1`), port 8940; its `dsv41-tp2-1m` two-node profile is a separate `tp2` runtime unit, not in v0.1.0 | off |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
 
-DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019 are not in v0.1.0; both are planned for v0.1.1.
+Ling-3.1-Flash-1019 is not in v0.1.0; it is planned for v0.1.1.
 
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
-two-node profile is one recipe with one runtime id. The release page and each recipe's sealed
-`profile.json` are authoritative: a sealed runtime id, profile or port can differ from the table above.
-A recipe with vision off says so in its `KNOWN_ISSUES.md`.
+two-node profile ships as two independent runtime units: `tp1` (single node) as `<model>`, and `tp2`
+(two nodes) as `<model>-tp2`. They are packaged, sealed and approved separately, so a `tp1` unit never
+waits on its `tp2` sibling (decision D38). The release page and each recipe's sealed `profile.json` are
+authoritative: a sealed runtime id, profile or port can differ from the table above. A recipe with
+vision off says so in its `KNOWN_ISSUES.md`.
 
-**The two-node profile** (GLM-5.3-Flash's 1,048,576-token profile, `glm53-flash-tp2-1m`) listens on
-the leader node's network address, not on localhost, and in v0.1.0 the server has no API key and no
-request log. Run it only on a private, trusted network, or behind a firewall or an SSH tunnel.
-An API key option is planned for v0.1.1.
+**The `tp2` two-node profile in v0.1.0** (GLM-5.3-Flash's 1,048,576-token profile,
+`glm53-flash-tp2-1m`) listens on the leader node's network address, not on localhost, and in v0.1.0
+the server has no API key and no request log. Run it only on a private, trusted network, or behind a
+firewall or an SSH tunnel. An API key option is planned for v0.1.1.
 
 None of these is released. Qualification on the exact release binary, sealing and promotion are the
 remaining steps; the release notes document what each model's evidence proves.
@@ -62,8 +65,9 @@ There is **one versioned product release** — the engine and its recipes ship t
 per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0 is the
-  four-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL);
-  v0.1.1 is planned to carry DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019. Each model enters prod through its own `model/<model>` PR, validated
+  five-model group (Qwen3.8-27B, Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (`tp1`),
+  GLM-5.3-Flash and Nemotron-3.5-Super-VL); v0.1.1 is planned to carry Ling-3.1-Flash-1019.
+  Each model enters prod through its own `model/<model>` PR, validated
   (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
   only after every in-scope model PR has been validated and merged. No model gets its own release or
   release candidate; a later release may add a single newly validated model as a new version only

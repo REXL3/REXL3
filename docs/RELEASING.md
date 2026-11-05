@@ -16,9 +16,9 @@ never by agents, never by automation. Agents never create, edit, publish or dele
 ## Grouped releases
 
 A release is cut from an explicitly agreed group of models listed in the release manifest
-(`releases/v<X.Y.Z>/manifest.json`). v0.1.0 is the four-model group: Qwen3.8-27B,
-Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL. v0.1.1 is planned to carry
-DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019.
+(`releases/v<X.Y.Z>/manifest.json`). v0.1.0 is the five-model group: Qwen3.8-27B,
+Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (its `tp1` profile, 1.55 bpw, single node),
+GLM-5.3-Flash and Nemotron-3.5-Super-VL. v0.1.1 is planned to carry Ling-3.1-Flash-1019.
 
 - Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
   that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
@@ -33,6 +33,14 @@ DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019.
   golden-token smoke, bit-exact kernel perf+exactness with Q200 reuse). Only a change to a
   model's own math/weights/sampling, or a newly added model, requires a full re-qualification
   chain (T3).
+- For v0.1.0 (decision D37): the four models sealed on the `799fa750` freeze carry forward as T0
+  with zero re-runs; DeepSeek-V4.1-Flash-1017 joins with its `tp1` profile sealed against #229's
+  V57 chunk-invariant attention.
+- Runtime units (decision D38): single-node (`tp1`) and two-node (`tp2`) profiles of a model are
+  packaged, sealed and promoted as independent runtime units — `<model>` for `tp1`, `<model>-tp2`
+  for `tp2` — so a `tp1` release never waits on `tp2`. When `tp2` shares the same weights and
+  engine scope as `tp1`, it carries forward `tp1`'s `Q200` quality receipt and runs only
+  topology-dependent gates (2-rank lifecycle, doctor, 1M context, `tp2` perf/exactness).
 
 ## The group freeze on dev
 

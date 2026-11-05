@@ -56,15 +56,18 @@ Naming:
   `<model>` folder, for example RED-SNOW-5.3-Flash lives at
   `runtimes/glm-5.3/red-snow-5.3-flash/` rather than being a second GLM-5.3-Flash pack.
 
-First-release map (priority order). Each row is one prod model; a model with a single-node and a
-two-node profile is one folder, one runtime id and one sealed version:
+First-release map (priority order). Each row is one prod model. A model with a single-node and a
+two-node profile ships as two independent runtime units: `tp1` (single node) is `<model>`, `tp2`
+(two nodes) is `<model>-tp2`, packaged, sealed and promoted separately (decision D38), so a `tp1`
+unit never waits on its `tp2` sibling:
 
 | Priority | Model | prod folder | dev runtime id | dev profiles | dev engine module |
 |---|---|---|---|---|---|
 | 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` (one node, 262K) | `qwen` (qwen3_5) |
 | 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (one node, 262K) | `qwen_flash_next` (qwen4_exp) |
-| 3 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
-| 4 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
+| 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` (one node, 262K, `tp1` unit); `dsv41-tp2-1m` (two nodes, 1M, `tp2` unit, sealed and promoted separately) | `deepseek_v41` |
+| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
+| 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
 
@@ -94,15 +97,20 @@ agree), never from folder names.
 | `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
 
 - A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0 is
-  the four-model group (section 2); it is cut only after all four model PRs are validated by the
-  non-submitting maintainer and merged. v0.1.1 is planned to carry DeepSeek-V4.1-Flash-1017 and
-  Ling-3.1-Flash-1019. Each `model/<model>` PR holds all the commits that make that
+  the five-model group (section 2); it is cut only after all five model PRs are validated by the
+  non-submitting maintainer and merged. v0.1.1 is planned to carry Ling-3.1-Flash-1019.
+  Each `model/<model>` PR holds all the commits that make that
   model work; a later release may add a single newly validated model as a new version only after
   v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
   release candidate. A model whose family/kernel scope is untouched by the newer engine commits in
   a release carries forward its prior sealed approval and receipts (change-scoped qualification
   tiers T0/T1/T2) without a redundant full chain; only model math/weights/sampling changes or a new
   model require full re-qualification (T3).
+- Single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units (section 2): each
+  is packaged, sealed and promoted separately, so a `tp1` model's release never waits on its `tp2`
+  sibling (decision D38). When `tp2` shares the same weights and engine scope as `tp1`, it carries
+  forward `tp1`'s `Q200` quality receipt and runs only topology-dependent gates (2-rank lifecycle,
+  doctor, 1M context, `tp2` perf/exactness).
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.

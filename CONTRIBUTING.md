@@ -99,7 +99,10 @@ agree), never from folder names.
   Ling-3.1-Flash-1019. Each `model/<model>` PR holds all the commits that make that
   model work; a later release may add a single newly validated model as a new version only after
   v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
-  release candidate.
+  release candidate. A model whose family/kernel scope is untouched by the newer engine commits in
+  a release carries forward its prior sealed approval and receipts (change-scoped qualification
+  tiers T0/T1/T2) without a redundant full chain; only model math/weights/sampling changes or a new
+  model require full re-qualification (T3).
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.

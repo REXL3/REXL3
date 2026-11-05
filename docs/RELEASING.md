@@ -27,6 +27,12 @@ DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019.
 - No model gets its own release or release candidate.
 - Only AFTER v0.1.0 is released may a later release contain a single newly validated model as a new
   version; it is never phrased as a release candidate for one model.
+- A model whose family/kernel scope is untouched by the newer engine commits in this release
+  carries forward its prior sealed approval and receipts instead of re-running full chains
+  (change-scoped qualification, tiers T0/T1/T2: untouched carry-forward, shared-server
+  golden-token smoke, bit-exact kernel perf+exactness with Q200 reuse). Only a change to a
+  model's own math/weights/sampling, or a newly added model, requires a full re-qualification
+  chain (T3).
 
 ## The group freeze on dev
 
@@ -35,7 +41,9 @@ DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019.
   matching dev source tag), created by maintainers after all in-scope model PRs are validated by
   the non-submitting maintainer and merged.
 - The dev freeze commit exists only so the whole group is validated on one engine build; it is never
-  a release and is never per model. Every model in the release is sealed from the SAME freeze commit.
+  a release and is never per model. Every model in the release is sealed from the SAME freeze commit,
+  or carries forward a sealed approval from a prior freeze whose newer engine commits do not touch
+  that model's scope (T0/T1/T2 in "Grouped releases").
 - The dev workspace version is set to `<X.Y.Z>` at the freeze; the next dev cycle uses
   `<X.(Y+1).0>-dev`. Earlier 0.1.1/0.1.2 labels were internal builds.
 
@@ -105,9 +113,11 @@ Before the candidate:
       `KNOWN_ISSUES`, approval sealed from the RC commit).
 - [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut at the merged
       bump (no release-candidate tags).
-- [ ] All models in the release are sealed from the SAME dev freeze commit; GB10 receipts
-      exist for that commit. The freeze exists only so the whole group is validated on one engine
-      build; it is never a release and is never per model.
+- [ ] All models in the release are sealed from the SAME dev freeze commit, or carry forward a
+      sealed approval from a prior freeze whose engine commits do not touch their scope (with a
+      verified scope-empty diff / golden-token parity); GB10 receipts exist for every sealed
+      commit. The freeze exists only so the whole group is validated on one engine build; it is
+      never a release and is never per model.
 
 At the release PR:
 

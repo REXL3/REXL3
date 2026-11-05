@@ -27,6 +27,12 @@ IDENTITY_KEYS = ('runtime_id', 'profile', 'engine_commit', 'engine_tree', 'binar
                  'profile_sha256', 'model_lock_sha256', 'release_lock_sha256',
                  'effective_profile_digest', 'effective_profile_source', 'effective_max_context', 'capabilities', 'topology',
                  'pack')
+# Engine-build keys are NOT part of a qualification receipt's pack/profile binding
+# (owner decision D40): a carried-forward gate receipt from an earlier engine build
+# (same model pack, profile and capabilities) remains valid evidence against a newer
+# engine build. Every other identity field must match exactly.
+ENGINE_BUILD_KEYS = ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256')
+CARRY_FORWARD_SAFE_KEYS = tuple(k for k in IDENTITY_KEYS if k not in ENGINE_BUILD_KEYS)
 HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
@@ -150,7 +156,18 @@ def validate_identity(doc):
             and topology['ranks'] in (1, 2), 'invalid topology')
 
 
-def validate_observation(path, expected, *, choice=None):
+def identity_matches(doc, expected):
+    """Pack/profile-bound identity equality (D40).
+
+    ``engine_commit`` / ``engine_tree`` / ``binary_sha256`` / ``release_lock_sha256``
+    are engine-build fields: they may differ between a carried-forward gate receipt
+    and the bundle's current engine build. Every other identity field (model pack,
+    profile, capabilities, topology, effective context) must match exactly.
+    """
+    return all(doc[k] == expected[k] for k in CARRY_FORWARD_SAFE_KEYS)
+
+
+def validate_observation(path, expected, *, choice=None, allow_engine_build_drift=False):
     """Validate v1 observed bytes (or an already parsed object), never synthesize them.
 
     Pass the pinned profile choice to enforce its serving contract as well as the
@@ -158,18 +175,21 @@ def validate_observation(path, expected, *, choice=None):
     verification; this function neither launches nor probes a process.
     """
     observation = path if isinstance(path, dict) else load_json(path)
-    _validate_observation(observation, expected)
+    _validate_observation(observation, expected, allow_engine_build_drift=allow_engine_build_drift)
     if choice is not None:
         _validate_observed_profile(observation, choice)
     return observation
 
 
-def _validate_observation(observation, expected):
+def _validate_observation(observation, expected, *, allow_engine_build_drift=False):
     require(isinstance(observation, dict), 'launcher observation object required')
     require(observation.get('schema') == 'rexl3.launcher-observation.v1', 'launcher observation schema required')
     validate_identity(observation)
     validate_identity(expected)
-    require(all(observation[k] == expected[k] for k in IDENTITY_KEYS), 'observation identity drift')
+    if allow_engine_build_drift:
+        require(identity_matches(observation, expected), 'observation identity drift')
+    else:
+        require(all(observation[k] == expected[k] for k in IDENTITY_KEYS), 'observation identity drift')
     resolved = observation.get('resolved_config')
     require(isinstance(resolved, dict) and set(resolved) == {'max_context', 'capabilities', 'ranks'}
             and resolved.get('max_context') == expected['effective_max_context']
@@ -185,7 +205,9 @@ def _validate_observation(observation, expected):
         require(isinstance(rank, dict) and type(rank.get('rank')) is int and rank['rank'] not in seen, 'unique observed ranks required')
         seen.add(rank['rank'])
         for key in ('binary_sha256', 'engine_commit', 'engine_tree'):
-            require(rank.get(key) == expected[key], 'installed rank binary/source drift')
+            # A carried-forward observation (D40) may name an earlier engine build: the
+            # rank must still match the binary/source the observation itself claims.
+            require(rank.get(key) == observation[key], 'installed rank binary/source drift')
         require(all(type(rank.get(k)) is int and rank[k] > 0 for k in ('pid', 'start_time_ticks'))
                 and isinstance(rank.get('hostname'), str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,253}', rank['hostname'])
                 and rank.get('ready') is True,
@@ -356,14 +378,19 @@ def _validate_observed_profile(observation, choice):
             or shared['@HTTP_PORT@'] != shared['@TP_PORT@'], 'HTTP/TP port collision')
 
 
-def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incomplete=False):
+def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incomplete=False,
+                           allow_engine_build_drift=False):
     """One measured-case contract for both imports and final sealing.
 
     Incomplete imports may retain failed executed cases and unexecuted skips;
     they never qualify a release. Final sealing requires every case to pass.
+    With ``allow_engine_build_drift`` (D40) a raw case summary from an earlier
+    engine build is accepted when its pack/profile-bound identity still matches
+    ``expected``; the engine-build fields may differ.
     """
     require(isinstance(gate, str) and bool(gate), 'gate name required')
     require(type(allow_incomplete) is bool, 'invalid incomplete policy')
+    require(type(allow_engine_build_drift) is bool, 'invalid engine-build drift policy')
     root = checked_path(evidence_root)
     validate_identity(expected)
     require(isinstance(result, dict) and set(result) ==
@@ -395,8 +422,12 @@ def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incom
             raw = load_json(evidence)
             if isinstance(raw, dict) and raw.get('schema') == 'rexl3.gate-evidence.v1':
                 validate_identity(raw)
-                require(raw.get('gate') == gate and all(raw.get(k) == expected[k] for k in IDENTITY_KEYS),
-                        'raw evidence identity drift')
+                if allow_engine_build_drift:
+                    require(raw.get('gate') == gate and identity_matches(raw, expected),
+                            'raw evidence identity drift')
+                else:
+                    require(raw.get('gate') == gate and all(raw.get(k) == expected[k] for k in IDENTITY_KEYS),
+                            'raw evidence identity drift')
                 require(isinstance(raw.get('cases'), list), 'raw cases required')
                 cases.extend(raw['cases'])
     require(len(cases) == executed, 'raw case count mismatch: ' + gate)
@@ -493,6 +524,14 @@ def validate_receipt(path, *, evidence_root, expected):
     Positive image/supported cases, not audio/refused cases, satisfy vision when
     capabilities.images is true. When it is false, a PASS image/refused case with a
     measured HTTP 4xx detail satisfies vision and no supported image case may exist.
+
+    Per owner decision D40 the receipt's engine-build fields (engine_commit,
+    engine_tree, binary_sha256, release_lock_sha256) may come from an earlier engine
+    build when the pack/profile-bound identity (model_lock_sha256, profile_sha256,
+    runtime_id, profile, pack, capabilities, topology, effective context) matches
+    ``expected``: gate receipts carry forward across engine builds, so a T2
+    gate-scoped re-run can compose fresh exactness/prefix_cache evidence with carried
+    Q200 and the other unchanged gates.
     """
     path = checked_path(path)
     root = checked_path(evidence_root)
@@ -501,7 +540,7 @@ def validate_receipt(path, *, evidence_root, expected):
     require(doc.get('schema') == RECEIPT_SCHEMA, 'qualification schema required')
     validate_identity(doc)
     validate_identity(expected)
-    require(all(doc[key] == expected[key] for key in IDENTITY_KEYS), 'receipt identity drift')
+    require(identity_matches(doc, expected), 'receipt identity drift')
     if expected['capabilities'].get('images') is False:
         require(doc.get('vision_exception') is not None,
                 'vision-off release requires a documented owner vision exception (granted_by, granted, expires, reason)')
@@ -513,11 +552,17 @@ def validate_receipt(path, *, evidence_root, expected):
     require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'identity receipt required; naked digest refused')
     observation = safe_file(root, ref['path'])
     require(observation != path and sha256_file(observation) == full_hash(ref['sha256']), 'identity receipt hash drift')
-    validate_observation(observation, expected)
+    observed = validate_observation(observation, expected, allow_engine_build_drift=True)
+    # The composed document's claimed engine identity must be its own observation's:
+    # a receipt may carry forward from an earlier build, but the document and its
+    # identity observation must agree on which build they describe.
+    require(all(observed[k] == doc[k] for k in ENGINE_BUILD_KEYS),
+            'receipt engine identity drift vs identity observation')
     gates = doc.get('gates')
     require(isinstance(gates, dict) and set(GATES) <= set(gates), 'missing required gates')
     for gate, result in gates.items():
-        validate_gate_evidence(gate, result, evidence_root=root, expected=expected)
+        validate_gate_evidence(gate, result, evidence_root=root, expected=expected,
+                               allow_engine_build_drift=True)
         require(all(root / relative_path(ref['path']) != path for ref in result['evidence']), 'duplicate/self evidence')
     return doc
 

@@ -267,6 +267,33 @@ class SyntheticSeal:
             'approval_sha256': sha(path.read_bytes()), 'source_commit': self.commit, 'source_tree': self.tree}}}
         return path, doc, registry
 
+    def rewrite_engine_build(self):
+        """Rewrite the synthetic receipt onto an earlier engine build (D40): the
+        document, its identity observation and every gate case summary switch to
+        alternate engine-build hashes while the pack/profile-bound identity stays."""
+        alt = {k: ('f' * len(self.receipt[k]) if k in ('engine_commit', 'engine_tree')
+                   else '9' * len(self.receipt[k]) if k in ('binary_sha256', 'release_lock_sha256')
+                   else self.receipt[k]) for k in e.IDENTITY_KEYS}
+        obs_path = self.assets / self.receipt['identity_receipt']['path']
+        obs = json.loads(obs_path.read_bytes())
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            self.receipt[k] = alt[k]
+            obs[k] = alt[k]
+        for rank in obs.get('ranks', []):
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
+                rank[k] = alt[k]
+        obs_path.write_bytes(encoded(obs))
+        self.receipt['identity_receipt']['sha256'] = sha(obs_path.read_bytes())
+        for gate in GATES:
+            raw_path = self.assets / self.receipt['gates'][gate]['evidence'][0]['path']
+            raw = json.loads(raw_path.read_bytes())
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+                raw[k] = alt[k]
+            raw_path.write_bytes(encoded(raw))
+            self.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+        self.receipt_path = write(self.assets, 'qualification.json', encoded(self.receipt))
+        self.kwargs['receipts'] = [self.receipt_path]
+
     def published_fixture_model(self, family, model):
         """A fixture in the prod family/model layout: registry key <family>/<model>/v<N> + runtime_id."""
         path, doc, registry = self.published_fixture()
@@ -302,6 +329,32 @@ class ApprovalTest(unittest.TestCase):
         self.assertEqual(doc['profiles']['single']['receipt']['sha256'], sha(self.f.receipt_path.read_bytes()))
         self.assertEqual(doc['identities']['profile_sha256'], sha(self.f.source['profile.json']))
 
+    def test_seal_accepts_a_carried_forward_receipt_from_an_earlier_engine_build(self):
+        # D40: gate receipts are bound to the model pack (model_lock_sha256) and
+        # profile, not to the engine binary build. An approval may therefore seal a
+        # receipt whose engine-build fields (engine_commit/engine_tree/binary_sha256/
+        # release_lock_sha256) came from an earlier engine build — e.g. DeepSeek
+        # V23's Q200 and other N3 receipts from 799fa750 composing with the #229
+        # exactness/prefix_cache re-run on the new binary.
+        self.f.rewrite_engine_build()
+        doc = self.f.seal()
+        self.assertEqual(doc['profiles']['single']['identity']['engine_commit'], self.f.commit)
+        self.assertEqual(doc['profiles']['single']['receipt']['sha256'],
+                         sha(self.f.receipt_path.read_bytes()))
+        path, _, registry = self.f.published_fixture()
+        e.verify_assets(path, registry=registry,
+                        approved_templates=self.f.approved, engine_dir=None)
+
+    def test_seal_refuses_a_carried_forward_receipt_with_pack_drift(self):
+        # D40 keeps the pack/profile binding strict: a receipt for a different
+        # model pack stays refused even when the rest of the identity matches.
+        self.f.rewrite_engine_build()
+        self.f.receipt['model_lock_sha256'] = 'e' * 64
+        self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+        self.f.kwargs['receipts'] = [self.f.receipt_path]
+        with self.assertRaises(ValueError):
+            self.f.seal()
+
     def test_only_real_commit_tree_pairs(self):
         for changes in ({'commit': 'f' * 40}, {'tree': 'e' * 40}, {'commit': 'HEAD'}, {'commit': self.f.tree}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -331,13 +384,27 @@ class ApprovalTest(unittest.TestCase):
             self.f.seal()
 
     def test_manifest_release_model_and_profile_drift(self):
-        for name in ('source.manifest.json', 'release.lock.json', 'profile.json', 'model.lock.json'):
+        # profile/model/source manifest are pack/source-bound: drift stays refused.
+        # release.lock.json is an engine-build key (release_lock_sha256) and may
+        # differ across builds under D40 (see next test).
+        for name in ('source.manifest.json', 'profile.json', 'model.lock.json'):
             with self.subTest(name=name):
                 bundle = copy.deepcopy(self.f.bundle)
                 bundle[name] += b' '
                 self.f.tar(self.f.archive, bundle)
                 with self.assertRaises(ValueError):
                     self.f.seal()
+
+    def test_release_lock_may_differ_across_engine_builds(self):
+        # D40: release.lock.json is engine-build identity (release_lock_sha256),
+        # not part of a receipt's pack/profile binding — a carried-forward receipt
+        # from an earlier engine build legitimately carries an older release lock.
+        bundle = copy.deepcopy(self.f.bundle)
+        bundle['release.lock.json'] += b' '
+        self.f.tar(self.f.archive, bundle)
+        doc = self.f.seal()
+        self.assertNotEqual(doc['identities']['release_lock_sha256'],
+                            sha(self.f.bundle['release.lock.json']))
 
     def _reseal_with_release(self, **changes):
         release = copy.deepcopy(self.f.release)

@@ -171,6 +171,78 @@ class ReceiptContract(unittest.TestCase):
     def test_valid_actual_files(self):
         self.assertEqual(self.validate(), self.doc)
 
+    def rewrite_engine_build(self):
+        """Rewrite the whole receipt onto an earlier engine build (D40).
+
+        The document, its identity observation (including every rank) and every
+        gate case summary switch to alternate engine-build hashes while the
+        pack/profile-bound identity stays intact.
+        """
+        def alt(value, fill):
+            return fill * len(value)
+
+        other = {k: (alt(self.expected[k], 'f') if k in ('engine_commit', 'engine_tree')
+                     else alt(self.expected[k], '9') if k in ('binary_sha256', 'release_lock_sha256')
+                     else self.expected[k])
+                 for k in self.api().IDENTITY_KEYS}
+        path = self.root / 'identity.json'
+        obs = json.loads(path.read_bytes())
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            obs[k] = other[k]
+        for rank in obs['ranks']:
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
+                rank[k] = other[k]
+        path.write_bytes(encoded(obs))
+        self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
+        for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            self.doc[k] = other[k]
+        for gate in GATES:
+            p = self.root / (gate + '.json')
+            raw = json.loads(p.read_bytes())
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+                raw[k] = other[k]
+            p.write_bytes(encoded(raw))
+            self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+
+    def test_carry_forward_from_earlier_engine_build_is_accepted(self):
+        # D40: receipts are bound to the model pack (model_lock_sha256) and profile,
+        # not to the engine binary build — the same pack/profile on an earlier
+        # engine build validates against the current expected identity.
+        self.rewrite_engine_build()
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_carry_forward_pack_or_profile_drift_is_still_rejected(self):
+        # D40 keeps the pack/profile binding strict: a different model lock, profile
+        # or runtime must still fail even when the engine build differs.
+        self.rewrite_engine_build()
+        for field, value in (('model_lock_sha256', 'e' * 63 + '0'),
+                             ('profile_sha256', 'd' * 63 + '0'),
+                             ('runtime_id', 'other-runtime')):
+            with self.subTest(field=field):
+                saved = self.doc[field]
+                self.doc[field] = value
+                with self.assertRaisesRegex(ValueError, 'receipt identity drift'):
+                    self.validate()
+                self.doc[field] = saved
+
+    def test_carry_forward_doc_and_observation_must_name_the_same_build(self):
+        # A receipt may carry forward from an earlier build, but the document and
+        # its own identity observation must describe the same build.
+        self.rewrite_engine_build()
+        self.doc['engine_commit'] = 'a' * 40  # doc claims the current build, observation the earlier
+        with self.assertRaisesRegex(ValueError, 'receipt engine identity drift vs identity observation'):
+            self.validate()
+
+    def test_carry_forward_rank_binary_must_match_the_observation(self):
+        self.rewrite_engine_build()
+        path = self.root / 'identity.json'
+        obs = json.loads(path.read_bytes())
+        obs['ranks'][0]['binary_sha256'] = 'c' * 64  # contradicts the observation's own claim
+        path.write_bytes(encoded(obs))
+        self.doc['identity_receipt']['sha256'] = sha(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'installed rank binary/source drift'):
+            self.validate()
+
     def test_gate_truthy_strings_fail_closed(self):
         for value in ('FAIL', 'PASS', True, '15/15'):
             with self.subTest(value=value):

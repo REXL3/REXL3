@@ -11,11 +11,14 @@ except ImportError:
 MANIFEST_SCHEMA = 'rexl3.release-manifest.v1'
 MODEL_KEYS = ('family', 'model', 'version', 'runtime_id', 'approval_sha256')
 ENGINE_KEYS = ('dev_commit', 'dev_tree', 'engine_release_tag', 'artifacts')
-# Change-scoped carry-forward (decision D37): a model whose family/kernel scope is untouched by the
+# Change-scoped carry-forward (decision D37/D40): a model whose family/kernel scope is untouched by the
 # newer engine commits in this release carries forward its prior sealed approval instead of re-running
 # a full qualification chain (T0/T1/T2). T3 (model math/weights/sampling changes or a new model) never
 # carries forward and must re-seal. The qualified engine release tag must be the exact dev engine
-# release the carried approval was sealed against.
+# release the carried approval was sealed against. Under D40, gate receipts are bound to the model pack
+# (model_lock_sha256) and profile, not to the engine binary build, so a carried approval's gate receipts
+# (Q200 included) remain valid across engine builds; only the affected gates re-run in a T2 gate-scoped
+# re-run (e.g. #229 DeepSeek exactness/prefix_cache).
 QUALIFICATION_TIERS = ('T0', 'T1', 'T2')
 CARRY_FORWARD_KEYS = ('qualified_engine_release_tag', 'qualification_tier', 'scope_diff_base')
 

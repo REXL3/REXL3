@@ -16,10 +16,10 @@ never by agents, never by automation. Agents never create, edit, publish or dele
 ## Grouped releases
 
 A release is cut from an explicitly agreed group of models listed in the release manifest
-(`releases/v<X.Y.Z>/manifest.json`). v0.1.0 is the five-model group: Qwen3.8-27B,
-Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash-1017 (its single-node `tp1` profile,
-`dsv41-single-262k`, 1.55 bpw), GLM-5.3-Flash and Nemotron-3.5-Super-VL. DeepSeek's
-`tp1` profile is being qualified and sealed for v0.1.0; its two-node
+(`releases/v<X.Y.Z>/manifest.json`). v0.1.0's current manifest holds the four already-sealed
+models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL.
+DeepSeek-V4.1-Flash-1017's single-node `tp1` profile (`dsv41-single-262k`, 1.55 bpw) is being
+qualified and sealed for v0.1.0 (D43) and joins when its promotion PR lands; its two-node
 `dsv41-tp2-1m` profile and Ling-3.1-Flash-1019 are planned for v0.1.1.
 
 - Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
@@ -128,8 +128,9 @@ rulesets or settings):
 Before the release:
 
 - [ ] Every first-release model meets the definition of done in `docs/PROMOTION.md` (final runtime
-      entry, capability contract proven, exactness, long context, GB10 receipts on the freeze
-      commit, `KNOWN_ISSUES`, approval sealed from the freeze commit).
+      entry, capability contract proven, exactness, long context, GB10 receipts on the build its
+      approval was sealed from, `KNOWN_ISSUES`, and an approval sealed from that build — or a
+      registry-pinned prior approval carried forward under T0).
 - [ ] Dev workspace version set to `<X.Y.Z>`; release branch `release/v<X.Y.Z>` cut at the merged
       bump (no release-candidate tags).
 - [ ] Every model is sealed on the dev freeze commit, or carries forward a previously sealed approval

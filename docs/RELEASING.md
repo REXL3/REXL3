@@ -16,8 +16,9 @@ never by agents, never by automation. Agents never create, edit, publish or dele
 ## Grouped releases
 
 A release is cut from an explicitly agreed group of models listed in the release manifest
-(`releases/v<X.Y.Z>/manifest.json`). v0.1.0's current manifest holds the four already-sealed
-models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL.
+(`releases/v<X.Y.Z>/manifest.json`). v0.1.0's current manifest holds the five already-sealed
+models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash, Nemotron-3.5-Super-VL and
+DeepSeek-V4.1-Flash-1017.
 
 - Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
   that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
@@ -35,10 +36,13 @@ models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL
     sealed on the new engine build.
   - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
     `Q200` runs again; nothing carries forward.
-- As the first release, v0.1.0 has no earlier engine release to carry from: every in-scope model is
-  sealed on the release engine (fresh seals). The four v0.1.0 models seal on the `799fa750` freeze
-  engine (Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL). T0/T1/T2
-  carry-forward applies from v0.1.1 on, across released engines. GLM's v0.1.0 approval is its
+- As the first release, v0.1.0 has no earlier engine release to carry from. The four originally
+  sealed v0.1.0 models (Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and
+  Nemotron-3.5-Super-VL) were sealed on the `799fa750` freeze engine; DeepSeek-V4.1-Flash-1017
+  seals fresh on the release engine `E = afc9b5df`. T0/T1/T2 change-scoped carry-forward applies
+  WHENEVER a release manifest carries forward an approval sealed on an earlier freeze commit
+  (`799fa750`) onto the release engine (`E = afc9b5df`), including within v0.1.0 itself. GLM's
+  v0.1.0 approval is its
   already-sealed combined approval 1
   (`glm53-flash-2.25bpw-sm121`), covering both `glm53-flash-single` and
   `glm53-flash-tp2-1m`; the `<model>` (`tp1`) / `<model>-tp2` (`tp2`) split applies to models

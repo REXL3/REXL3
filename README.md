@@ -29,8 +29,9 @@ Engine development, model validation and sealing happen in the development repos
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940 | off |
 
-Planned for v0.1.1: DeepSeek-V4.1-Flash-1017 and Ling-3.1-Flash-1019.
+Planned for v0.1.1: Ling-3.1-Flash-1019 and DeepSeek-V4.1-Flash-1017's two-node profile (`dsv41-tp2-1m`, 1,048,576 tokens).
 
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
 two-node profile ships as two independent runtime units: `tp1` (single node) as `<model>`, and `tp2`
@@ -66,8 +67,8 @@ There is **one versioned product release** — the engine and its recipes ship t
 per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0's current
-  manifest holds the four already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
-  GLM-5.3-Flash and Nemotron-3.5-Super-VL).
+  manifest holds the five already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
+  GLM-5.3-Flash, Nemotron-3.5-Super-VL and DeepSeek-V4.1-Flash-1017).
   Each model enters prod through its own `model/<model>` PR, validated
   (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
   only after every in-scope model PR has been validated and merged. No model gets its own release or

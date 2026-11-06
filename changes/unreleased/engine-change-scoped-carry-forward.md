@@ -7,7 +7,8 @@
   math/weights/sampling changes, or a new model, never carries forward and must re-seal.
 - Gate receipts stay bound to the model pack and profile as well as the engine build. Only a gate a
   receipt explicitly lists as carried may reuse raw evidence from an earlier engine build, and only
-  when that build is pinned exactly (source engine commit/tree/binary/lock) and tied to a
-  registry-pinned prior approval; the exactness and prefix-cache gates always re-run on the new
-  build, and at least one gate must stay fresh on it. `tools/release_evidence.py` refuses any
-  cross-engine-build gate evidence outside such a declaration.
+  when that build is pinned exactly (source engine commit/tree/binary and the source receipt bytes,
+  canonical dev #238 shape) and tied to a registry-pinned prior approval of the same model; the
+  release lock stays strict on the shipped build (D42 option B). The exactness and prefix-cache
+  gates always re-run on the new build, and at least one gate must stay fresh on it.
+  `tools/release_evidence.py` refuses any cross-engine-build gate evidence outside such a declaration.

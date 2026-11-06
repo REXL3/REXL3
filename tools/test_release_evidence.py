@@ -180,13 +180,14 @@ class ReceiptContract(unittest.TestCase):
         """Declare ``gates`` carried from an earlier build and rewrite only their raw evidence.
 
         The receipt document and its identity observation stay on the shipped build; only the
-        declared gates' raw case summaries move to the pinned source build.
+        declared gates' raw case summaries move to the pinned source build (commit/tree/binary;
+        the release lock stays strict on the shipped build, D42 option B).
         """
         other = source or self.other_build()
         for gate in gates:
             p = self.root / (gate + '.json')
             raw = json.loads(p.read_bytes())
-            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
                 raw[k] = other[k]
             p.write_bytes(encoded(raw))
             self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
@@ -194,8 +195,7 @@ class ReceiptContract(unittest.TestCase):
             'source_engine_commit': other['engine_commit'],
             'source_engine_tree': other['engine_tree'],
             'source_binary_sha256': other['binary_sha256'],
-            'source_release_lock_sha256': other['release_lock_sha256'],
-            'source_approval_sha256': '0' * 64,
+            'source_receipt_sha256': 'a' * 64,
             'rerun_gates': list(rerun)} for gate in gates}
 
     def test_receipt_is_strict_on_the_shipped_build_by_default(self):
@@ -221,6 +221,19 @@ class ReceiptContract(unittest.TestCase):
         # other gates carry forward from the pinned earlier build.
         self.carry_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
         self.assertEqual(self.validate(), self.doc)
+
+    def test_a_carried_gate_release_lock_stays_strict_on_the_shipped_build(self):
+        # D42 option B (canonical dev #238 shape): the release lock binds the whole bundle
+        # inventory, so even a carried gate's raw evidence must match the shipped build's lock
+        # exactly; only commit/tree/binary may name the pinned source build.
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
+        p = self.root / 'doctor.json'
+        raw = json.loads(p.read_bytes())
+        raw['release_lock_sha256'] = self.other_build()['release_lock_sha256']
+        p.write_bytes(encoded(raw))
+        self.doc['gates']['doctor']['evidence'][0]['sha256'] = sha(p.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+            self.validate()
 
     def test_carried_gates_require_a_fresh_rerun_gate_on_the_target_build(self):
         self.carry_gates('doctor', rerun=())

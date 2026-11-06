@@ -79,10 +79,12 @@ two-node profile is one folder, one runtime id and one sealed version:
   does-not-fit proof.
 
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
-keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The
-`TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml` changes in the same commit as the
-registry. Tools derive dev release tags from `runtime_id` (MODEL.json and the sealed approval must
-agree), never from folder names.
+keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`, plus the sealed
+approval's bundle binary digest `binary_sha256` and each profile's sealed receipt digest under
+`profiles/<profile>/receipt/sha256` (the latter two pin carried-gate sources to the actual approval
+identity; omitted for approvals that predate carry-forward). The `TRUSTED_APPROVALS_SHA256` pin in
+`.github/workflows/verify.yml` changes in the same commit as the registry. Tools derive dev release
+tags from `runtime_id` (MODEL.json and the sealed approval must agree), never from folder names.
 
 ## 3. Branches and PR scope
 

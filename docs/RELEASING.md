@@ -18,9 +18,9 @@ never by agents, never by automation. Agents never create, edit, publish or dele
 A release is cut from an explicitly agreed group of models listed in the release manifest
 (`releases/v<X.Y.Z>/manifest.json`). v0.1.0's current manifest holds the four already-sealed
 models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL.
-DeepSeek-V4.1-Flash-1017's single-node `tp1` profile (`dsv41-single-262k`, 1.55 bpw) is being
-qualified and sealed for v0.1.0 (D43) and joins when its promotion PR lands; its two-node
-`dsv41-tp2-1m` profile and Ling-3.1-Flash-1019 are planned for v0.1.1.
+DeepSeek-V4.1-Flash-1017's single-node `tp1` profile (`dsv41-single-262k`, 1.55 bpw) is qualified
+and sealed separately from the v0.1.0 group (D44); its two-node `dsv41-tp2-1m` profile and
+Ling-3.1-Flash-1019 are planned for v0.1.1.
 
 - Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
   that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
@@ -38,9 +38,11 @@ qualified and sealed for v0.1.0 (D43) and joins when its promotion PR lands; its
     sealed on the new engine build.
   - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
     `Q200` runs again; nothing carries forward.
-- For v0.1.0: the four approvals sealed on the `799fa750` freeze (Qwen3.8-27B,
-  Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL) carry forward as T0 with zero
-  re-runs. GLM's v0.1.0 approval is its already-sealed combined approval 1
+- As the first release, v0.1.0 has no earlier engine release to carry from: every in-scope model is
+  sealed on the release engine (fresh seals). The four v0.1.0 models seal on the `799fa750` freeze
+  engine (Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL). T0/T1/T2
+  carry-forward applies from v0.1.1 on, across released engines. GLM's v0.1.0 approval is its
+  already-sealed combined approval 1
   (`glm53-flash-2.25bpw-sm121`), covering both `glm53-flash-single` and
   `glm53-flash-tp2-1m`; the `<model>` (`tp1`) / `<model>-tp2` (`tp2`) split applies to DeepSeek
   and to subsequent GLM versions.

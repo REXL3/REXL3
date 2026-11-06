@@ -27,7 +27,7 @@ Engine development, model validation and sealing happen in the development repos
 | --- | --- | --- | --- | --- |
 | Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on |
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
-| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node (`tp1`), port 8940, in qualification for v0.1.0; its `dsv41-tp2-1m` two-node profile is a separate `tp2` runtime unit, planned for v0.1.1 | off |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node (`tp1`), port 8940, qualified and sealed separately from v0.1.0; its `dsv41-tp2-1m` two-node profile is a separate `tp2` runtime unit, planned for v0.1.1 | off |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
 
@@ -69,8 +69,8 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0's current
   manifest holds the four already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
-  GLM-5.3-Flash and Nemotron-3.5-Super-VL), and DeepSeek-V4.1-Flash-1017's `tp1` unit is being
-  qualified for v0.1.0 (D43) and joins when its promotion PR lands; v0.1.1 is planned to carry
+  GLM-5.3-Flash and Nemotron-3.5-Super-VL). DeepSeek-V4.1-Flash-1017's single-node `tp1` unit is
+  qualified and sealed separately from v0.1.0 (D44); v0.1.1 is planned to carry
   Ling-3.1-Flash-1019 and DeepSeek's `dsv41-tp2-1m` two-node profile.
   Each model enters prod through its own `model/<model>` PR, validated
   (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut

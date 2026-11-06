@@ -99,8 +99,7 @@ agree), never from folder names.
 
 - A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0's
   current manifest holds the four already-sealed models (section 2); DeepSeek-V4.1-Flash-1017's
-  `tp1` unit is being qualified for v0.1.0 (D43) and joins the release when its `model/` promotion
-  PR is validated by the non-submitting maintainer and merged. v0.1.1 is planned to carry
+  `tp1` unit is qualified and sealed separately from v0.1.0 (D44). v0.1.1 is planned to carry
   Ling-3.1-Flash-1019 and DeepSeek-V4.1-Flash-1017's `dsv41-tp2-1m` two-node profile.
   Each `model/<model>` PR holds all the commits that make that
   model work; a later release may add a single newly validated model as a new version only after

@@ -35,7 +35,7 @@ There is no auto-merge anywhere.
 Dev a model may be proposed for production, the dev repository must have, for the exact version to be
 released:
 
-- a **final runtime entry** (the release-candidate runtime, not a work-in-progress one);
+- a **final runtime entry** (the final runtime for the release, not a work-in-progress one);
 - the **capability contract proven**: speculative decoding on with counters above 0; prefix cache on
   and proven at the real contract (the real context and slots); vision on and tested, or off only
   under an unexpired owner vision exception sealed in each vision-off profile's qualification receipt

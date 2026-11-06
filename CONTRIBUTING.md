@@ -56,8 +56,11 @@ Naming:
   `<model>` folder, for example RED-SNOW-5.3-Flash lives at
   `runtimes/glm-5.3/red-snow-5.3-flash/` rather than being a second GLM-5.3-Flash pack.
 
-First-release map (priority order). Each row is one prod model; a model with a single-node and a
-two-node profile is one folder, one runtime id and one sealed version:
+First-release map (priority order). Each row is one prod model. A model with a single-node and a
+two-node profile ships as two independent runtime units: `tp1` (single node) is `<model>`, `tp2`
+(two nodes) is `<model>-tp2`, packaged, sealed and promoted separately, so a `tp1` unit never
+waits on its `tp2` sibling. In v0.1.0 GLM-5.3-Flash ships its combined approval 1 covering both
+profiles; the split applies to models added after v0.1.0 and to subsequent GLM versions:
 
 | Priority | Model | prod folder | dev runtime id | dev profiles | dev engine module |
 |---|---|---|---|---|---|
@@ -93,6 +96,21 @@ agree), never from folder names.
 | `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
 | `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
 
+- A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0's
+  current manifest holds the four already-sealed models (section 2).
+  Each `model/<model>` PR holds all the commits that make that
+  model work; a later release may add a single newly validated model as a new version only after
+  v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
+  release candidate. Change-scoped qualification: a model whose family/kernel scope is untouched by
+  the newer engine commits carries forward its prior sealed approval (T0, `carried_forward: true`
+  in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
+  unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
+  model math/weights/sampling changes or a new model require the full nine-gate chain plus `Q200`
+  (T3).
+- Single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units (section 2): each
+  is packaged, sealed and promoted separately, so a `tp1` model's release never waits on its `tp2`
+  sibling. Each unit seals its own qualification receipts on its own runtime id and topology; a
+  receipt is never reused across runtime ids or topologies.
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.

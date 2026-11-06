@@ -36,9 +36,12 @@ class ManifestSchemaTest(unittest.TestCase):
     def test_plain_manifest_passes_unchanged(self):
         self.assertEqual(validate_manifest(base_manifest(), VERSION), base_manifest())
 
-    def test_valid_carried_forward_tiers_are_accepted(self):
-        for tier in ('T0', 'T1', 'T2'):
-            with self.subTest(tier=tier):
+    def test_carried_forward_t0_is_accepted_and_t1_t2_are_rejected(self):
+        # Only T0 is a manifest carry-forward (the prior sealed approval travels as-is); T1/T2
+        # re-seal a NEW approval on the new engine build, so they are not manifest carry-forwards.
+        validate_manifest(carried_manifest('T0'), VERSION)
+        for tier in ('T1', 'T2'):
+            with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, 'invalid qualification tier'):
                 validate_manifest(carried_manifest(tier), VERSION)
 
     def test_missing_qualified_engine_release_tag_is_rejected(self):

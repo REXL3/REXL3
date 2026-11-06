@@ -683,6 +683,37 @@ class CarryForwardCutTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'does not name the approved engine commit'):
             c.download_dev_assets(self.api(), self.manifest, self.root)
 
+    def test_require_engine_ahead_refuses_when_dev_commit_is_not_ahead(self):
+        # The carried approval's source commit must be strictly behind the release's primary
+        # engine dev commit (GitHub compare). Every non-ahead status is refused.
+        for status in ('behind', 'diverged', 'identical'):
+            api = self.api()
+            orig = api.get
+
+            def get(path, *args, **kwargs):
+                if '/compare/' in path:
+                    return {'status': status, 'ahead_by': 0, 'behind_by': 1}
+                return orig(path, *args, **kwargs)
+            api.get = get
+            with self.subTest(status=status), self.assertRaisesRegex(ValueError, 'not ahead'):
+                c.check_local_main(str(self.root), VERSION, api=api)
+
+    def test_check_local_main_refuses_a_made_up_qualified_tag_with_the_right_suffix(self):
+        # M1: an approval WITHOUT engine_binaries carried under an invented tag whose suffix
+        # matches the approval commit must still be refused once the dev API resolves the tag.
+        t = CutFixture('setUp')
+        t.setUp()
+        try:
+            src = t.doc['source_commit']
+            t.manifest['models'][0].update(carried_forward=True,
+                                           qualified_engine_release_tag='engine-v9.9.9-' + src[:8],
+                                           qualification_tier='T0', scope_diff_base=src)
+            write(t.root, f'releases/{VERSION}/manifest.json', encoded(t.manifest))
+            with self.assertRaisesRegex(ValueError, 'does not name the approval commit'):
+                c.check_local_main(str(t.root), VERSION, api=t.api())
+        finally:
+            t.doCleanups()
+
 
 class VerifyTest(CutFixture):
     def test_verify_confirms_published_release(self):

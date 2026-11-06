@@ -194,6 +194,8 @@ class ReceiptContract(unittest.TestCase):
             'source_engine_commit': other['engine_commit'],
             'source_engine_tree': other['engine_tree'],
             'source_binary_sha256': other['binary_sha256'],
+            'source_release_lock_sha256': other['release_lock_sha256'],
+            'source_approval_sha256': '0' * 64,
             'rerun_gates': list(rerun)} for gate in gates}
 
     def test_receipt_is_strict_on_the_shipped_build_by_default(self):
@@ -236,7 +238,7 @@ class ReceiptContract(unittest.TestCase):
         third['engine_commit'] = '7' * 40
         third['engine_tree'] = '7' * 40
         third['binary_sha256'] = '8' * 64
-        self.carry_gates('doctor')
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
         p = self.root / 'doctor.json'
         raw = json.loads(p.read_bytes())
         for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
@@ -248,14 +250,14 @@ class ReceiptContract(unittest.TestCase):
 
     def test_an_undeclared_gate_cannot_carry_forward(self):
         # One carried gate does not allow the other eight to drift.
-        self.carry_gates('doctor')
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
         self.rewrite_one_gate_build('vision')
         with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
             self.validate()
 
     def test_carried_gates_cannot_move_the_document_or_observation(self):
         # The receipt document and its identity observation stay strictly on the shipped build.
-        self.carry_gates('doctor')
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
         other = self.other_build()
         for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
             self.doc[k] = other[k]
@@ -263,7 +265,7 @@ class ReceiptContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'receipt identity drift'):
             self.validate()
         self.setUp()
-        self.carry_gates('doctor')
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
         path = self.root / 'identity.json'
         obs = json.loads(path.read_bytes())
         for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):

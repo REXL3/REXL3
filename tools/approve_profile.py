@@ -83,6 +83,10 @@ def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_as
         observation = e.load_json(e.safe_file(root, receipt['identity_receipt']['path']))
         e.validate_observed_profile(observation, choice)
         selected[name] = dict(identity=expected, receipt={'path': path.relative_to(root).as_posix(), 'sha256': e.sha256_file(path)})
+        carried = e.carried_gates(receipt)
+        if carried:
+            selected[name]['carried_gates'] = carried
+            selected[name]['rerun_gates'] = e.rerun_gates(receipt, carried)
     e.require(set(selected) == set(profile['profiles']), 'every packaged profile requires qualification')
     approval = dict(schema=SCHEMA, runtime_id=runtime_id, version=version, approve_tag=f'approve-{runtime_id}-{version}',
         source_commit=commit, source_tree=tree, template=template, identities=identities, profiles=selected,
@@ -190,8 +194,20 @@ def main(argv=None):
                                  engine_source_asset=args.engine_source_asset,
                                  evidence_root=args.evidence_root, out_dir=args.out_dir)
         # Re-read the seal and every bound file before reporting a durable result.
-        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {f'{args.runtime_id}/v{args.version}': {
-            'approval_sha256': e.sha256_file(path), 'source_commit': args.commit, 'source_tree': args.tree}}}
+        # Carry-forward receipts reference a registry-pinned prior approval, so seed the
+        # self-check registry with the repo's pinned approvals (when present) as well as
+        # this approval's own entry.
+        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}}
+        registry_path = Path(args.repo) / 'runtimes/templates/APPROVALS.json'
+        if registry_path.is_file():
+            try:
+                prior = e.load_json(registry_path)
+            except (ValueError, OSError):
+                prior = None
+            if isinstance(prior, dict) and isinstance(prior.get('approvals'), dict):
+                registry['approvals'].update(prior['approvals'])
+        registry['approvals'][f'{args.runtime_id}/v{args.version}'] = {
+            'approval_sha256': e.sha256_file(path), 'source_commit': args.commit, 'source_tree': args.tree}
         engine_dir = engine_records(engine_files, args.engine_release_tag)[1] if engine_files else None
         e.verify_assets(path, registry=registry, approved_templates={doc['template']['version']: doc['template']['digest']},
                         engine_dir=engine_dir)

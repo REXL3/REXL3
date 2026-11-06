@@ -204,9 +204,19 @@ def check_local_main(repo_root, version, token=None, api=None):
                 e.require({record['release_tag'] for record in engine.values()} == {item['qualified_engine_release_tag']},
                           'carried-forward approval names another engine release than '
                           + item['qualified_engine_release_tag'])
+            # The qualified tag must name the approval's source commit locally (fast, offline) and,
+            # when the dev API is available, must resolve on the dev repo to that exact commit (a
+            # made-up tag that happens to carry the right suffix is still refused).
             e.require(item['qualified_engine_release_tag'].endswith('-' + approval['source_commit'][:8]),
                       'carried-forward qualified engine release tag does not name the approval commit')
             if api is not None:
+                try:
+                    tag_commit = dev_tag_commit(api, item['qualified_engine_release_tag'])
+                except ValueError as err:
+                    raise ValueError('carried-forward qualified engine release tag does not name '
+                                     'the approval commit: ' + str(err)) from None
+                e.require(tag_commit == approval['source_commit'],
+                          'carried-forward qualified engine release tag does not name the approval commit')
                 _require_engine_ahead(api, approval['source_commit'], manifest['engine']['dev_commit'])
     return manifest
 

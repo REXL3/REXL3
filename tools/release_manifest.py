@@ -13,12 +13,12 @@ MODEL_KEYS = ('family', 'model', 'version', 'runtime_id', 'approval_sha256')
 ENGINE_KEYS = ('dev_commit', 'dev_tree', 'engine_release_tag', 'artifacts')
 # Change-scoped carry-forward: a model whose family/kernel scope is untouched by the
 # newer engine commits in this release carries forward its prior sealed approval instead of re-running
-# a full qualification chain. T0 is an untouched-scope carry-forward (the prior sealed approval travels
-# as-is); T1/T2 re-run the required gates on the new engine binary, carry forward unaffected gate
-# receipts (``carried_gates``), and seal a NEW approval on the new engine build. T3 (model
+# a full qualification chain. T0 is the only prod carry-forward tier (the prior sealed approval travels
+# as-is in the manifest); T1/T2 re-run the required gates on the new engine binary and seal a NEW
+# approval on the new engine build, so they are manifest carry-forwards. T3 (model
 # math/weights/sampling changes or a new model) never carries forward and must re-seal. The qualified
 # engine release tag must be the exact dev engine release the carried approval was sealed against.
-QUALIFICATION_TIERS = ('T0', 'T1', 'T2')
+QUALIFICATION_TIERS = ('T0',)
 CARRY_FORWARD_KEYS = ('qualified_engine_release_tag', 'qualification_tier', 'scope_diff_base')
 
 

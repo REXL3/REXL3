@@ -1134,7 +1134,10 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
         source_inventory=precomputed.get(doc['source_asset']['archive']))
     require(identities == doc.get('identities'), 'approval bundle identities mismatch')
     profiles = doc.get('profiles')
-    require(isinstance(profiles, dict) and set(profiles) == set(profile['profiles']), 'receipt profile set mismatch')
+    # The approval names the profiles it qualified. Packaged profiles it does not name (tp2 beside tp1, D38/D53)
+    # are not approved: the approved set must be a non-empty subset of the packaged set that contains the default.
+    require(isinstance(profiles, dict) and profiles and set(profiles) <= set(profile['profiles']), 'receipt profile set mismatch')
+    require(profile.get('default_profile') in profiles, 'default profile is not approved')
     for name, selected in profiles.items():
         require(isinstance(selected, dict) and set(selected) <= {'receipt', 'identity', 'carried_gates', 'rerun_gates'}
                 and {'receipt', 'identity'} <= set(selected)

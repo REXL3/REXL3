@@ -87,7 +87,10 @@ def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_as
         if carried:
             selected[name]['carried_gates'] = carried
             selected[name]['rerun_gates'] = e.rerun_gates(receipt, carried)
-    e.require(set(selected) == set(profile['profiles']), 'every packaged profile requires qualification')
+    # A receipt per approved profile; packaged profiles without one are not approved (tp1 and tp2 are independent
+    # runtime units, D38/D53). The default profile must be approved.
+    e.require(selected and set(selected) <= set(profile['profiles']), 'at least one qualified profile is required')
+    e.require(profile.get('default_profile') in selected, 'the default profile requires qualification')
     approval = dict(schema=SCHEMA, runtime_id=runtime_id, version=version, approve_tag=f'approve-{runtime_id}-{version}',
         source_commit=commit, source_tree=tree, template=template, identities=identities, profiles=selected,
         bundle=e.asset_record(archive, inventory), source_asset=e.asset_record(source_asset, source_inventory),

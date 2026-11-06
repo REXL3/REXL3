@@ -51,6 +51,10 @@ DeepSeek-V4.1-Flash-1017.
   `<model>` for `tp1`, `<model>-tp2` for `tp2` — packaged, sealed and promoted separately, so a
   `tp1` release never waits on its `tp2` sibling. Each unit seals its own qualification receipts on
   its own runtime id and topology; a receipt is never reused across runtime ids or topologies.
+  While a source tree still packages both profiles in one `profile.json`, the sealed approval names the
+  profiles it qualified (a non-empty subset of the packaged profiles that includes the default profile);
+  a packaged profile without a receipt in the approval is not approved, is not judged by the model-branch
+  check, and is not part of the release.
 
 ## The group freeze on dev
 

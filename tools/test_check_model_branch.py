@@ -338,6 +338,18 @@ class VisionExceptionContractTest(unittest.TestCase):
         self.assertEqual(c.capability_problems(vision_off_profile('single'), None, models=LOCK), [c.VISION_OFF_PROBLEM])
         self.assertEqual(c.resolve_vision_off(['other'], vision_off_profile('single'), None), ['other'])
 
+    def test_a_packaged_profile_the_approval_does_not_name_is_not_judged(self):
+        # tp1 approved alone (D38/D53): the unapproved tp2 choice needs no owner exception and its flags are not judged.
+        profile = vision_off_profile('single', 'tp2')
+        approval = {'profiles': {'single': {}}}
+        view = c.approved_view(profile, approval)
+        self.assertEqual(list(view['profiles']), ['single'])
+        problems = c.resolve_vision_off(c.capability_problems(view, None, models=LOCK), view, {'single': OWNER_EXCEPTION})
+        self.assertEqual([p for p in problems if p.startswith('vision is off')], [])
+        # Without an approval (or one naming nothing) every packaged choice is still judged.
+        for none in (None, {}, {'profiles': {}}):
+            self.assertIs(c.approved_view(profile, none), profile)
+
     def test_a_valid_owner_exception_on_every_profile_is_accepted(self):
         self.assertEqual(self.vision_problems({'single': OWNER_EXCEPTION}), [])
         self.assertEqual(self.vision_problems({'single': OWNER_EXCEPTION, 'tp2': dict(OWNER_EXCEPTION,

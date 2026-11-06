@@ -259,8 +259,8 @@ class SyntheticSeal:
     def seal(self, **changes):
         return a.build_approval(**(self.kwargs | changes))
 
-    def published_fixture(self):
-        doc = self.seal()
+    def published_fixture(self, **changes):
+        doc = self.seal(**changes)
         e.write_evidence_archive(self.assets, doc['evidence_asset']['members'], self.assets / 'evidence.tar.gz')
         path = write(self.assets, 'approval.json', encoded(doc))
         registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {'synthetic-demo/v1': {
@@ -630,6 +630,35 @@ class PerProfilePackTest(unittest.TestCase):
         self.assertEqual((identities['alt']['runtime_id'], identities['alt']['pack']), ('synthetic-alt', 'alt'))
         self.assertEqual(approval['runtime_id'], 'synthetic-demo')
         self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=fixture.approved)[0], approval)
+
+    def test_an_approval_may_name_a_subset_of_the_packaged_profiles(self):
+        # tp1 and tp2 are independent runtime units (D38/D53): a receipt for the default profile alone seals and verifies.
+        fixture = self.fixture()
+        path, approval, registry = fixture.published_fixture(receipts=[fixture.receipt_path])
+        self.assertEqual(set(approval['profiles']), {'single'})
+        self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=fixture.approved)[0], approval)
+
+    def test_an_approval_without_the_default_profile_does_not_seal(self):
+        fixture = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'default profile requires qualification'):
+            fixture.seal(receipts=[fixture.alt_receipt_path])
+
+    def test_the_verifier_refuses_a_profile_set_outside_the_packaged_set_or_without_the_default(self):
+        # Re-derive the evidence inventory so the profile-set rule itself is what refuses.
+        for label, edit, message in (
+                ('unpackaged', lambda doc: doc['profiles'].update(ghost=copy.deepcopy(doc['profiles']['single'])),
+                 'receipt profile set mismatch'),
+                ('no default', lambda doc: doc['profiles'].pop('single'), 'default profile is not approved')):
+            with self.subTest(label):
+                fixture = self.fixture(label.replace(' ', '-'))
+                path, approval, registry = fixture.published_fixture()
+                edit(approval)
+                approval['evidence_asset'] = e.evidence_asset(approval, fixture.assets)
+                (fixture.assets / 'evidence.tar.gz').unlink()
+                e.write_evidence_archive(fixture.assets, approval['evidence_asset']['members'], fixture.assets / 'evidence.tar.gz')
+                self.rebind(fixture, path, approval, registry)
+                with self.assertRaisesRegex(ValueError, message):
+                    e.verify_assets(path, registry=registry, approved_templates=fixture.approved)
 
     def test_the_prod_family_model_registry_key_verifies_a_per_profile_approval(self):
         fixture = self.fixture()

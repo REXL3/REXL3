@@ -1,0 +1,119 @@
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.1 bash -s   # node N1: check, rank 0
+echo "hostname=$(hostname)"
+echo "kernel=$(uname -r)"
+echo "driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+echo "mem_available_kib=$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
+bin=/srv/rexl3/bin/rexl3-serve
+if [ -x "$bin" ]; then echo binary=ok; echo "binary_sha256=$(sha256sum "$bin" | cut -d' ' -f1)"; echo "binary_bytes=$(stat -L -c %s "$bin")"; else echo binary=missing; fi
+pack=/srv/models/nemotron-super-exl3
+if [ -d "$pack" ]; then
+  echo pack=ok
+  echo "pack_bytes=$(stat -L -c %s "$pack"/*.safetensors 2>/dev/null | awk '{s+=$1} END{print s+0}')"
+  echo "pack_identity=$(cat "$pack/config.json" "$pack"/*.safetensors.index.json 2>/dev/null | sha256sum | cut -d' ' -f1)"
+else echo pack=missing; fi
+envf=/srv/rexl3/nccl/nccl.env
+if [ -f "$envf" ]; then echo envfile=ok; echo "envfile_sha256=$(sha256sum "$envf" | cut -d' ' -f1)"; else echo envfile=missing; fi
+if [ -f "$envf" ]; then
+  bash <<'REXL3_ENV'
+for v in $(compgen -e | grep -E '^(REXL3_|NCCL_)'); do unset "$v"; done
+. /srv/rexl3/nccl/nccl.env >/dev/null 2>&1
+export NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1
+export NCCL_MAX_NCHANNELS=4
+export NCCL_SOCKET_IFNAME==enP7s7
+export REXL3_NCCL_LIB=/srv/rexl3/nccl/lib/libnccl.so.2
+env | grep -E '^(NCCL_|REXL3_|LD_LIBRARY_PATH=)' | sort | sed 's/^/resolved./'
+p=
+if [ -n "$REXL3_NCCL_LIB" ] && [ -e "$REXL3_NCCL_LIB" ]; then p=$REXL3_NCCL_LIB
+else for d in $(echo "$LD_LIBRARY_PATH" | tr ':' ' '); do if [ -e "$d/libnccl.so.2" ]; then p=$d/libnccl.so.2; break; fi; done
+  if [ -z "$p" ]; then p=$(/sbin/ldconfig -p 2>/dev/null | awk '$1 == "libnccl.so.2" {print $NF; exit}'); fi; fi
+if [ -n "$p" ]; then p=$(readlink -f "$p"); echo "nccl_lib=$p"; echo "nccl_lib_sha256=$(sha256sum "$p" | cut -d' ' -f1)"; fi
+REXL3_ENV
+fi
+env | grep -E '^(REXL3_|NCCL_)' | sed 's/^/ambient./'
+echo "gpu_apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"
+echo "serve_procs=$(ps -eo comm=,args= | awk '$1 == "rexl3-serve" && $0 !~ /--backend mock/ {n++} END {print n+0}')"
+lock=/tmp/rexl3-gpu.lock
+d=/tmp/rexl3-cluster-crs812-2node/g0
+ours=
+ours="$ours $(cat "$d/rank0.pid" "$d/rank0.wpid" 2>/dev/null | tr '\n' ' ')"
+if [ -e "$lock" ]; then
+  st=$( ( flock -n 8 && echo free || echo held ) 8<"$lock" )
+  echo "lock=$st"
+  if [ "$st" = held ]; then
+    real=$(readlink -f "$lock"); mine=0; holders=
+    for p in /proc/[0-9]*; do
+      ls -l "$p/fd" 2>/dev/null | awk -v r="$real" '$NF == r {f=1} END {exit !f}' || continue
+      n=${p#/proc/}
+      holders="$holders$n: $(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-100); "
+      case " $ours " in *" $n "*) mine=1;; esac
+    done
+    echo "lock_ours=$mine"; echo "lock_holders=$holders"
+  else echo lock_ours=0; fi
+else echo lock=free; echo lock_ours=0; fi
+d=/tmp/rexl3-cluster-crs812-2node/g0
+if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then echo state_dir=ok; else echo state_dir=unwritable; fi
+bin=/srv/rexl3/bin/rexl3-serve
+p=$(cat "$d/rank0.pid" 2>/dev/null)
+if [ -n "$p" ] && kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF -- "$bin"; then echo "rank_running=$p"; fi
+if ss -ltnH "( sport = :29600 )" 2>/dev/null | grep -q .; then echo port.29600=busy; else echo port.29600=free; fi
+if ss -ltnH "( sport = :8941 )" 2>/dev/null | grep -q .; then echo port.8941=busy; else echo port.8941=free; fi
+### end
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.4 bash -s   # node N4: check, rank 1
+echo "hostname=$(hostname)"
+echo "kernel=$(uname -r)"
+echo "driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+echo "mem_available_kib=$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
+bin=/srv/rexl3/bin/rexl3-serve
+if [ -x "$bin" ]; then echo binary=ok; echo "binary_sha256=$(sha256sum "$bin" | cut -d' ' -f1)"; echo "binary_bytes=$(stat -L -c %s "$bin")"; else echo binary=missing; fi
+pack=/srv/models/nemotron-super-exl3
+if [ -d "$pack" ]; then
+  echo pack=ok
+  echo "pack_bytes=$(stat -L -c %s "$pack"/*.safetensors 2>/dev/null | awk '{s+=$1} END{print s+0}')"
+  echo "pack_identity=$(cat "$pack/config.json" "$pack"/*.safetensors.index.json 2>/dev/null | sha256sum | cut -d' ' -f1)"
+else echo pack=missing; fi
+envf=/srv/rexl3/nccl/nccl.env
+if [ -f "$envf" ]; then echo envfile=ok; echo "envfile_sha256=$(sha256sum "$envf" | cut -d' ' -f1)"; else echo envfile=missing; fi
+if [ -f "$envf" ]; then
+  bash <<'REXL3_ENV'
+for v in $(compgen -e | grep -E '^(REXL3_|NCCL_)'); do unset "$v"; done
+. /srv/rexl3/nccl/nccl.env >/dev/null 2>&1
+export NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1
+export NCCL_MAX_NCHANNELS=4
+export NCCL_SOCKET_IFNAME==enP7s7
+export REXL3_NCCL_LIB=/srv/rexl3/nccl/lib/libnccl.so.2
+env | grep -E '^(NCCL_|REXL3_|LD_LIBRARY_PATH=)' | sort | sed 's/^/resolved./'
+p=
+if [ -n "$REXL3_NCCL_LIB" ] && [ -e "$REXL3_NCCL_LIB" ]; then p=$REXL3_NCCL_LIB
+else for d in $(echo "$LD_LIBRARY_PATH" | tr ':' ' '); do if [ -e "$d/libnccl.so.2" ]; then p=$d/libnccl.so.2; break; fi; done
+  if [ -z "$p" ]; then p=$(/sbin/ldconfig -p 2>/dev/null | awk '$1 == "libnccl.so.2" {print $NF; exit}'); fi; fi
+if [ -n "$p" ]; then p=$(readlink -f "$p"); echo "nccl_lib=$p"; echo "nccl_lib_sha256=$(sha256sum "$p" | cut -d' ' -f1)"; fi
+REXL3_ENV
+fi
+env | grep -E '^(REXL3_|NCCL_)' | sed 's/^/ambient./'
+echo "gpu_apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"
+echo "serve_procs=$(ps -eo comm=,args= | awk '$1 == "rexl3-serve" && $0 !~ /--backend mock/ {n++} END {print n+0}')"
+lock=/tmp/rexl3-gpu.lock
+d=/tmp/rexl3-cluster-crs812-2node/g0
+ours=
+ours="$ours $(cat "$d/rank1.pid" "$d/rank1.wpid" 2>/dev/null | tr '\n' ' ')"
+if [ -e "$lock" ]; then
+  st=$( ( flock -n 8 && echo free || echo held ) 8<"$lock" )
+  echo "lock=$st"
+  if [ "$st" = held ]; then
+    real=$(readlink -f "$lock"); mine=0; holders=
+    for p in /proc/[0-9]*; do
+      ls -l "$p/fd" 2>/dev/null | awk -v r="$real" '$NF == r {f=1} END {exit !f}' || continue
+      n=${p#/proc/}
+      holders="$holders$n: $(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-100); "
+      case " $ours " in *" $n "*) mine=1;; esac
+    done
+    echo "lock_ours=$mine"; echo "lock_holders=$holders"
+  else echo lock_ours=0; fi
+else echo lock=free; echo lock_ours=0; fi
+d=/tmp/rexl3-cluster-crs812-2node/g0
+if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then echo state_dir=ok; else echo state_dir=unwritable; fi
+bin=/srv/rexl3/bin/rexl3-serve
+p=$(cat "$d/rank1.pid" 2>/dev/null)
+if [ -n "$p" ] && kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF -- "$bin"; then echo "rank_running=$p"; fi
+if ping -c1 -W2 192.0.2.1 >/dev/null 2>&1; then echo ping.rank0=ok; else echo ping.rank0=fail; fi
+### end

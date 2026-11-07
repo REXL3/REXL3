@@ -1,0 +1,12 @@
+slot 0 key side first call 126ee54511ac4cda
+slot 0 pool plane (650 pools) 73510b2a70aabf72
+slot 1 key side first call b9a075a21d3f54ae
+slot 1 pool plane (1027 pools) 32e0c3a1c41ad0b0
+slot 2 key side first call 9efeb7cfacbcf8f5
+slot 2 pool plane (2250 pools) b505ad1fdf24d157
+R1 slot0 p2599 scores 5cb5df53a5984d21 selection 93a9b14ce2abefa9 meta 44815928f5eafa4c
+R1 slot2 p8999 scores db41d6aca6ef484f selection c2a23dfcb6c34a55 meta 44815928f5eafa4c
+R3 slot1 p2046 scores 9aaf83d996dddda5 selection 72f75dd59a31f311 meta bd864cd62442a01d
+R9 slot1 p4100 scores 05ec348a6b5d8b18 selection c76c8f1df03e01c9 meta d5c01f9e8ec9d67d
+mixed slots scores 8238b27fb92c9342 selection 5fc7abdec8149ddd meta c6ca14ecf2f2311f
+R128 slot2 scores 61c45c9763023a47 selection 6802d2e163de7661 meta 906a5b587acbdd25

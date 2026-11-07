@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "name": "glm-tp2-mtp",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. GLM-5.3-Flash 2.25bpw as a two-rank tensor-parallel group WITH NextN (MTP) speculation (lane L12, docs/GLM_TP.md section 9): N1 = rank 0, N4 = rank 1, each owning half of the routed experts (0..144 | 144..288) of every MoE layer AND of the NextN layer (one all-reduce per forward of that layer: each prefill chunk, each draft call's absorb, each further draft depth). Rank 0 runs the speculation runtime (--spec auto: its arbiter; the depth and the keyed-noise samplers travel in the draft call); rank 1 replays. Text only: --no-vision, --prefix-cache off, pinned --slots and --kv-tokens. tools/glm_tp_mtp_two_node.sh derives the --spec mtp (REXL3_MTP_DEPTH=3) and --spec none legs from this file. N2 and N3 are the gn100s: disabled by owner rule, listed so that a rank map naming them is refused.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "expected_hostname": "host-a"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "expected_hostname": "host-d"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ]
+  },
+  "pack": "/srv/models/r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+  "memory": {
+    "_comment": "the rank planner (tp_boot::tests::the_rank_planner_charges_the_nextn_share_and_the_drafters_cache, the pack's header, CPU): a rank's regions 48.13 GiB with the NextN layer (46.32 without: +1.81 GiB, its trunk replicated and half its experts), KV 13,056 B per token with the drafter's cache (11,968 without); these flags (4 slots, 32,768 KV tokens) need 62.6 GiB free and are granted 33,792 tokens at 108 GiB; the restricted draft head (about 0.23 GiB) comes out of the planner's headroom; the 20 GiB headroom rule holds",
+    "min_free_gib": 66
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--no-vision",
+      "--slots",
+      "4",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "32768",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "off",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-tp2-mtp-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 600,
+    "ready_timeout_s": 900,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N1",
+        "N4"
+      ],
+      "tp_port": 29614,
+      "http_port": 8955,
+      "http_host": "0.0.0.0"
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 2,
+    "window_s": 900
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "name": "glm-redsnow-tp2-mtp",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The RED-SNOW 4.91bpw GLM-5.3-Flash pack as a two-rank group WITH NextN (MTP) speculation (lane L12, docs/GLM_TP.md section 9; the text-only group is lane L9's cluster.glm-redsnow-tp2.json): N1 = rank 0, N4 = rank 1, each mapping and allocating only its share of the routed experts, the NextN layer's included (its layer 45 is uniform 4/4/4: one subbank of 144 experts a rank, 1.69 GiB). --spec auto on rank 0; tools/glm_tp_mtp_two_node.sh derives the --spec none (serial) leg. Its MTP head is quantized at 4 bits and its text side is fine-tuned: the gate is drafted == serial, acceptance is measured and recorded. N2 and N3 are the gn100s: disabled by owner rule.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "expected_hostname": "host-a"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "expected_hostname": "host-d"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ]
+  },
+  "pack": "/srv/models/vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+  "memory": {
+    "_comment": "the rank planner on the pack's header (CPU): a rank's regions 96.45 GiB (rank 0) / 96.42 GiB (rank 1) with the NextN layer (94.61 / 94.59 without: +1.83 GiB), KV 13,056 B per token with the drafter's cache; these flags (2 slots, 16,384 KV tokens) need 110.25 GiB free (108.4 without the layer); the restricted draft head (about 0.23 GiB) comes on top, out of the planner's headroom. About 13.5 GiB stay available on a 117 GiB node while the group runs: under the box's 20 GiB rule, stated here rather than hidden",
+    "min_free_gib": 111
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--no-vision",
+      "--slots",
+      "2",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "16384",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "off",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-redsnow-mtp-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 900,
+    "ready_timeout_s": 1800,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N1",
+        "N4"
+      ],
+      "tp_port": 29615,
+      "http_port": 8956,
+      "http_host": "0.0.0.0"
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 0,
+    "window_s": 900
+  }
+}

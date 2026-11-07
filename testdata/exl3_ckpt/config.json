@@ -1,0 +1,1 @@
+{"quantization_config": {"quant_method": "exl3", "version": "test", "bits": 4.0, "head_bits": 6, "codebook": "mul1"}}

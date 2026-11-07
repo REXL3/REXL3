@@ -1,0 +1,178 @@
+{
+ "meta": {
+  "vocab_size": 154856,
+  "added_tokens": {
+   "<|endoftext|>": {"id": 154820, "special": true},
+   "[MASK]": {"id": 154821, "special": true},
+   "[gMASK]": {"id": 154822, "special": true},
+   "[sMASK]": {"id": 154823, "special": true},
+   "<sop>": {"id": 154824, "special": true},
+   "<eop>": {"id": 154825, "special": true},
+   "<|system|>": {"id": 154826, "special": true},
+   "<|user|>": {"id": 154827, "special": true},
+   "<|assistant|>": {"id": 154828, "special": true},
+   "<|observation|>": {"id": 154829, "special": true},
+   "<|begin_of_image|>": {"id": 154830, "special": true},
+   "<|end_of_image|>": {"id": 154831, "special": true},
+   "<|begin_of_video|>": {"id": 154832, "special": true},
+   "<|end_of_video|>": {"id": 154833, "special": true},
+   "<|begin_of_audio|>": {"id": 154834, "special": true},
+   "<|end_of_audio|>": {"id": 154835, "special": true},
+   "<|begin_of_transcription|>": {"id": 154836, "special": true},
+   "<|end_of_transcription|>": {"id": 154837, "special": true},
+   "<|code_prefix|>": {"id": 154838, "special": false},
+   "<|code_middle|>": {"id": 154839, "special": false},
+   "<|code_suffix|>": {"id": 154840, "special": false},
+   "<think>": {"id": 154841, "special": false},
+   "</think>": {"id": 154842, "special": false},
+   "<tool_call>": {"id": 154843, "special": false},
+   "</tool_call>": {"id": 154844, "special": false},
+   "<tool_response>": {"id": 154845, "special": false},
+   "</tool_response>": {"id": 154846, "special": false},
+   "<arg_key>": {"id": 154847, "special": false},
+   "</arg_key>": {"id": 154848, "special": false},
+   "<arg_value>": {"id": 154849, "special": false},
+   "</arg_value>": {"id": 154850, "special": false},
+   "/nothink": {"id": 154851, "special": false},
+   "<|begin_of_box|>": {"id": 154852, "special": false},
+   "<|end_of_box|>": {"id": 154853, "special": false},
+   "<|image|>": {"id": 154854, "special": false},
+   "<|video|>": {"id": 154855, "special": false}
+  },
+  "eos": [154820, 154827, 154829]
+ },
+ "cases": [
+  {
+   "text": "Hello, world!",
+   "ids": [9703, 11, 1879, 0],
+   "decoded": "Hello, world!",
+   "decoded_skip": "Hello, world!"
+  },
+  {
+   "text": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>",
+   "ids": [154822, 154824, 154826, 25062, 287, 29905, 371, 25, 7487, 154827, 6023, 154828, 154841],
+   "decoded": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>",
+   "decoded_skip": "Reasoning Effort: Maxhi<think>"
+  },
+  {
+   "text": "<|user|>x<|assistant|><think></think>y<|observation|><tool_response>z</tool_response><|endoftext|>",
+   "ids": [154827, 87, 154828, 154841, 154842, 88, 154829, 154845, 89, 154846, 154820],
+   "decoded": "<|user|>x<|assistant|><think></think>y<|observation|><tool_response>z</tool_response><|endoftext|>",
+   "decoded_skip": "x<think></think>y<tool_response>z</tool_response>"
+  },
+  {
+   "text": "café ☃ 😀 中文测试 مرحبا",
+   "ids": [924, 58451, 25048, 225, 89570, 117604, 100838, 147686, 132131],
+   "decoded": "café ☃ 😀 中文测试 مرحبا",
+   "decoded_skip": "café ☃ 😀 中文测试 مرحبا"
+  },
+  {
+   "text": "def f(x):\n    return x**2  # square\n\n\tindented\ttabs",
+   "ids": [750, 282, 2075, 982, 262, 470, 856, 334, 17, 220, 671, 9331, 271, 197, 484, 15852, 3244, 3435],
+   "decoded": "def f(x):\n    return x**2  # square\n\n\tindented\ttabs",
+   "decoded_skip": "def f(x):\n    return x**2  # square\n\n\tindented\ttabs"
+  },
+  {
+   "text": "    leading spaces and trailing spaces    ",
+   "ids": [262, 6388, 12615, 323, 27654, 12615, 257],
+   "decoded": "    leading spaces and trailing spaces    ",
+   "decoded_skip": "    leading spaces and trailing spaces    "
+  },
+  {
+   "text": "1234567890 3.14159 1e-5 0xDEADBEEF 1000000",
+   "ids": [108714, 100461, 21, 100928, 24, 15, 220, 18, 13, 122804, 102573, 220, 16, 68, 12, 20, 220, 15, 78344, 93580, 7099, 37, 220, 99457, 99752, 15],
+   "decoded": "1234567890 3.14159 1e-5 0xDEADBEEF 1000000",
+   "decoded_skip": "1234567890 3.14159 1e-5 0xDEADBEEF 1000000"
+  },
+  {
+   "text": "line1\r\nline2\n\n\nline5",
+   "ids": [1056, 16, 319, 1056, 17, 1406, 1056, 20],
+   "decoded": "line1\r\nline2\n\n\nline5",
+   "decoded_skip": "line1\r\nline2\n\n\nline5"
+  },
+  {
+   "text": "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+   "ids": [154843, 455, 68852, 154847, 8923, 154848, 154849, 59190, 154850, 154847, 13769, 154848, 154849, 18, 154850, 154844],
+   "decoded": "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+   "decoded_skip": "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>"
+  },
+  {
+   "text": "<think>reasoning</think>answer",
+   "ids": [154841, 19857, 287, 154842, 9214],
+   "decoded": "<think>reasoning</think>answer",
+   "decoded_skip": "<think>reasoning</think>answer"
+  },
+  {
+   "text": "<tool_call>f</tool_call><tool_call>g<arg_key>a</arg_key><arg_value>[1, \"é\"]</arg_value></tool_call>",
+   "ids": [154843, 69, 154844, 154843, 70, 154847, 64, 154848, 154849, 58, 16, 11, 330, 963, 1341, 154850, 154844],
+   "decoded": "<tool_call>f</tool_call><tool_call>g<arg_key>a</arg_key><arg_value>[1, \"é\"]</arg_value></tool_call>",
+   "decoded_skip": "<tool_call>f</tool_call><tool_call>g<arg_key>a</arg_key><arg_value>[1, \"é\"]</arg_value></tool_call>"
+  },
+  {
+   "text": "<tool_response>{\"t\": 18}</tool_response>",
+   "ids": [154845, 4913, 83, 788, 220, 99243, 92, 154846],
+   "decoded": "<tool_response>{\"t\": 18}</tool_response>",
+   "decoded_skip": "<tool_response>{\"t\": 18}</tool_response>"
+  },
+  {
+   "text": "<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>",
+   "ids": [154830, 154854, 154854, 154854, 154854, 154854, 154854, 154854, 154831],
+   "decoded": "<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>",
+   "decoded_skip": "<|image|><|image|><|image|><|image|><|image|><|image|><|image|>"
+  },
+  {
+   "text": "look: <|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|> and <|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>?",
+   "ids": [7201, 25, 220, 154830, 154854, 154854, 154854, 154854, 154854, 154854, 154854, 154831, 323, 220, 154830, 154854, 154854, 154854, 154854, 154854, 154854, 154854, 154831, 30],
+   "decoded": "look: <|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|> and <|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>?",
+   "decoded_skip": "look: <|image|><|image|><|image|><|image|><|image|><|image|><|image|> and <|image|><|image|><|image|><|image|><|image|><|image|><|image|>?"
+  },
+  {
+   "text": "<|begin_of_video|><|video|><|end_of_video|>",
+   "ids": [154832, 154855, 154833],
+   "decoded": "<|begin_of_video|><|video|><|end_of_video|>",
+   "decoded_skip": "<|video|>"
+  },
+  {
+   "text": "<|begin_of_image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|end_of_image|>0.5 seconds",
+   "ids": [154830, 154854, 154831, 15, 13, 15, 6486, 154830, 154854, 154831, 15, 13, 20, 6486],
+   "decoded": "<|begin_of_image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|end_of_image|>0.5 seconds",
+   "decoded_skip": "<|image|>0.0 seconds<|image|>0.5 seconds"
+  },
+  {
+   "text": "/nothink <|begin_of_box|>x<|end_of_box|>",
+   "ids": [154851, 220, 154852, 87, 154853],
+   "decoded": "/nothink <|begin_of_box|>x<|end_of_box|>",
+   "decoded_skip": "/nothink <|begin_of_box|>x<|end_of_box|>"
+  },
+  {
+   "text": "",
+   "ids": [],
+   "decoded": "",
+   "decoded_skip": ""
+  },
+  {
+   "text": " ",
+   "ids": [220],
+   "decoded": " ",
+   "decoded_skip": " "
+  },
+  {
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "ids": [68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926, 68926],
+   "decoded": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "decoded_skip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. ",
+   "ids": [785, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 576, 3974, 13867, 38627, 34041, 916, 279, 15666, 5562, 13, 220],
+   "decoded": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. ",
+   "decoded_skip": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. "
+  },
+  {
+   "text": "‮ rtl ​ zero width ﻿ bom",
+   "ids": [378, 106, 60632, 29634, 7168, 2374, 75177, 18138],
+   "decoded": "‮ rtl ​ zero width ﻿ bom",
+   "decoded_skip": "‮ rtl ​ zero width ﻿ bom"
+  }
+ ]
+}

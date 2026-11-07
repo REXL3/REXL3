@@ -1,0 +1,54 @@
+MoE kernel measurements, GLM-5.3-Flash EXL3 2.25bpw pack, one GB10 (anonymized host-d, shared with other agents' builds), kernels of crates/cuda/csrc/moe_*.cu.
+Privacy note: the host label is anonymized; measurements below are unchanged. Original file SHA-256: f220857df693b5d8a52c7b3654e27f93f0b2cb78755f9063d9d59f43f74f3314.
+Reproduce (idle GPU, `~/rexl3-ab/agents-tools/nrun NAME --gpu --`, pack and capture on the box):
+  EXL3_INT8_GEMV=0 python tools/capture_moe_inputs.py --out ~/moe-capture --texts docs/GLM53.md,crates/exl3/src/lib.rs   # the fork, whole model
+  cargo test --release -p gb-cuda --test moe -- --test-threads=1 --nocapture --ignored bench_t_verify bench_expert_throughput bench_back_to_back bench_stages
+The device's measured streaming-read ceiling that day was 236.5-238.1 GB/s (the task's reference roofline is 240). Run-to-run spread of one
+cell is about +-3% (the box's CPU is busy with other builds, which stretches launch gaps), so read the tables as +-3%.
+
+== T_verify(R): router + routed experts + combine of all 42 MoE layers for a verify window of R consecutive decode rows ==
+Real routing: the post-norm hidden states of the whole model (ExLlamaV3 fork) on 8 prompts x 160 greedily decoded tokens (1,280 decode rows,
+routed by REXL3's own router with each layer's real gate and bias); windows are consecutive decode rows of one sequence, 24 per R. Each
+window runs on the weights of layer 6 (the 2-bit layers: 30) or layer 3 (the 3-bit layers: 12) with L2 flushed first, timed with events
+between the kernels (so every launch gap of this loaded box is in it: a conservative figure). Adjacent decode rows share 27.9% of their top-8
+experts (uniform routing: 2.8%). ms below are for the whole 42-layer MoE part of a step; shared expert and non-MoE layers are excluded.
+Two runs of the final code (the second after the host centred bias was made bit-equal to the fork's, which moved no U to one decimal):
+  run 1 ms: 13.98, 21.34, 28.34, 35.45, 42.20, 48.53, 54.39, 59.77, 64.94
+  run 2 ms: 14.21, 22.12, 29.99, 36.28, 43.74, 50.58, 55.21, 61.76, 66.55      (the box was busier: spread +-3-6%)
+CostModel feed (rows, ms), mean of the two runs:  (1, 14.10), (2, 21.73), (3, 29.17), (4, 35.87), (5, 42.97), (6, 49.56), (7, 54.80), (8, 60.77), (9, 65.75)
+The table below is run 1.
+
+R  distinct experts per window U (2-bit layers / 3-bit layers / uniform routing)   per layer ms 2-bit (experts only) / 3-bit (experts only)   42 layers ms (expert GEMVs only)
+1  8.0 / 8.0 / 8.0       0.290 (0.228) / 0.441 (0.373)    13.98 (11.31)
+2  13.2 / 13.6 / 15.8    0.440 (0.374) / 0.678 (0.612)    21.34 (18.56)
+3  18.0 / 18.8 / 23.3    0.580 (0.509) / 0.913 (0.842)    28.34 (25.39)
+4  22.9 / 24.0 / 30.7    0.720 (0.649) / 1.155 (1.082)    35.45 (32.43)
+5  27.4 / 28.9 / 37.8    0.857 (0.782) / 1.373 (1.296)    42.20 (39.00)
+6  31.7 / 33.6 / 44.8    0.983 (0.904) / 1.586 (1.503)    48.53 (45.15)
+7  35.4 / 37.7 / 51.5    1.102 (1.016) / 1.777 (1.693)    54.39 (50.79)
+8  38.8 / 42.2 / 58.1    1.200 (1.113) / 1.981 (1.892)    59.77 (56.09)
+9  42.1 / 45.8 / 64.5    1.307 (1.215) / 2.144 (2.053)    64.94 (61.10)
+Per expert touched a layer costs about 29 us (2-bit, 6 MiB: 205 GB/s) and 45 us (3-bit, 9.4 MB: 210 GB/s) on top of a fixed 44 / 58 us
+(router, rotation, epilogues, combine, launch gaps). The 3-bit layers are 12 of the 42 and carry 38% of the routed-expert time at 1 row.
+
+== Expert GEMV throughput, uniformly random distinct picks (the worst case for the expert union), L2 flushed by a read sweep, event timing ==
+GB/s = bytes of the distinct experts' trellises and scales / (gate/up + down GEMV time); % of the 237.7 GB/s measured read ceiling
+         R=1            R=2            R=4            R=8            R=16           R=32           R=64           R=128
+2-bit    198 (83.3%)    204 (85.9%)    210 (88.5%)    221 (92.9%)    223 (93.8%)    220 (92.4%)    214 (90.1%)    207 (87.0%)    layer 6,  U = 8 / 15.8 / 30.4 / 58.7 / 104 / 174 / 238 / 281
+3-bit    192 (80.8%)    198 (83.5%)    209 (87.8%)    210 (88.2%)    214 (89.9%)    215 (90.4%)    213 (89.5%)    210 (88.5%)    layer 3
+4-bit    219 (92.3%)    221 (92.8%)    230 (96.8%)    231 (97.2%)    231 (97.0%)    233 (97.8%)    231 (97.1%)    230 (96.7%)    layer 45 (MTP experts)
+(an earlier run of the same code on the same plan gave 203 / 185 / 219 at 1 row: the 1-row cells move by +-4% from run to run)
+
+== The whole expert pipeline back to back (router excluded; 24 calls with different random picks queued without synchronization,
+== every small kernel and launch gap included), GB/s of distinct expert bytes; % of the 237.4 GB/s ceiling ==
+         R=1            R=2            R=4            R=8            R=16
+2-bit    206 (86.7%)    209 (87.8%)    224 (94.5%)    226 (95.2%)    223 (94.0%)    246 / 481 / 867 / 1604 / 2905 us per call
+3-bit    198 (83.4%)    198 (83.2%)    208 (87.5%)    214 (90.3%)    215 (90.6%)    383 / 759 / 1397 / 2577 / 4615 us per call
+4-bit    218 (91.6%)    226 (95.0%)    230 (96.8%)    232 (97.6%)    232 (97.8%)    464 / 891 / 1685 / 3158 / 5688 us per call
+The gap to the ceiling at 1-2 rows is per call, not per byte: a 3-bit call at 1 row moves 75.8 MB (318 us at the ceiling) in 383 us; four small kernels
+(group, rotate, epilogue, combine: about 23 us with their gaps) and the ramp and tail of the two GEMVs (one block of 48 KiB at 1.65 GB/s is about 29 us)
+are the 65 us. ncu is not available on this box (ERR_NVGPUCTRPERM), so this is arithmetic on event timings, not a counter profile.
+
+== Stage costs of one 2-bit layer at R=1 (us, L2 cold; each stage includes its launch gap) ==
+router logits 35 (14 in isolation), router select 11.5, group 4.4, rot_in 6.6, gate/up GEMV 160.6, gate/up epilogue 6.3, down GEMV 82.5, down+combine 6.1; total 313
+The router GEMV alone, best blocking per row count (all blockings give the same bits): R=1 14 us, 4 15, 8 16, 16 20, 32 35, 64 65, 128 118.

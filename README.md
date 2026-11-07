@@ -11,15 +11,19 @@ This repository is the **production** repository. It holds:
   approval and promotion tooling and never edited by hand;
 - the policy that decides which trees production accepts (`runtimes/templates/APPROVED.json` and
   `runtimes/templates/APPROVALS.json`);
-- the stdlib-Python verifier and promotion tools in `tools/`.
+- the stdlib-Python verifier and promotion tools in `tools/`;
+- the AGPL-3.0 corresponding source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`,
+  `Cargo.lock`, `rust-toolchain.toml`, `SOURCE_BUILD.md`, `SOURCE_IDENTITY.json`), a snapshot of the
+  development repository at the release's engine commit.
 
 Engine development, model validation and sealing happen in the development repository,
-`REXL3/REXL3-dev`. There is no engine source here. Rules for contributing are in
+`REXL3/REXL3-dev`; the engine source here is a snapshot of it, and `SOURCE_BUILD.md` says how to build it.
+Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: no pack is released yet.** The first release (v0.1.0) is being prepared; none of the
-> first-release models below is published. Everything in this README describes how the release will
-> work and how recipes are structured, not something that is already available.
+> **Status: v0.1.0 is released.** The five models below are published as assets of the
+> [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
+> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`.
 
 ## First release (v0.1.0) models
 
@@ -344,5 +348,6 @@ and that repository's own licence governs the weights. Third-party notices are i
 
 Binaries in a release archive are built from the source commit recorded in the recipe's approval
 record (`approval.json` in the sealed tree, `<runtime-id>-v<N>-approval.json` on the release), in the
-dev repository. Releases attach the engine corresponding source as a release
-asset; anyone who receives a binary and needs its Corresponding Source can also ask the maintainers.
+dev repository. The same Corresponding Source is in this repository (`SOURCE_BUILD.md`,
+`SOURCE_IDENTITY.json`) and is attached to each release as an asset; anyone who receives a binary and
+needs its Corresponding Source can also ask the maintainers.

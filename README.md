@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/rexl3-logo.jpg" alt="REXL3 logo" width="240">
+</p>
+
 # REXL3
 
 REXL3 is an inference engine for **NVIDIA GB10** systems (DGX Spark class, `sm_121`) that serves

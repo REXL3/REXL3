@@ -6,9 +6,17 @@ body:
     attributes:
       value: |
         Use this template to share a technical finding, a concrete bug fix, or a performance/runtime improvement — whether it targets a **single model family** or the **REXL3 engine as a whole**.
+        Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`) and read any related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`) — if an open issue already tracks the same bug or bottleneck, post your root-cause analysis or patch as a comment on that issue instead of opening a duplicate.
         This repository is public: anyone can read issues, and only invited testers and the maintainers can open or comment on them.
         Share a fix as a patch or diff in this issue; testers do not open pull requests.
         **Do not paste private prompts, credentials, tokens, or SSH keys.**
+  - type: input
+    id: existing-issues
+    attributes:
+      label: Open issues and KNOWN_ISSUES.md checked
+      description: "List the search query you ran (for example `gh issue list -R REXL3/REXL3 --state all --search ...`) and any related issue numbers (#N) you reviewed before opening this ticket."
+    validations:
+      required: true
   - type: dropdown
     id: scope
     attributes:
@@ -83,6 +91,8 @@ body:
     attributes:
       label: Before sending
       options:
+        - label: I searched existing open and closed issues (and KNOWN_ISSUES.md) and confirmed no open issue already covers this finding or fix.
+          required: true
         - label: This submission contains no credentials, tokens, private prompts, or proprietary data.
           required: true
         - label: This is not a security vulnerability (security issues follow SECURITY.md).

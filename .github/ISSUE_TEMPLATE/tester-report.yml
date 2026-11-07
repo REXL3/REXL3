@@ -5,10 +5,19 @@ body:
   - type: markdown
     attributes:
       value: |
-        One report per problem. This repository is public: anyone can read issues, and only invited testers and the maintainers
+        One report per problem. Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+        and check `KNOWN_ISSUES.md` — if an open issue already covers this symptom, add your findings, diagnostics, or fix as a comment on that issue instead of opening a duplicate.
+        This repository is public: anyone can read issues, and only invited testers and the maintainers
         can open or comment on them. **Do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
         A security problem goes through [SECURITY.md](https://github.com/REXL3/REXL3/blob/main/SECURITY.md), not here. The command list and
         the error-token table are in the [user guide](https://github.com/REXL3/REXL3/blob/main/docs/USER_GUIDE.md).
+  - type: input
+    id: existing-issues
+    attributes:
+      label: Open issues and KNOWN_ISSUES.md checked
+      description: "List the search query you ran (for example `gh issue list -R REXL3/REXL3 --state all --search ...`) and any related issue numbers (#N) you reviewed to confirm this is not a duplicate."
+    validations:
+      required: true
   - type: dropdown
     id: scope
     attributes:
@@ -119,6 +128,8 @@ body:
     attributes:
       label: Before sending
       options:
+        - label: I searched existing open and closed issues (and KNOWN_ISSUES.md) and confirmed no open issue already tracks this problem.
+          required: true
         - label: I read the diagnostics output and it contains nothing I do not want shared.
           required: true
         - label: This is not a security problem.

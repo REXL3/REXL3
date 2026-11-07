@@ -467,6 +467,9 @@ is attached to the release as a source archive, and you can ask the maintainers 
 
 ## 11. Reporting a problem or feedback
 
+Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+and check the recipe's `KNOWN_ISSUES.md`; if an open issue already tracks the same problem or bottleneck,
+add your reproduction, diagnostics, or proposed fix as a comment on that issue rather than opening a duplicate.
 Open **one issue per problem** in this repository: Issues, New issue, **Tester report**. The form asks
 for the facts below. Issues are public: anyone can read them, and only invited testers and the
 maintainers can open or comment on them, so write nothing in one that you want kept private. For a quick question, or to compare notes with other

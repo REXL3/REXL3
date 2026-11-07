@@ -80,8 +80,13 @@ Every release ships the exact corresponding engine source archive (`rexl3-engine
 
 When reporting an issue or submitting a root-cause finding, bug fix, or optimization on `REXL3/REXL3`, use the structured issue templates under `.github/ISSUE_TEMPLATE/`. Testers report through issues only: put a fix in the issue as a patch or diff, and do not open a pull request. Issues are public, so anyone can read them; only invited testers and the maintainers can open or comment on them.
 
-1. **Bug or issue report (`.github/ISSUE_TEMPLATE/tester-report.yml`):** for failures, crashes, wrong outputs, or regressions.
-2. **Finding, fix, or improvement (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`):** for root-cause analyses, patches/diffs, kernel/runtime speedups, or recipe improvements.
+**Mandatory duplicate & open-issue check before opening any ticket:**
+1. Search existing open and closed issues first (`gh issue list -R REXL3/REXL3 --state all --search "<model or symptom>"`) and check `docs/packs/<model>.md` plus `runtimes/<family>/<model>/v<N>/KNOWN_ISSUES.md`.
+2. Read any matching or related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`).
+3. **If an open issue already tracks the same bug, symptom, or bottleneck:** do **not** open a duplicate issue. Instead, comment on the existing open issue (`gh issue comment <N> -R REXL3/REXL3`) with your reproduction, `./launch.sh diagnostics` output, root-cause finding, or proposed `Why / What / How to Fix & Verify` patch.
+4. **If no open issue covers it:** open a new issue using one of the two templates below and list the search terms and issue numbers (`#N`) you reviewed in the template's **Open issues and known-issues checked** field:
+   - **Bug or issue report (`.github/ISSUE_TEMPLATE/tester-report.yml`):** for failures, crashes, wrong outputs, or regressions.
+   - **Finding, fix, or improvement (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`):** for root-cause analyses, patches/diffs, kernel/runtime speedups, or recipe improvements.
 
 Every submission must clearly state:
 - **Scope:** whether the finding/fix is specific to **one model family** (`qwen3.8`, `glm-5.3`, `nemotron-3.5`, `deepseek-v4.1`, `ling-3.1`) or affects the **engine as a whole** (`Engine-wide`).

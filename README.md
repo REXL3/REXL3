@@ -331,6 +331,9 @@ single download step; actions are pinned by full commit SHA.
 
 ## Reporting a problem
 
+Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+and check the model's `KNOWN_ISSUES.md`; if an open issue already covers the same symptom, add your findings,
+diagnostics, or proposed patch as a comment on that issue instead of opening a duplicate.
 Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
 tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
 line, the exact command with its exit code and error token, the request and response for a bad answer,

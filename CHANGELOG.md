@@ -2,119 +2,43 @@
 
 ## [v0.1.0] - 2026-11-06
 
-- DeepSeek-V4.1-Flash-1017 (EXL3 1.55 bits per weight) on one GB10: 262,144-token window, one slot, speculative decoding and prefix cache on, image input off (`dsv41-single-262k`, port 8940). The two-node profile is not part of this release. Added by #75.
+First production release of **REXL3**: an OpenAI-compatible Rust + CUDA 13 (`sm_121`) inference engine (`rexl3-serve` and two-node cluster coordinator `rexl3-cluster`) for NVIDIA GB10 (`aarch64`) hosts, shipping five hash-locked EXL3 runtime bundles qualified at their full context windows (`262,144` or `1,048,576` tokens) with lossless speculative decoding and prefix caching enabled by default.
 
+> SAGE is our own mixed-precision quantization method for EXL3. The method is not published.
 
-- GLM-5.3-Flash (EXL3 2.25 bits per weight) with speculation from the pack's NextN layer, prefix cache and image input on, in two profiles of one recipe: `glm53-flash-single` on one GB10 (262,144-token window, one slot) and `glm53-flash-tp2-1m` on two GB10 nodes with tensor parallelism (1,048,576-token window), both on port 8950. Added by #69.
+### Shipped models and measured GB10 performance
 
-- Nemotron-3.5-Super-VL (EXL3 3.85 bits per weight) on one GB10: 1,048,576-token window, 16 slots, speculative decoding with the model's MTP head, prefix cache and image input on (`nemotron35-super-vl-single-1m`, port 9100). Added by #71.
+- **Qwen3.8-27B (`qwen3.8/qwen3.8-27b` `v3`, runtime `qwen38-27b-dflash2-exl3-4.00`, port `8889`, PR #66):**
+  - Pack: `r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw` (`15.4 GiB`) + DFlash2 draft `r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw` (`1.2 GiB`).
+  - Profile `qwen38-single-262k`: 1 GB10, `262,144`-token window, 6 slots, `--spec auto` (DFlash2), 40,960 MiB prefix cache, image input on, default reasoning effort `low`.
+  - Measured on GB10: **62.5 tok/s** decode; **808.6 / 621.9 tok/s** prefill (50% / 100%); Q200: GSM8K `79/80` (`98.75%`), HumanEval `39/40` (`97.5%`), IFEval `35/40` (`87.5%`), hard reasoning `20/20` (`100%`), BFCL `15/20` (`75.0%`).
 
-- Qwen3.8-27B (EXL3 4.00 bits per weight with a DFlash2 draft) on one GB10: 262,144-token window, six slots, speculative decoding with the DFlash2 draft, prefix cache and image input on, thinking at `low` effort by default (`qwen38-single-262k`, port 8889). Added by #66.
+- **Qwen3.8-Flash-Next (`qwen3.8/qwen3.8-flash-next` `v2`, runtime `qwen38-flash-next-exl3-3.05`, port `8899`, PR #73):**
+  - Pack: `turboderp/Qwen3.8-Flash-Next-exl3` (`3.05 bpw`, `79.3 GiB`).
+  - Profile `qwen38-flash-next-single-262k`: 1 GB10, `262,144`-token window, 2 slots, `--spec mtp`, 22,528 MiB prefix cache, vision off (owner exception through `2027-01-31`).
+  - Measured on GB10: **70.3 tok/s** decode; **1,047 / 1,006 tok/s** prefill (50% / 100%); Q200: GSM8K `78/80` (`97.5%`), HumanEval `40/40` (`100%`), IFEval `38/40` (`95.0%`), hard reasoning `20/20` (`100%`), BFCL `9/20` (`45.0%`).
 
-- Qwen3.8-Flash-Next (EXL3 3.05 bits per weight) on one GB10: 262,144-token window, two slots, speculative decoding with the model's MTP head (`--spec mtp`) and prefix cache on (`qwen38-flash-next-single-262k`, port 8899). Added by #73.
+- **GLM-5.3-Flash (`glm-5.3/glm-5.3-flash` `v1`, runtime `glm53-flash-2.25bpw-sm121`, port `8950`, PR #69):**
+  - Pack: `r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121` (`2.25 bpw`, `91.8 GiB`).
+  - Profile `glm53-flash-single` (default, 1 GB10, `262,144`-token window, 1 slot, `--spec auto` NextN, 3,584 MiB prefix cache, image input on): **39.7 tok/s** decode; **971.4 / 976.3 tok/s** prefill (50% / 100%).
+  - Profile `glm53-flash-tp2-1m` (2 GB10s over RoCE, TP=2, `1,048,576`-token window, 1 slot, `--spec auto` NextN, 13,440 MiB prefix cache, image input on): **57.2 tok/s** decode; **1,130.6 / 979.3 tok/s** prefill (50% / 100%).
+  - Q200 (both profiles): GSM8K `77/80` (`96.25%`), HumanEval `39/40` (`97.5%`), IFEval `37/40` (`92.5%`), hard reasoning `19/20` (`95.0%`), BFCL `12/20` (`60.0%`).
 
+- **Nemotron-3.5-Super-VL (`nemotron-3.5/nemotron-3.5-super-vl` `v1`, runtime `nemotron35-super-vl-sage-3.85`, port `9100`, PR #71):**
+  - Pack: `vcruz305/Nemotron-Super-VL-EXL3-3.85bpw` (mixed-precision SAGE EXL3 `3.85 bpw`, `55.8 GiB`).
+  - Profile `nemotron35-super-vl-single-1m`: 1 GB10, `1,048,576`-token window, 16 slots, `--spec auto` (MTP), prefix cache on, image input on (up to 3,328 tokens/image).
+  - Measured on GB10: **50.8 tok/s** decode; **879 / 589 tok/s** prefill (50% / 100% of 1M window); Q200: GSM8K `76/80` (`95.0%`), HumanEval `40/40` (`100%`), IFEval `28/40` (`70.0%`), hard reasoning `20/20` (`100%`), BFCL `15/20` (`75.0%`).
 
-- A sealed approval may qualify a subset of the profiles a runtime packages, as long as it includes the
-  default profile. A packaged profile the approval does not name (for example the two-node choice beside
-  the single-node one) is not approved and is not judged by the model-branch check. This lets a
-  single-node profile ship on its own receipts without requalifying its two-node sibling, as the
-  tp1/tp2 independent-runtime-unit rule intends. The sealer and `tools/release_evidence.py` still
-  refuse an approval with no profiles, a profile the runtime does not package, or one that omits the
-  default profile.
+- **DeepSeek-V4.1-Flash-1017 (`deepseek-v4.1/deepseek-v4.1-flash-1017` `v1`, runtime `dsv41-flash-1017-sage-1.55`, port `8940`, PR #75):**
+  - Pack: `vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` (mixed-precision SAGE EXL3 `1.55 bpw`, `298.3 GiB`).
+  - Profile `dsv41-single-262k`: 1 GB10, `262,144`-token window, 1 slot, `--kv-dtype q4`, `--spec auto` (MTP), prefix cache on, vision off (owner exception through `2026-12-31`). The two-node `dsv41-tp2-1m` profile is planned for `v0.1.1`.
+  - Measured on GB10: **29.6 tok/s** decode; **1,274 / 1,034 tok/s** prefill (50% / 100%); Q200: GSM8K `78/80` (`97.5%`), HumanEval `40/40` (`100%`), IFEval `35/40` (`87.5%`), hard reasoning `16/20` (`80.0%`, owner-accepted for `v0.1.0`), BFCL `13/20` (`65.0%`).
 
-- A release may carry forward a model whose family/kernel scope is untouched by the newer engine
-  commits in that release, instead of re-running its full qualification chain. The release ceremony
-  stages each carried model's engine binaries from the exact engine release its sealed approval
-  names, so its approval verifies against the engine it was sealed with. A model whose
-  math/weights/sampling changes, or a new model, never carries forward and must re-seal.
-- Gate receipts stay bound to the model pack and profile as well as the engine build. Only a gate a
-  receipt explicitly lists as carried may reuse raw evidence from an earlier engine build, and only
-  when that build is pinned exactly (source engine commit/tree/binary and the source receipt bytes,
-  canonical dev #238 shape) and tied to a registry-pinned prior approval of the same model; the
-  release lock stays strict on the shipped build (D42 option B). The exactness and prefix-cache
-  gates always re-run on the new build, and at least one gate must stay fresh on it.
-  `tools/release_evidence.py` refuses any cross-engine-build gate evidence outside such a declaration.
+### Engine, runtime, and release highlights
 
-- Production accepts an owner vision exception in place of a proven does-not-fit justification for a
-  model that ships with vision off. The exception is a record in each vision-off profile's sealed
-  qualification receipt: the maintainer who granted it (am423 or vcruz305), the grant date, an expiry
-  date and the reason. The model-branch completeness check accepts vision off when every profile
-  carries a valid one. (PR #53)
-
-
-- Moved the runtime layout to `runtimes/<family>/<model>/v<N>/` with `MODEL.json`
-  (`rexl3.prod-model.v1`); registry keys are `<family>/<model>/v<N>` and carry `runtime_id`. Dev
-  release tags derive from `runtime_id`, never from folder names. The old flat layout is refused.
-- Added `tools/check_model_branch.py` (model-branch completeness), `tools/check_pr_rules.py`,
-  `tools/check_local_validation.py`, `tools/governance_audit.py`, `tools/assemble_release_notes.py`
-  and `tools/cut_release.py`, with tests.
-- Added the `pr-rules`, `model-completeness`, `local-validation` and `governance-audit` workflows
-  and the target ruleset copies (`main-guard`, `protected-tags`, `model-branches`).
-
-- Promotion now reuses verified release inventories: a release archive is
-  decompressed and re-inventoried at most twice per attempt instead of once per
-  verification phase. Every phase still requires a fresh streaming SHA-256 of
-  the compressed transport bytes equal to the approval record before any cached
-  inventory is honored, and tampered or unlisted members still fail closed.
-
-- The release ceremony (`tools/cut_release.py --publish`) now verifies an approval whose bundle leaves
-  the server and cluster executables to the dev engine release. It downloads the executables the approval
-  names from that engine release, which must be the one the release manifest names, and checks their
-  exact name, size, digest and bytes, and that the engine tag names the approved commit. Before this fix,
-  every such approval, which includes every v0.1.0 model, was refused as "engine binary files are
-  required". Each model's dev release is now also staged in its own directory, so a release with several
-  models no longer stops at the second model on a "destination conflict" between the models' receipts.
-  (PR #58)
-
-- Production verification now accepts a recipe whose profiles each pin their own pack and runtime id,
-  the layout dev uses for a model with a single-node and a two-node profile. Every receipt identity
-  now names its `pack` role. A profile may name a lock role other than `draft`, and the model lock
-  must carry a `target` pack and every role a profile names. Before, `verify` and the promotion tools
-  derived every profile's identity from the approval's top-level runtime id and refused such a recipe
-  as "approved profile identity drift". Approvals sealed before dev added the `pack` identity key no
-  longer verify; none is registered in production. (PR #52)
-
-- Made the governance audit tolerate GitHub Actions workflow-token limits: a 403 on the
-  immutable-releases settings endpoint and incomplete/403 ruleset detail views are skipped with an
-  informational line instead of failing the audit (real, readable drift still fails). The immutable
-  releases setting remains verifiable by a maintainer token.
-- The incident record now enumerates the full retroactive review range (`#1-#28`), and the audit
-  parser accepts `through`-spelled ranges, so pre-restructure unreviewed merges are matched.
-
-- Fixed the governance audit's incident-record parsing for single PR numbers (a listed PR without a
-  range bound no longer crashes with `IndexError`).
-
-- The model-branch completeness check (`model-completeness`) now reads speculative decoding the way
-  the engine parses a profile's argv. A profile counts when it declares `--spec auto` or `--spec mtp`
-  (the last `--spec` wins), a `--draft` pack, or a `draft` role in its model lock, and nothing turns
-  drafting off (`--no-drafts`, a final `--spec none` or `--spec copy`). Before, the check looked only
-  for `--draft` or any second pack in the model lock: profiles that run `--spec auto` or `--spec mtp`
-  without a draft pack (GLM-5.3-Flash, Nemotron-3.5-Super-VL, Qwen3.8-Flash-Next) failed, and
-  a model whose second pack is an alternate target rather than a draft passed whatever its argv said.
-  (PR #51)
-
-- `tools/promote_runtime.py` can now promote a new model with its documented command. Two defects stopped it.
-  `--download` caches a dev release in `<assets-dir>/<family>/<model>/v<N>/`, but the promotion read
-  `approval.json`, the archives and the engine executables from `<assets-dir>` itself and refused with
-  "missing/nonregular/hardlinked file: approval.json"; it now reads that model version's cache directory, the
-  same one the tree check uses. And the early check of the `MODEL.json` metadata flags left out the runtime id,
-  so every promotion that passed `--display-name` and the other metadata flags, which a new model needs, was
-  refused before it started; the check now uses the registry entry's runtime id.
-
-- Pinned a deterministic git identity in the promotion test suite so `verify` passes on
-  runners without a resolvable OS user name.
-
-- Release assets are named `<runtime-id>-v<N>-approval.json` and `<runtime-id>-v<N>-bundle.tar.gz`
-  (plus the `-source`, `-engine-source` and `-evidence` archives) as documented. The release tool
-  had written the model version's `v` twice (`<runtime-id>-vv1-...`), and the changelog's model line
-  had the same doubled `v`. (PR #49)
-
-- The release-notes assembler (`tools/assemble_release_notes.py`) no longer reads
-  `changes/unreleased/README.md`, the fragment rules, as a fragment. Its own headings had made every
-  assembly on main fail with `NOTES_REFUSED: README.md: unknown heading 'When a fragment is required'`,
-  so the documented release step could not run. A file there whose name is not a lowercase kebab-case
-  `<slug>.md` is now refused by name instead of being parsed.
-
+- Native Rust + CUDA 13 (`sm_121`) engine (`rexl3-serve` and `rexl3-cluster`) supporting uniform and mixed-bit-rate (`MixedK` K2–K8) EXL3 packs, lossless speculative decoding (`drafted == serial` `24/24`), block-hashed prefix caching (`84/84` exact reuse checks), and chunk-size-invariant prefill (`chunked == whole` across `512`/`256`/`128` chunks up to `60,000` tokens).
+- Self-contained `./launch.sh` runtime bundles (`install-deps`, `doctor`, `setup`, `verify`, `start`, `smoke`, `status`, `logs`, `diagnostics`, `stop`) with strict boot-time verification of `release.lock.json`, binary SHA-256, and `model.lock.json` shard hashes.
+- Change-scoped release qualification (`T0` carry-forward from freeze commit `799fa750f8eb7d4c45d757d9c44beeb7182b5d51` onto primary release engine `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`) and per-profile subset approvals (PR #64, PR #68).
 - Models: qwen3.8/qwen3.8-27b v3, glm-5.3/glm-5.3-flash v1, nemotron-3.5/nemotron-3.5-super-vl v1, qwen3.8/qwen3.8-flash-next v2, deepseek-v4.1/deepseek-v4.1-flash-1017 v1.
 
 All notable changes to this project are documented in this file.

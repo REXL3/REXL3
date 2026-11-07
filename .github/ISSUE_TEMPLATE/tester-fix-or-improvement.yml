@@ -1,0 +1,87 @@
+name: Tester finding, fix, or improvement
+description: Submit a root-cause finding, bug fix, or performance/runtime improvement for a model family or the engine as a whole
+title: "[finding] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to share a technical finding, a concrete bug fix, or a performance/runtime improvement — whether it targets a **single model family** or the **REXL3 engine as a whole**.
+        **Do not paste private prompts, credentials, tokens, or SSH keys.**
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope (per model family vs engine-wide)
+      description: Does this finding/fix apply to a specific model family or across the engine as a whole?
+      options:
+        - "Engine-wide (affects all models: shared CUDA kernels, KV/prefix cache, scheduler, HTTP server, or launcher)"
+        - "qwen3.8 / qwen3.8-27b (single-node 262K, DFlash2)"
+        - "qwen3.8 / qwen3.8-flash-next (single-node 262K, MTP)"
+        - "glm-5.3 / glm-5.3-flash (single-node 262K or two-node tp2 1M)"
+        - "nemotron-3.5 / nemotron-3.5-super-vl (single-node 1M, VL + MTP)"
+        - "deepseek-v4.1 / deepseek-v4.1-flash-1017 (single-node tp1 262K or two-node tp2 1M)"
+        - "ling-3.1 / ling-3.1-flash-1019"
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: What kind of finding or improvement is this?
+      options:
+        - "Bug root cause & fix"
+        - "Decode / prefill throughput optimization"
+        - "Speculative decoding (MTP / DFlash2) improvement"
+        - "KV cache / prefix cache / memory headroom improvement"
+        - "Long-context (262K / 1M) stability or exactness fix"
+        - "Launcher / runtime script / API ergonomics improvement"
+        - "Recipe / profile.json / pack-sheet improvement"
+    validations:
+      required: true
+  - type: input
+    id: release-and-profile
+    attributes:
+      label: Release tag, runtime bundle, and profile tested
+      description: "For example: v0.1.0, dsv41-flash-1017-sage-1.55-v1-bundle.tar.gz, profile dsv41-single-262k (262,144 context)."
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: "1. WHY — Finding, root cause, or bottleneck"
+      description: |
+        Explain WHY this change is needed:
+        - What behavior, bottleneck, or failure mode did you find?
+        - What is the underlying root cause (e.g. kernel stall, chunk-boundary mismatch, KV layout, launcher check, profile flag)?
+        - What is the impact on users/testers (tok/s, memory GiB, exactness, usability)?
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: "2. WHAT — Affected components, files, and contract impact"
+      description: |
+        Detail WHAT needs to change:
+        - Which files, crates, scripts, or profile settings are in scope (and whether it is confined to one model family or shared across the engine)?
+        - Does it preserve bit-exact output (`drafted == serial`, `chunked == whole`, prefix-cache parity) or change sampling/arithmetic?
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: "3. HOW TO FIX & VERIFY — Concrete fix, patch/diff, and verification at full context"
+      description: |
+        Detail HOW to implement and verify the fix or improvement:
+        - Step-by-step fix or proposed implementation (paste a diff, snippet, or command sequence if you have one).
+        - Exact commands used to verify at the profile's full supported context (`262,144` or `1,048,576`).
+        - Measured before vs after numbers (e.g. live speculative decode tok/s, prefill 50%/100% tok/s, free GiB headroom) or test pass counts.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before sending
+      options:
+        - label: This submission contains no credentials, tokens, private prompts, or proprietary data.
+          required: true
+        - label: This is not a security vulnerability (security issues follow SECURITY.md).
+          required: true

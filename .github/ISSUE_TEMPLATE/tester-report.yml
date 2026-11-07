@@ -1,5 +1,5 @@
-name: Tester report
-description: A problem or feedback from running a released pack (not a security problem)
+name: Tester bug or issue report
+description: Report a bug, failure, or regression on a model family or across the engine (not a security problem)
 title: "[report] "
 body:
   - type: markdown
@@ -9,6 +9,37 @@ body:
         **do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
         A security problem goes through [SECURITY.md](https://github.com/REXL3/REXL3/blob/main/SECURITY.md), not here. The command list and
         the error-token table are in the [user guide](https://github.com/REXL3/REXL3/blob/main/docs/USER_GUIDE.md).
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope (model family or engine-wide)
+      description: Choose whether this issue is specific to one model family/recipe or affects the REXL3 engine/launcher across models.
+      options:
+        - "Engine-wide (affects multiple models, rexl3-serve, rexl3-cluster, or launch.sh)"
+        - "qwen3.8 / qwen3.8-27b (single-node 262K, DFlash2)"
+        - "qwen3.8 / qwen3.8-flash-next (single-node 262K, MTP)"
+        - "glm-5.3 / glm-5.3-flash (single-node 262K or two-node tp2 1M)"
+        - "nemotron-3.5 / nemotron-3.5-super-vl (single-node 1M, VL + MTP)"
+        - "deepseek-v4.1 / deepseek-v4.1-flash-1017 (single-node tp1 262K or two-node tp2 1M)"
+        - "ling-3.1 / ling-3.1-flash-1019"
+    validations:
+      required: true
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected area
+      description: Which part of the runtime or engine is involved?
+      options:
+        - "Launcher / bundle scripts (launch.sh, doctor, verify, site.json)"
+        - "Engine / CUDA kernels (decode, prefill, attention, MoE)"
+        - "Speculative decoding (MTP / DFlash2 acceptance or speed)"
+        - "KV cache / prefix cache / long context (262K / 1M)"
+        - "HTTP / OpenAI API server & streaming"
+        - "Model quality / sampling / chat template"
+        - "Vision / multimodal input"
+        - "Multi-node cluster (rexl3-cluster / TP2)"
+    validations:
+      required: true
   - type: input
     id: release
     attributes:
@@ -21,6 +52,27 @@ body:
     attributes:
       label: Profile
       description: The profile you ran (the default if you did not choose one).
+    validations:
+      required: true
+  - type: textarea
+    id: why-finding
+    attributes:
+      label: "1. WHY — Symptom, root cause (if known), and impact"
+      description: What broke or regressed, why you believe it happens (if you traced it), and how it impacts your run (crash, wrong output, low tok/s, OOM, etc.).
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: "2. WHAT — Expected vs actual behavior and affected component"
+      description: What you expected, what happened instead, and which component/file/flag is involved.
+    validations:
+      required: true
+  - type: textarea
+    id: how-to-fix
+    attributes:
+      label: "3. HOW TO REPRODUCE OR FIX — Exact steps, workaround, or proposed fix"
+      description: Exact steps to repeat the problem, plus any workaround or fix you found.
     validations:
       required: true
   - type: textarea
@@ -57,13 +109,6 @@ body:
       label: Response
       description: The JSON response you got (or the HTTP status and error.message), with anything private removed. Include finish_reason.
       render: json
-  - type: textarea
-    id: what-happened
-    attributes:
-      label: What you expected, what happened, and how to repeat it
-      description: What you expected, what happened instead, and the steps to repeat it.
-    validations:
-      required: true
   - type: textarea
     id: checked
     attributes:

@@ -3,6 +3,6 @@ contact_links:
   - name: Report a security problem (privately, not as an issue)
     url: https://github.com/REXL3/REXL3/blob/main/SECURITY.md
     about: Do not open an issue for a vulnerability. SECURITY.md says how to report one privately.
-  - name: Read the user guide first
-    url: https://github.com/REXL3/REXL3/blob/main/docs/USER_GUIDE.md
-    about: Install, start, API use, troubleshooting by exit code and error token.
+  - name: Read the user guide and tester agent quickstart first
+    url: https://github.com/REXL3/REXL3/blob/main/AGENTS.md
+    about: End-to-end quickstart for AI agents and testers, model table, troubleshooting, and how to submit findings and fixes.

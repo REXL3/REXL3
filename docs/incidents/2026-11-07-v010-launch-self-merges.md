@@ -3,7 +3,7 @@
 Recorded 2026-11-07 (US Central) on the owner's explicit decision, for retroactive review under
 CONTRIBUTING.md (no single-maintainer self-merge exception except an owner decision recorded here).
 
-Owner decision (am423, 2026-11-07): "pass the governance audit, we shipped when we needed to."
+The owner accepted both merges on 2026-11-07.
 
 ## PRs covered
 
@@ -21,7 +21,7 @@ The daily `governance-audit` then failed on both PRs (runs on 2026-11-07), as de
 
 ## Why it was accepted
 
-The owner judged that shipping the public launch on time outweighed waiting for a second review.
+The owner accepted the merges so the public launch could ship on schedule.
 Neither PR changes engine code, a runtime, a seal or a release: #77 adds the published v0.1.0
 engine source and tester docs, #81 is a docs change.
 

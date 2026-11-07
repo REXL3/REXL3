@@ -122,6 +122,16 @@ rulesets or settings):
 5. The maintainer restores the tag ruleset; `python3 tools/cut_release.py --version vX.Y.Z --verify`
    confirms the lock is restored and the published release matches the manifest.
 
+### Agents and the ceremony
+
+An agent that prepares a release runs only the read-only steps: the dry run (step 2) and, after the maintainer has
+published, `--verify`. For each write step (3, 4 and 5) it posts a decision packet (AGENTS.md, Always 9) with the exact
+command, the tag, the release PR merge commit printed in the `DRY_RUN_OK` line, the checkout whose
+`releases/<version>/NOTES.md` becomes the release body, and what is restored afterwards. `cut_release.py` tags the
+release PR's merge commit but reads `NOTES.md` from the checkout it runs in, so the packet names that checkout and the
+two must not be allowed to drift apart unnoticed. The maintainer runs exactly what the packet states; a different
+command, tag or checkout needs a new packet.
+
 `--publish` and `--verify` are mutually exclusive; `--repo` defaults to `REXL3/REXL3` and
 `--repo-root` to `.`; refusals print `CUT_REFUSED: ...` on stderr and exit 2.
 

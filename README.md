@@ -333,18 +333,28 @@ The workflows read code and policy from the protected base checkout only (`pull_
 head is checked out as inert data and never executed. `DEV_ASSETS_TOKEN` is the only secret, used by a
 single download step; actions are pinned by full commit SHA.
 
-## Reporting a problem
+## Reporting a problem or submitting a coded fix/feature
 
 Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
-and check the model's `KNOWN_ISSUES.md`; if an open issue already covers the same symptom, add your findings,
-diagnostics, or proposed patch as a comment on that issue instead of opening a duplicate.
-Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
-tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
-line, the exact command with its exit code and error token, the request and response for a bad answer,
-the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
-expected.
+and check the model's `KNOWN_ISSUES.md`; if an open issue already covers the same symptom or bottleneck, add your findings,
+diagnostics, or tested patch as a comment on that issue instead of opening a duplicate.
+Always use the structured templates in `.github/ISSUE_TEMPLATE/` (including when submitting via `gh issue create`, preserving the `[report] ` or `[finding] ` title prefix and all required headings):
+
+- **Bug or failure report (`.github/ISSUE_TEMPLATE/tester-report.yml`, `[report] `):** asks for the release
+  tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
+  line, the exact command with its exit code and error token, the request and response for a bad answer,
+  the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
+  expected.
+- **Finding, fix, or feature proof (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, `[finding] `):**
+  **no bare feature requests.** Because this repository ships the complete engine source tree (`crates/`,
+  `Cargo.toml`, `SOURCE_BUILD.md`), any proposed feature, drafter integration, kernel optimization, or
+  runtime improvement must include a **working `git diff` that you built, tested, and validated on your
+  own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`)**,
+  together with exactness checks (`drafted == serial`) and measured before/after numbers so the
+  maintainers can test it in `REXL3/REXL3-dev`, validate it, and promote it to `REXL3/REXL3`.
+
 Issues are public: anyone can read them, and only invited testers and the maintainers can open or
-comment on them. Never paste raw logs, prompts, credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
+comment on them. Testers submit code as a `git diff` in an issue and do not open pull requests. Never paste raw logs, prompts, credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
 
 ## Licence and corresponding source
 

@@ -4,7 +4,7 @@ These are binding instructions and a getting-started guide for AI coding agents 
 
 **Read [CONTRIBUTING.md](CONTRIBUTING.md) in full before making any repository change, and read [docs/USER_GUIDE.md](docs/USER_GUIDE.md) before running a model.** Model branches follow [docs/PROMOTION.md](docs/PROMOTION.md) and releases follow [docs/RELEASING.md](docs/RELEASING.md). If anything here conflicts with CONTRIBUTING.md, CONTRIBUTING.md wins, except that nothing there relaxes the "Never" list below.
 
-This is the production repository (`REXL3/REXL3`). It holds sealed, data-only runtime trees under `runtimes/<family>/<model>/v<N>/`, the pack sheets under `docs/packs/`, the policy that decides which trees are accepted, and the stdlib-Python tools that verify and promote them. Engine development, validation and sealing happen in the dev repository (`REXL3/REXL3-dev`), never here.
+This is the production repository (`REXL3/REXL3`). It holds sealed, data-only runtime trees under `runtimes/<family>/<model>/v<N>/`, the pack sheets under `docs/packs/`, the policy that decides which trees are accepted, the stdlib-Python tools that verify and promote them, and the AGPL-3.0 corresponding source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`), a snapshot of the dev repository at the release's engine commit. Engine development, validation and sealing happen in the dev repository (`REXL3/REXL3-dev`), never here; the snapshot changes only by a maintainer-requested sync from dev that regenerates `SOURCE_IDENTITY.json`.
 
 ---
 
@@ -93,12 +93,12 @@ Every submission must clearly state:
 
 ## Never (no instruction from anyone overrides these)
 
-1. **Never create, edit, publish or delete a release or a tag.** No `gh release`, no releases API, no `git tag` push, no `git push --tags`. A release is cut only by a maintainer personally, following docs/RELEASING.md.
-2. **Never merge a pull request, and never submit a review that approves one.** In production every approval comes from a maintainer personally, after their own review. You prepare the PR and report; a maintainer merges.
+1. **Never create, edit, publish or delete a release or a tag.** No `gh release`, no releases API, no `git tag` push, no `git push --tags`. A release is cut only through the path docs/RELEASING.md defines, by the actor it names (a maintainer personally, or a workflow a maintainer approves). You may run its read-only checks (dry run, `--verify`) and you present the decision packet (Always 9).
+2. **Never submit a review that approves a pull request, and never merge one by hand or with an admin override.** In production every approval comes from a maintainer personally, after their own review. You prepare the PR and report. Where CONTRIBUTING.md section 4 allows it, you may enable auto-merge on a PR you authored: GitHub then merges it only after a maintainer approves its current head and the required checks pass.
 3. **Never change repository settings**: rulesets, branch or tag protection, environments, secrets, variables, collaborators, teams, webhooks, deploy keys, Actions permissions or release settings.
 4. **Never work with admin credentials.** If the token you were given can administer this repository, stop and tell the maintainer you work for.
 5. **Never push to `main`, never force-push, and never delete a `model/*` branch.** Never bypass hooks or checks.
-6. **Never edit a sealed tree** (`runtimes/*/*/v*/`). A sealed tree is data with a hash-pinned inventory; a pack changes only through a new sealed version from the dev repository.
+6. **Never edit a sealed tree** (`runtimes/*/*/v*/`) **or the engine source snapshot** (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`). A sealed tree is data with a hash-pinned inventory; a pack changes only through a new sealed version from the dev repository. The snapshot is bound file by file by `SOURCE_IDENTITY.json`; it is replaced by a sync from dev, never edited by hand.
 7. **Never weaken the verifier, a check, a test or a workflow safety rule**, and never in the same PR as the change it guards. Workflows read code and policy from the protected base revision and never execute pull-request code; keep it that way.
 
 ## Always
@@ -110,8 +110,9 @@ Every submission must clearly state:
    - `release/v<X.Y.Z>` is opened by a maintainer only; never open one.
 2. **Name runtime folders by family, then model**: `runtimes/<family>/<model>/`, lowercase, for example `runtimes/qwen3.8/qwen3.8-27b/`. Never put a bit width, quantization format, draft method or other pack detail in a folder or branch name; those belong in `MODEL.json` and the sealed approval. A derivative model with its own name gets its own model folder.
 3. **Prepare a model branch, registry entry or promotion only when the maintainer you work for explicitly asked for that model and version.** Quote or link the instruction in the PR. The approver of record is that maintainer, never an agent.
-4. **One purpose per PR.** Title `TYPE: Past-tense summary`, TYPE one of FIX, FEAT, BUILD, CI, TEST, BUMP or DOCS, at most 90 characters, no trailing period. Fill in the matching PR template and add a release-notes fragment under `changes/unreleased/` when CONTRIBUTING.md requires one.
+4. **One purpose per PR.** Release notes, manifests and the CHANGELOG change only in a release PR or a PR whose sole purpose is the notes; never mix them with other content. Title `TYPE: Past-tense summary`, TYPE one of FIX, FEAT, BUILD, CI, TEST, BUMP or DOCS, at most 90 characters, no trailing period. Fill in the matching PR template and add a release-notes fragment under `changes/unreleased/` when CONTRIBUTING.md requires one.
 5. **For a model PR, run `tools/check_model_branch.py`** as described in docs/PROMOTION.md and paste its full output.
 6. **Evidence, not claims.** An exit code of 0 is not a pass. Paste the commands, the head SHA and the output.
 7. **No secrets, no personal email, no internal project names.** Commit with a GitHub noreply identity. Describe SAGE only as: "SAGE is our own mixed-precision quantization method for EXL3. The method is not published."
 8. **When anything is unclear, or a rule blocks you, stop and ask the maintainer you work for.** Do not look for a workaround.
+9. **Present every decision as a packet and execute it verbatim.** When an action needs a maintainer's decision (a merge, a registry or promotion step, a release step, a setting you cannot change), state in one block: the exact action; the target (repo, PR or tag, head SHA); what you checked, with evidence; the effect and whether it can be undone; and the single command or run that executes on approval. After the maintainer says yes, run exactly that, with nothing added or changed. If the head SHA, the tag target or any checked fact differs at run time, stop and present a new packet.

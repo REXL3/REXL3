@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        One report per problem. This repository is private, but every invited tester and maintainer can read issues:
-        **do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
+        One report per problem. This repository is public: anyone can read issues, and only invited testers and the maintainers
+        can open or comment on them. **Do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
         A security problem goes through [SECURITY.md](https://github.com/REXL3/REXL3/blob/main/SECURITY.md), not here. The command list and
         the error-token table are in the [user guide](https://github.com/REXL3/REXL3/blob/main/docs/USER_GUIDE.md).
   - type: dropdown

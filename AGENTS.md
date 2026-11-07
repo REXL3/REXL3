@@ -78,7 +78,7 @@ Every release ships the exact corresponding engine source archive (`rexl3-engine
 
 ### 4. Reporting bugs, findings, fixes, and improvements (`Why / What / How to Fix`)
 
-When reporting an issue or submitting a root-cause finding, bug fix, or optimization on `REXL3/REXL3`, use the structured issue templates under `.github/ISSUE_TEMPLATE/`:
+When reporting an issue or submitting a root-cause finding, bug fix, or optimization on `REXL3/REXL3`, use the structured issue templates under `.github/ISSUE_TEMPLATE/`. Testers report through issues only: put a fix in the issue as a patch or diff, and do not open a pull request. Issues are public, so anyone can read them; only invited testers and the maintainers can open or comment on them.
 
 1. **Bug or issue report (`.github/ISSUE_TEMPLATE/tester-report.yml`):** for failures, crashes, wrong outputs, or regressions.
 2. **Finding, fix, or improvement (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`):** for root-cause analyses, patches/diffs, kernel/runtime speedups, or recipe improvements.

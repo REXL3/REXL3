@@ -468,8 +468,8 @@ is attached to the release as a source archive, and you can ask the maintainers 
 ## 11. Reporting a problem or feedback
 
 Open **one issue per problem** in this repository: Issues, New issue, **Tester report**. The form asks
-for the facts below. Issues are visible to the maintainers and to every invited tester, so write
-nothing in one that you want kept private. For a quick question, or to compare notes with other
+for the facts below. Issues are public: anyone can read them, and only invited testers and the
+maintainers can open or comment on them, so write nothing in one that you want kept private. For a quick question, or to compare notes with other
 testers, use the testers' Discord server (your invitation names it); anything you want looked at and
 tracked belongs in an issue. A report needs:
 

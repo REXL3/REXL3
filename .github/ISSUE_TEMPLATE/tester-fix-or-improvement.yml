@@ -6,6 +6,8 @@ body:
     attributes:
       value: |
         Use this template to share a technical finding, a concrete bug fix, or a performance/runtime improvement — whether it targets a **single model family** or the **REXL3 engine as a whole**.
+        This repository is public: anyone can read issues, and only invited testers and the maintainers can open or comment on them.
+        Share a fix as a patch or diff in this issue; testers do not open pull requests.
         **Do not paste private prompts, credentials, tokens, or SSH keys.**
   - type: dropdown
     id: scope

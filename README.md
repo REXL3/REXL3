@@ -336,8 +336,8 @@ tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `r
 line, the exact command with its exit code and error token, the request and response for a bad answer,
 the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
 expected.
-Issues are visible to the maintainers and every invited tester; never paste raw logs, prompts,
-credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
+Issues are public: anyone can read them, and only invited testers and the maintainers can open or
+comment on them. Never paste raw logs, prompts, credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
 
 ## Licence and corresponding source
 

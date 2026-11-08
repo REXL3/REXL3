@@ -9,7 +9,7 @@ The owner accepted both merges on 2026-11-07.
 
 | PR | Title | Author | Merged by | Merged (Central) | Approving review |
 |---|---|---|---|---|---|
-| #77 | FEAT: Added v0.1.0 engine source tree, tester quickstart, and issue templates | vcruz305 | vcruz305 | 2026-11-06 23:55 | none |
+| #77 | FEAT: Added v0.1.0 engine source tree, tester quickstart, and issue templates | vcruz305 | vcruz305 | 2026-11-06 22:55 | none |
 | #81 | DOCS: Told testers that issues are public and that they report through issues only | am423 | vcruz305 | 2026-11-07 00:12 | none |
 
 ## What happened

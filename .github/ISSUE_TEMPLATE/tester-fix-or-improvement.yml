@@ -1,14 +1,15 @@
-name: Tester finding, fix, or improvement
-description: Submit a root-cause finding, bug fix, or performance/runtime improvement for a model family or the engine as a whole
+name: Tester finding, fix, or feature proof
+description: Submit a root-cause finding, bug fix, or coded & locally validated feature/optimization proof (git diff required)
 title: "[finding] "
 body:
   - type: markdown
     attributes:
       value: |
-        Use this template to share a technical finding, a concrete bug fix, or a performance/runtime improvement — whether it targets a **single model family** or the **REXL3 engine as a whole**.
-        Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`) and read any related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`) — if an open issue already tracks the same bug or bottleneck, post your root-cause analysis or patch as a comment on that issue instead of opening a duplicate.
-        This repository is public: anyone can read issues, and only invited testers and the maintainers can open or comment on them.
-        Share a fix as a patch or diff in this issue; testers do not open pull requests.
+        Use this template to submit a technical root-cause finding, a concrete bug fix, or a **coded and locally validated feature/runtime/kernel improvement** — whether it targets a **single model family** or the **REXL3 engine as a whole**.
+        **No bare feature requests or wishlist tickets:** this repository (`REXL3/REXL3`) ships the full corresponding engine source tree (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`). If you or your agent want to propose a feature, drafter binding, kernel speedup, KV/memory layout change, or runtime improvement, you must **implement it in code, build and test it on your own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`), and include the working `git diff` plus measured validation output below** so the maintainers can pull your patch into `REXL3/REXL3-dev`, run the qualification gates, and promote it to `REXL3/REXL3`.
+        Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`) and read any related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`) — if an open issue already tracks the same bug or bottleneck, post your root-cause analysis and tested `git diff` as a comment on that issue instead of opening a duplicate.
+        If submitting via `gh issue create`, you must still prefix the title with `[finding] ` and include every section below verbatim.
+        This repository is public: anyone can read issues, and only invited testers and the maintainers can open or comment on them. Testers submit code via a `git diff` in this issue and do not open pull requests.
         **Do not paste private prompts, credentials, tokens, or SSH keys.**
   - type: input
     id: existing-issues
@@ -21,7 +22,7 @@ body:
     id: scope
     attributes:
       label: Scope (per model family vs engine-wide)
-      description: Does this finding/fix apply to a specific model family or across the engine as a whole?
+      description: Does this finding/fix/feature apply to a specific model family or across the engine as a whole?
       options:
         - "Engine-wide (affects all models: shared CUDA kernels, KV/prefix cache, scheduler, HTTP server, or launcher)"
         - "qwen3.8 / qwen3.8-27b (single-node 262K, DFlash2)"
@@ -36,22 +37,22 @@ body:
     id: category
     attributes:
       label: Category
-      description: What kind of finding or improvement is this?
+      description: What kind of coded fix or improvement is this?
       options:
-        - "Bug root cause & fix"
-        - "Decode / prefill throughput optimization"
-        - "Speculative decoding (MTP / DFlash2) improvement"
-        - "KV cache / prefix cache / memory headroom improvement"
-        - "Long-context (262K / 1M) stability or exactness fix"
-        - "Launcher / runtime script / API ergonomics improvement"
-        - "Recipe / profile.json / pack-sheet improvement"
+        - "Bug root cause & tested fix"
+        - "Decode / prefill throughput optimization (tested patch)"
+        - "Speculative decoding (MTP / DFlash2) integration or improvement (tested patch)"
+        - "KV cache / prefix cache / memory headroom improvement (tested patch)"
+        - "Long-context (262K / 1M) stability or exactness fix (tested patch)"
+        - "Launcher / runtime script / API ergonomics improvement (tested patch)"
+        - "Recipe / profile.json / pack-sheet improvement (tested patch)"
     validations:
       required: true
   - type: input
     id: release-and-profile
     attributes:
-      label: Release tag, runtime bundle, and profile tested
-      description: "For example: v0.1.0, dsv41-flash-1017-sage-1.55-v1-bundle.tar.gz, profile dsv41-single-262k (262,144 context)."
+      label: Release tag, engine commit, runtime bundle, and profile tested
+      description: "For example: v0.1.0 (engine commit afc9b5df), dsv41-flash-1017-sage-1.55-v1-bundle.tar.gz, profile dsv41-single-262k (262,144 context)."
     validations:
       required: true
   - type: textarea
@@ -60,9 +61,9 @@ body:
       label: "1. WHY — Finding, root cause, or bottleneck"
       description: |
         Explain WHY this change is needed:
-        - What behavior, bottleneck, or failure mode did you find?
-        - What is the underlying root cause (e.g. kernel stall, chunk-boundary mismatch, KV layout, launcher check, profile flag)?
-        - What is the impact on users/testers (tok/s, memory GiB, exactness, usability)?
+        - What behavior, bottleneck, or failure mode did you find and measure?
+        - What is the underlying root cause (e.g. kernel stall, chunk-boundary mismatch, drafter binding, KV layout, launcher check, profile flag)?
+        - What is the measured impact on users/testers (tok/s, memory GiB, exactness, usability)?
     validations:
       required: true
   - type: textarea
@@ -70,20 +71,29 @@ body:
     attributes:
       label: "2. WHAT — Affected components, files, and contract impact"
       description: |
-        Detail WHAT needs to change:
-        - Which files, crates, scripts, or profile settings are in scope (and whether it is confined to one model family or shared across the engine)?
+        Detail WHAT your code patch changes:
+        - Which files, crates, scripts, or profile settings are modified (and whether the change is confined to one model family or shared across the engine)?
         - Does it preserve bit-exact output (`drafted == serial`, `chunked == whole`, prefix-cache parity) or change sampling/arithmetic?
     validations:
       required: true
   - type: textarea
-    id: how
+    id: patch
     attributes:
-      label: "3. HOW TO FIX & VERIFY — Concrete fix, patch/diff, and verification at full context"
+      label: "3. HOW TO FIX — Tested code patch (git diff required)"
       description: |
-        Detail HOW to implement and verify the fix or improvement:
-        - Step-by-step fix or proposed implementation (paste a diff, snippet, or command sequence if you have one).
-        - Exact commands used to verify at the profile's full supported context (`262,144` or `1,048,576`).
-        - Measured before vs after numbers (e.g. live speculative decode tok/s, prefill 50%/100% tok/s, free GiB headroom) or test pass counts.
+        Paste the complete, working `git diff` built and tested against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`) or runtime scripts so maintainers can apply it in `REXL3/REXL3-dev`, validate it, and promote it to `REXL3/REXL3`. Do not submit a feature request without a tested code patch.
+      render: diff
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: "4. FULL-CONTEXT VALIDATION EVIDENCE — Commands, exactness, and before/after measurements"
+      description: |
+        Paste the exact commands and real outputs proving your patch was tested and validated on your setup:
+        - Exact build and test/benchmark commands run at the profile's **full supported context** (`262,144` for `tp1` or `1,048,576` for `tp2` — never `32k`).
+        - Exactness proof (`drafted == serial`, `chunked == whole`, unit/integration test pass counts).
+        - Measured before vs after numbers across 3 runs (live speculative decode tok/s, prefill 50%/100% tok/s, draft acceptance rate, and free GPU memory GiB headroom).
     validations:
       required: true
   - type: checkboxes
@@ -92,6 +102,8 @@ body:
       label: Before sending
       options:
         - label: I searched existing open and closed issues (and KNOWN_ISSUES.md) and confirmed no open issue already covers this finding or fix.
+          required: true
+        - label: I implemented, built, and validated the attached code patch (git diff) on my own setup at the profile's full supported context (262,144 or 1,048,576) and included the measured before/after evidence above.
           required: true
         - label: This submission contains no credentials, tokens, private prompts, or proprietary data.
           required: true

@@ -7,6 +7,7 @@ body:
       value: |
         One report per problem. Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
         and check `KNOWN_ISSUES.md` — if an open issue already covers this symptom, add your findings, diagnostics, or fix as a comment on that issue instead of opening a duplicate.
+        Use this template only for concrete bugs, failures, or regressions. **Do not open bare feature requests:** if you are proposing a new feature, drafter binding, kernel speedup, or runtime improvement, you must implement and validate a coded proof solution (`git diff`) on your own setup using `.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml` (`[finding] `). If submitting via `gh issue create`, prefix the title with `[report] ` and include every section below.
         This repository is public: anyone can read issues, and only invited testers and the maintainers
         can open or comment on them. **Do not paste raw logs, prompts, responses you want kept private, credentials, tokens or SSH keys.**
         A security problem goes through [SECURITY.md](https://github.com/REXL3/REXL3/blob/main/SECURITY.md), not here. The command list and

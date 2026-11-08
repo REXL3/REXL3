@@ -487,6 +487,8 @@ tracked belongs in an issue. A report needs:
    `finish_reason`.
 6. What you checked and what you could not check on your machine.
 
+If you are proposing a fix, new feature, drafter binding, kernel speedup, or runtime improvement rather than reporting a failure, use the **Tester finding, fix, or feature proof** template (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `). **Do not open bare feature requests:** build your change against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`), validate it on your own setup at the profile's full supported context (`262,144` for `tp1` or `1,048,576` for `tp2`), and include the complete `git diff` plus measured before/after validation evidence so the maintainers can test it in `REXL3/REXL3-dev` and promote it to `REXL3/REXL3`.
+
 Do not include raw logs, prompts or responses you do not want shared, credentials, or SSH keys. For a
 security problem follow [SECURITY](../SECURITY.md) instead: never an issue and never a chat channel.
 

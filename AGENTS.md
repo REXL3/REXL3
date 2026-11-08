@@ -76,23 +76,32 @@ Every release ships the exact corresponding engine source archive (`rexl3-engine
   2. **Keep speculative decoding (`--spec auto` / `--spec mtp` / `--draft`) and prefix caching (`--prefix-cache on`) enabled.** The headline decode metric is live speculative decoding; plain (`--spec none`) tok/s is diagnostic only.
   3. **Verify exactness and no-regression:** check that `drafted == serial` and chunked prefill matches single-chunk prefill, and report median wall-clock numbers across 3 runs (`decode tok/s`, `prefill 50% tok/s`, `prefill 100% tok/s`, and free GPU memory headroom).
 
-### 4. Reporting bugs, findings, fixes, and improvements (`Why / What / How to Fix`)
+### 4. Reporting bugs and submitting coded-proof fixes or features (`Why / What / How to Fix & Verify`)
 
-When reporting an issue or submitting a root-cause finding, bug fix, or optimization on `REXL3/REXL3`, use the structured issue templates under `.github/ISSUE_TEMPLATE/`. Testers report through issues only: put a fix in the issue as a patch or diff, and do not open a pull request. Issues are public, so anyone can read them; only invited testers and the maintainers can open or comment on them.
+When reporting a bug or submitting a root-cause finding, bug fix, feature, or optimization on `REXL3/REXL3`, you **must** follow the structured issue templates under `.github/ISSUE_TEMPLATE/` — including when opening an issue from the command line with `gh issue create` (never submit free-form prose that omits the template headings or `[report] ` / `[finding] ` title prefix). Testers submit through issues only: attach your tested code changes as a `git diff` inside the issue and do not open a pull request. Issues are public, so anyone can read them; only invited testers and the maintainers can open or comment on them.
+
+**No bare feature requests — coded & locally validated proof solution required:**
+- This repository (`REXL3/REXL3`) publishes the complete `v0.1.0` engine source tree (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`).
+- **Do not open wishlist or feature-request tickets asking maintainers to implement a feature, drafter binding, KV layout, or optimization.**
+- If a collaborator or tester agent wants to suggest a feature or improvement, you must:
+  1. Build the engine source tree locally (`cargo +1.89.0 build --release --locked` per `SOURCE_BUILD.md`) and implement the solution in code.
+  2. Test and validate it on your own GB10 setup at the profile's **full supported context** (`262,144` for `tp1` or `1,048,576` for `tp2` — never `32k`), verifying `drafted == serial` exactness and measuring 3-run before/after throughput (`decode tok/s`, `prefill 50%/100% tok/s`, acceptance rate, and free GPU memory GiB).
+  3. Submit the complete, working **`git diff`** and full-context validation evidence using `.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml` (`[finding] `) so the maintainers can apply your patch in `REXL3/REXL3-dev`, run the qualification gates, and promote it to `REXL3/REXL3`.
 
 **Mandatory duplicate & open-issue check before opening any ticket:**
 1. Search existing open and closed issues first (`gh issue list -R REXL3/REXL3 --state all --search "<model or symptom>"`) and check `docs/packs/<model>.md` plus `runtimes/<family>/<model>/v<N>/KNOWN_ISSUES.md`.
 2. Read any matching or related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`).
-3. **If an open issue already tracks the same bug, symptom, or bottleneck:** do **not** open a duplicate issue. Instead, comment on the existing open issue (`gh issue comment <N> -R REXL3/REXL3`) with your reproduction, `./launch.sh diagnostics` output, root-cause finding, or proposed `Why / What / How to Fix & Verify` patch.
-4. **If no open issue covers it:** open a new issue using one of the two templates below and list the search terms and issue numbers (`#N`) you reviewed in the template's **Open issues and known-issues checked** field:
-   - **Bug or issue report (`.github/ISSUE_TEMPLATE/tester-report.yml`):** for failures, crashes, wrong outputs, or regressions.
-   - **Finding, fix, or improvement (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`):** for root-cause analyses, patches/diffs, kernel/runtime speedups, or recipe improvements.
+3. **If an open issue already tracks the same bug, symptom, or bottleneck:** do **not** open a duplicate issue. Instead, comment on the existing open issue (`gh issue comment <N> -R REXL3/REXL3`) with your reproduction, `./launch.sh diagnostics` output, root-cause finding, or tested `Why / What / How to Fix & Verify` `git diff`.
+4. **If no open issue covers it:** open a new issue using one of the two templates below (preserving all template headings when using `gh issue create`) and list the search terms and issue numbers (`#N`) you reviewed in the **Open issues and KNOWN_ISSUES.md checked** field:
+   - **Bug or issue report (`.github/ISSUE_TEMPLATE/tester-report.yml`, title prefix `[report] `):** for concrete failures, crashes, wrong outputs, or regressions.
+   - **Finding, fix, or feature proof (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `):** for root-cause analyses, bug fixes, feature integrations, or kernel/runtime/recipe improvements — **requires a locally tested `git diff` and full-context validation receipt**.
 
-Every submission must clearly state:
-- **Scope:** whether the finding/fix is specific to **one model family** (`qwen3.8`, `glm-5.3`, `nemotron-3.5`, `deepseek-v4.1`, `ling-3.1`) or affects the **engine as a whole** (`Engine-wide`).
+Every `[finding]` submission must include all four required sections:
+- **Scope:** whether the change is specific to **one model family** (`qwen3.8`, `glm-5.3`, `nemotron-3.5`, `deepseek-v4.1`, `ling-3.1`) or affects the **engine as a whole** (`Engine-wide`).
 - **1. WHY (Finding, Root Cause, or Bottleneck):** what you observed/measured, the underlying root cause, and the user/tester impact.
-- **2. WHAT (Affected Components and Contract Impact):** which files, crates, scripts, or profile flags change, and whether output bits stay bit-exact.
-- **3. HOW TO FIX AND VERIFY (Concrete Steps, Patch/Diff, and Full-Context Verification):** step-by-step fix or diff, exact commands run at the profile's full supported context (`262,144` or `1,048,576`), and before/after numbers.
+- **2. WHAT (Affected Components and Contract Impact):** which files, crates, scripts, or profile flags your patch modifies, and whether output bits stay bit-exact.
+- **3. HOW TO FIX (Tested Code Patch — `git diff` Required):** the complete, working `git diff` built against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`) or runtime scripts.
+- **4. FULL-CONTEXT VALIDATION EVIDENCE:** exact build/test/benchmark commands run at the profile's full supported context (`262,144` or `1,048,576`) and measured before/after numbers (`decode tok/s`, `prefill 50%/100% tok/s`, free GiB headroom, and exactness/test pass counts).
 
 ---
 

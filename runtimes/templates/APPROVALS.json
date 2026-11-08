@@ -14,6 +14,14 @@
     },
     "nemotron-3.5/nemotron-3.5-super-vl/v1": {
       "approval_sha256": "bb6a5a00929fd05185f74c91d9d4aca6f955e94c43827413eb0d66b89abd4548",
+      "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",
+      "profiles": {
+        "nemotron35-super-vl-single-1m": {
+          "receipt": {
+            "sha256": "7e2a2fc40d4ce5ea4ee501b6ff22bc01923e1904890a6229d294245440b764c8"
+          }
+        }
+      },
       "runtime_id": "nemotron35-super-vl-sage-3.85",
       "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
       "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"

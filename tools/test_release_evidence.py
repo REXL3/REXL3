@@ -180,17 +180,19 @@ class ReceiptContract(unittest.TestCase):
         """Declare ``gates`` carried from an earlier build and rewrite only their raw evidence.
 
         The receipt document and its identity observation stay on the shipped build; only the
-        declared gates' raw case summaries move to the pinned source build (commit/tree/binary;
-        the release lock stays strict on the shipped build, D42 option B).
+        declared gates' raw case summaries move to the pinned source build (commit/tree/binary,
+        and that build's own release lock, as real earlier-build evidence has). The top-level
+        ``rerun_gates`` is written as compose.py writes it.
         """
         other = source or self.other_build()
         for gate in gates:
             p = self.root / (gate + '.json')
             raw = json.loads(p.read_bytes())
-            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256', 'release_lock_sha256'):
                 raw[k] = other[k]
             p.write_bytes(encoded(raw))
             self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+        self.doc['rerun_gates'] = list(rerun)
         self.doc['carried_gates'] = {gate: {
             'source_engine_commit': other['engine_commit'],
             'source_engine_tree': other['engine_tree'],
@@ -222,17 +224,51 @@ class ReceiptContract(unittest.TestCase):
         self.carry_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
         self.assertEqual(self.validate(), self.doc)
 
-    def test_a_carried_gate_release_lock_stays_strict_on_the_shipped_build(self):
-        # D42 option B (canonical dev #238 shape): the release lock binds the whole bundle
-        # inventory, so even a carried gate's raw evidence must match the shipped build's lock
-        # exactly; only commit/tree/binary may name the pinned source build.
-        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
-        p = self.root / 'doctor.json'
+    def set_raw(self, gate, **fields):
+        p = self.root / (gate + '.json')
         raw = json.loads(p.read_bytes())
-        raw['release_lock_sha256'] = self.other_build()['release_lock_sha256']
+        raw.update(fields)
         p.write_bytes(encoded(raw))
-        self.doc['gates']['doctor']['evidence'][0]['sha256'] = sha(p.read_bytes())
-        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+        self.doc['gates'][gate]['evidence'][0]['sha256'] = sha(p.read_bytes())
+
+    def test_a_carried_gate_keeps_its_source_build_release_lock_and_run_paths(self):
+        # The release lock changes with every binary (and every bundled doc), and the effective
+        # profile digest hashes the observed argv, so the run's paths: a carried gate's raw
+        # evidence names the source build's lock and run, like its engine fields, and is bound
+        # by the stable pack/profile identity instead. Before this rule no carried gate could
+        # ever verify ("raw evidence identity drift").
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
+        self.set_raw('doctor', effective_profile_digest='sha256:' + '6' * 64)
+        self.assertNotEqual(json.loads((self.root / 'doctor.json').read_bytes())['release_lock_sha256'],
+                            self.expected['release_lock_sha256'])
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_a_carried_gate_still_binds_the_profile_pack_and_serving_identity(self):
+        changes = {'profile and run': dict(profile_sha256='6' * 64, effective_profile_digest='sha256:' + '6' * 64),
+                   'model lock': dict(model_lock_sha256='6' * 64), 'runtime id': dict(runtime_id='other-model'),
+                   'context': dict(effective_max_context=131072), 'topology': dict(topology={'ranks': 2}),
+                   'capabilities': dict(capabilities=dict(self.expected['capabilities'], tools=False))}
+        for label, fields in changes.items():
+            with self.subTest(label):
+                self.setUp()
+                self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
+                self.set_raw('doctor', **fields)
+                with self.assertRaisesRegex(ValueError, 'drift|differs'):
+                    self.validate()
+        # A profile file split that leaves the choice itself (its effective profile) unchanged still carries.
+        self.setUp()
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
+        self.set_raw('doctor', profile_sha256='6' * 64)
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_rerun_gates_are_exactly_the_gates_not_carried(self):
+        self.carry_gates('doctor', 'vision', rerun=tuple(g for g in GATES if g not in ('doctor', 'vision', 'quality')))
+        with self.assertRaisesRegex(ValueError, 'rerun_gates must cover exactly the gates not carried'):
+            self.validate()
+        self.setUp()
+        self.carry_gates('doctor', rerun=tuple(g for g in GATES if g != 'doctor'))
+        self.doc['rerun_gates'] = ['exactness', 'prefix_cache']
+        with self.assertRaisesRegex(ValueError, 'top-level rerun_gates must match'):
             self.validate()
 
     def test_carried_gates_require_a_fresh_rerun_gate_on_the_target_build(self):
@@ -242,7 +278,7 @@ class ReceiptContract(unittest.TestCase):
 
     def test_a_carried_gate_must_not_also_be_rerun_gate(self):
         self.carry_gates('doctor', rerun=('doctor', 'exactness'))
-        with self.assertRaisesRegex(ValueError, 'must not also be re-run'):
+        with self.assertRaisesRegex(ValueError, 'gate both fresh and carried-forward: doctor'):
             self.validate()
 
     def test_a_carried_gate_raw_evidence_must_name_the_declared_source_build(self):
@@ -258,7 +294,7 @@ class ReceiptContract(unittest.TestCase):
             raw[k] = third[k]
         p.write_bytes(encoded(raw))
         self.doc['gates']['doctor']['evidence'][0]['sha256'] = sha(p.read_bytes())
-        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+        with self.assertRaisesRegex(ValueError, 'raw evidence engine-build drift'):
             self.validate()
 
     def test_an_undeclared_gate_cannot_carry_forward(self):
@@ -668,6 +704,160 @@ class PrecomputedInventoryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unlisted engine source member'):
             validate_bound_archive(self.f.engine_source_asset, commit=self.f.commit,
                                    tree=self.f.tree, asset=asset, inventory=asset['members'])
+
+
+
+class CarryRulesAtTheVerifier(unittest.TestCase):
+    """Effective model lock (rule A) and cross-choice carry (rule B1), as validate_receipt re-proves them.
+
+    A runtime entry with the shipped choice ``single`` (no draft pack) and an opt-in ``single-draft`` choice with its own
+    runtime_id that drafts with a ``draft`` lock role. Earlier-build evidence predates the draft role and choice (the old
+    lock and profile). The carried_gates provenance is written as compose.py writes it.
+    """
+    WINDOW = 262144
+    CAPS = {'text': True, 'sse': True, 'reasoning': True, 'tools': True, 'images': True, 'video': False,
+            'audio': False, 'json_schema': False, 'prefix_cache': True}
+    TARGET = {'repo': 'synthetic/model', 'revision': 'a' * 40, 'fingerprint': 'sha256:' + 'b' * 64,
+              'files': {'config.json': {'sha256': 'c' * 64, 'bytes': 2}}}
+    DRAFT = {'repo': 'synthetic/draft', 'revision': 'd' * 40, 'fingerprint': 'sha256:' + 'e' * 64,
+             'files': {'config.json': {'sha256': 'f' * 64, 'bytes': 2}}}
+    OLD_BUILD = dict(engine_commit='1' * 40, engine_tree='2' * 40, binary_sha256='3' * 64, release_lock_sha256='4' * 64)
+    NEW_BUILD = dict(engine_commit='7' * 40, engine_tree='8' * 40, binary_sha256='9' * 64, release_lock_sha256='5' * 64)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.mtp = {'kind': 'single', 'argv': ['--max-model-len', str(self.WINDOW), '--spec', 'mtp'], 'env': {},
+                    'files': {}, 'capabilities': self.CAPS}
+        self.drafted = {'kind': 'single', 'runtime_id': 'fn-dflash', 'env': {}, 'files': {}, 'capabilities': self.CAPS,
+                        'argv': ['--max-model-len', str(self.WINDOW), '--spec', 'dflash2', '--draft', '@DRAFT_DIR@']}
+        self.old_lock = self.lock(target=self.TARGET)
+        self.new_lock = self.lock(target=self.TARGET, draft=self.DRAFT)
+        self.old_profile = self.profile(single=self.mtp)
+        self.new_profile = self.profile(single=self.mtp, **{'single-draft': self.drafted})
+        self.runtime = {'profile.json': self.new_profile, 'model.lock.json': self.new_lock}
+        write(self.root, 'locks/old-model.lock.json', self.old_lock)
+
+    @staticmethod
+    def lock(**packs):
+        return e.json_bytes({'schema': 'rexl3.model-lock.v1', 'packs': packs})
+
+    @staticmethod
+    def profile(**choices):
+        return e.json_bytes({'schema': 'rexl3.runtime-profile.v1', 'state': 'final', 'runtime_id': 'fn-mtp',
+                             'default_profile': 'single', 'target_repo': 'synthetic/model', 'profiles': choices})
+
+    def receipt(self, name, *, choice_name, choice, profile_bytes, lock_bytes, build, gates, cases=None):
+        base = self.root / name
+        argv = ['synthetic-serve'] + [{'@DRAFT_DIR@': '/fixture/draft'}.get(a, a) for a in choice['argv']]
+        resolved = {'max_context': self.WINDOW, 'capabilities': choice['capabilities'],
+                    'ranks': [{'rank': 0, 'argv': argv, 'env': {}}]}
+        ident = dict(runtime_id=choice.get('runtime_id', 'fn-mtp'), profile=choice_name, pack='target',
+                     profile_sha256=sha(profile_bytes), model_lock_sha256=sha(lock_bytes),
+                     effective_profile_digest=e.canonical_digest(resolved),
+                     effective_profile_source='owned-launcher-observation', effective_max_context=self.WINDOW,
+                     capabilities=choice['capabilities'], topology={'ranks': 1}, **build)
+        observation = dict(schema='rexl3.launcher-observation.v1', **ident, resolved_config=resolved,
+                           ranks=[{'rank': 0, 'pid': 123, 'start_time_ticks': 456, 'hostname': 'synthetic-host',
+                                   'ready': True, 'argv': argv, 'env': {},
+                                   **{k: ident[k] for k in e.ENGINE_BUILD_KEYS}}])
+        obs = write(base, 'identity/observation.json', e.json_bytes(observation))
+        doc_gates = {}
+        for gate in gates:
+            gate_cases = (cases or {}).get(gate) or [{'name': 'synthetic-' + gate, 'status': 'PASS',
+                                                      'modality': 'image' if gate == 'vision' else 'text',
+                                                      'expectation': 'supported'}]
+            raw = write(base, '%s/%s-cases.json' % (gate, gate), e.json_bytes(
+                {'schema': 'rexl3.gate-evidence.v1', 'gate': gate, **ident, 'cases': gate_cases}))
+            doc_gates[gate] = dict(status='PASS', passed=len(gate_cases), total=len(gate_cases), failed=0, skipped=0,
+                                   evidence=[{'path': '%s/%s/%s-cases.json' % (name, gate, gate),
+                                              'sha256': sha(raw.read_bytes())}])
+        doc = dict(schema=e.RECEIPT_SCHEMA, **ident, gates=doc_gates,
+                   identity_receipt={'path': name + '/identity/observation.json', 'sha256': sha(obs.read_bytes())})
+        return doc, ident
+
+    def full_window(self, name):
+        return {'name': name, 'status': 'PASS', 'modality': 'text', 'expectation': 'supported',
+                'detail': {'prompt_tokens': self.WINDOW - 256, 'max_tokens': 192, 'window': self.WINDOW}}
+
+    def compose(self, target, source_doc, carried, *, lock_copy=False, cross=False):
+        """The composed receipt compose.py would write: the target's fresh gates plus ``carried`` from ``source_doc``."""
+        rerun = sorted(g for g in GATES if g not in carried)
+        record = {'source_engine_commit': source_doc['engine_commit'], 'source_engine_tree': source_doc['engine_tree'],
+                  'source_binary_sha256': source_doc['binary_sha256'], 'source_receipt_sha256': '6' * 64,
+                  'rerun_gates': rerun}
+        if lock_copy:
+            record['source_model_lock'] = {'path': 'locks/old-model.lock.json', 'sha256': sha(self.old_lock)}
+        if cross:
+            record.update(source_profile=source_doc['profile'], source_runtime_id=source_doc['runtime_id'],
+                          source_identity_receipt=source_doc['identity_receipt'])
+        doc = copy.deepcopy(target)
+        doc['gates'].update({g: source_doc['gates'][g] for g in carried})
+        doc.update(carried_gates={g: dict(record) for g in carried}, rerun_gates=rerun)
+        return write(self.root, 'composed/qualification.json', e.json_bytes(doc))
+
+    def validate(self, path, ident, runtime_files='default'):
+        files = self.runtime if runtime_files == 'default' else runtime_files
+        return e.validate_receipt(path, evidence_root=self.root, expected=ident, runtime_files=files)
+
+    def shipped_choice_carry(self, target_record=None):
+        old, _ = self.receipt('old', choice_name='single', choice=self.mtp, profile_bytes=self.old_profile,
+                              lock_bytes=self.old_lock, build=self.OLD_BUILD, gates=GATES)
+        new, ident = self.receipt('new', choice_name='single', choice=self.mtp, profile_bytes=self.new_profile,
+                                  lock_bytes=self.new_lock, build=self.NEW_BUILD, gates=('exactness', 'prefix_cache'))
+        return old, new, ident
+
+    def test_a_the_shipped_choice_carries_after_a_draft_role_is_added(self):
+        old, new, ident = self.shipped_choice_carry()
+        carried = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        path = self.compose(new, old, carried, lock_copy=True)
+        self.assertEqual(sorted(self.validate(path, ident)['carried_gates']), sorted(carried))
+        # Without the target runtime files or the lock copy the whole-file lock hash rule applies.
+        with self.assertRaisesRegex(ValueError, 'identity drift'):
+            self.validate(path, ident, runtime_files=None)
+        path = self.compose(new, old, carried, lock_copy=False)
+        with self.assertRaisesRegex(ValueError, 'identity drift'):
+            self.validate(path, ident)
+
+    def test_a_refuses_a_changed_pack_record_the_choice_fetches(self):
+        old, new, ident = self.shipped_choice_carry()
+        moved = dict(self.TARGET, revision='0' * 40)
+        target_lock = self.lock(target=moved, draft=self.DRAFT)
+        new, ident = self.receipt('new2', choice_name='single', choice=self.mtp, profile_bytes=self.new_profile,
+                                  lock_bytes=target_lock, build=self.NEW_BUILD, gates=('exactness', 'prefix_cache'))
+        path = self.compose(new, old, [g for g in GATES if g not in ('exactness', 'prefix_cache')], lock_copy=True)
+        with self.assertRaisesRegex(ValueError, 'effective model lock differs'):
+            self.validate(path, ident, runtime_files={'profile.json': self.new_profile, 'model.lock.json': target_lock})
+
+    def cross_choice(self, exactness_cases):
+        old, _ = self.receipt('old', choice_name='single', choice=self.mtp, profile_bytes=self.new_profile,
+                              lock_bytes=self.new_lock, build=self.OLD_BUILD, gates=GATES)
+        fresh = [g for g in GATES if g not in e.CROSS_CHOICE_GATES]
+        new, ident = self.receipt('draft', choice_name='single-draft', choice=self.drafted,
+                                  profile_bytes=self.new_profile, lock_bytes=self.new_lock, build=self.NEW_BUILD,
+                                  gates=fresh, cases={'exactness': exactness_cases})
+        return old, new, ident
+
+    def test_b1_quality_and_context_carry_to_a_drafted_choice_under_full_window_exactness(self):
+        old, new, ident = self.cross_choice([self.full_window(n) for n in e.FULL_WINDOW_CASES])
+        path = self.compose(new, old, list(e.CROSS_CHOICE_GATES), cross=True)
+        self.assertEqual(sorted(self.validate(path, ident)['carried_gates']), sorted(e.CROSS_CHOICE_GATES))
+
+    def test_b1_needs_the_full_window_exactness_cases(self):
+        old, new, ident = self.cross_choice([self.full_window('drafted_eq_serial/full_window'),
+                                             {'name': 'prefix_cache/hamlet', 'status': 'PASS', 'modality': 'text',
+                                              'expectation': 'supported'}])
+        path = self.compose(new, old, list(e.CROSS_CHOICE_GATES), cross=True)
+        with self.assertRaisesRegex(ValueError, 'requires the exactness case prefix_cache/full_window'):
+            self.validate(path, ident)
+
+    def test_b1_allows_only_quality_and_context(self):
+        old, new, ident = self.cross_choice([self.full_window(n) for n in e.FULL_WINDOW_CASES])
+        new['gates'].pop('doctor')
+        path = self.compose(new, old, ['quality', 'context', 'doctor'], cross=True)
+        with self.assertRaisesRegex(ValueError, 'cross-choice carry allows only quality and context'):
+            self.validate(path, ident)
 
 
 if __name__ == '__main__':

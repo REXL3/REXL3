@@ -8,6 +8,19 @@
     },
     "glm-5.3/glm-5.3-flash/v1": {
       "approval_sha256": "7d1cca67cc1d39871eabc9c786530dda50719c96339a2ee9d1ad3dcafc39492f",
+      "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",
+      "profiles": {
+        "glm53-flash-single": {
+          "receipt": {
+            "sha256": "fe045485d88229d662a7a9d7bba219f697ade1b947946276cd9e115666b0f420"
+          }
+        },
+        "glm53-flash-tp2-1m": {
+          "receipt": {
+            "sha256": "efd1015f3678c5014f46c62406b5c5b528e282612b559d377662084425e4d153"
+          }
+        }
+      },
       "runtime_id": "glm53-flash-2.25bpw-sm121",
       "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
       "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"

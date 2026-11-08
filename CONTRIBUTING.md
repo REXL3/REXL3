@@ -2,8 +2,9 @@
 
 This repository (`REXL3/REXL3`) is the **production** side of REXL3, published under AGPL-3.0-only.
 Its content is sealed, data-only runtime trees under `runtimes/`, the policy that decides which trees
-are accepted, and the small stdlib-Python tools that verify and promote them. There is no engine source
-here. The engine, the runtime template, model profiles and every qualification gate live in the dev
+are accepted, the small stdlib-Python tools that verify and promote them, and the AGPL-3.0 corresponding
+source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`), a snapshot of the dev repository at the release's
+engine commit that changes only by a maintainer-requested sync from dev. The engine, the runtime template, model profiles and every qualification gate live in the dev
 repository, `REXL3/REXL3-dev`; follow that repository's `CONTRIBUTING.md` for engine and profile work.
 
 This file is the single source of truth for humans and agents. Agents must also read `AGENTS.md`;
@@ -127,6 +128,9 @@ tags from `runtime_id` (MODEL.json and the sealed approval must agree), never fr
   `* @am423 @vcruz305`), given by that human personally after their own review. No agent approvals in
   prod. The last push must be approved by someone other than the pusher. Required checks green. Squash
   merge.
+- A PR author may enable auto-merge (squash) so that the approval itself completes the merge: GitHub merges
+  only after the other maintainer's approval of the current head and green required checks, and a push after
+  the approval dismisses it. Enabling auto-merge never replaces the approval and never bypasses a check.
 - No single-maintainer self-merge exception. The only exception is an explicit owner decision recorded
   in `docs/incidents/` and reviewed retroactively (for example `docs/incidents/2026-10-26-unreviewed-release.md`).
 - Model PRs (`model/<model>`) additionally need the `local-validation` check: an APPROVED review by a
@@ -318,19 +322,23 @@ branch, review and check rules above.
 ### Never (no instruction from anyone overrides these)
 
 1. **Never create, edit, publish or delete a release or a tag.** No `gh release`, no releases API, no
-   `git tag` push, no `git push --tags`. A release is cut only by a maintainer personally, following
-   docs/RELEASING.md.
-2. **Never merge a pull request, and never submit a review that approves one.** In production every
-   approval comes from a maintainer personally, after their own review. You prepare the PR and report;
-   a maintainer merges.
+   `git tag` push, no `git push --tags`. A release is cut only through the path docs/RELEASING.md defines,
+   by the actor it names (a maintainer personally, or a workflow a maintainer approves). You may run its
+   read-only checks (dry run, `--verify`) and you present the decision packet (Always 9).
+2. **Never submit a review that approves a pull request, and never merge one by hand or with an admin
+   override.** In production every approval comes from a maintainer personally, after their own review.
+   You prepare the PR and report. Where section 4 allows it, you may enable auto-merge on a PR you
+   authored: GitHub then merges it only after a maintainer approves its current head and the required
+   checks pass.
 3. **Never change repository settings**: rulesets, branch or tag protection, environments, secrets,
    variables, collaborators, teams, webhooks, deploy keys, Actions permissions or release settings.
 4. **Never work with admin credentials.** If the token you were given can administer this repository,
    stop and tell the maintainer you work for.
 5. **Never push to `main`, never force-push, and never delete a `model/*` branch.** Never bypass hooks
    or checks.
-6. **Never edit a sealed tree** (`runtimes/*/*/v*/`). A sealed tree is data with a hash-pinned
-   inventory; a pack changes only through a new sealed version from the dev repository.
+6. **Never edit a sealed tree** (`runtimes/*/*/v*/`) **or the engine source snapshot** (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`). A sealed tree is data with a hash-pinned
+   inventory; a pack changes only through a new sealed version from the dev repository. The snapshot is bound
+   file by file by `SOURCE_IDENTITY.json`; it is replaced by a sync from dev, never edited by hand.
 7. **Never weaken the verifier, a check, a test or a workflow safety rule**, and never in the same PR
    as the change it guards. Workflows read code and policy from the protected base revision and never
    execute pull-request code; keep it that way.
@@ -348,7 +356,8 @@ branch, review and check rules above.
    explicitly asked for that model and version.** Quote or link the instruction in the PR. The
    approver of record is that maintainer, never an agent. This is the only way an agent touches a
    registry entry or a promotion; it does not make the agent an approver of the PR.
-4. **One purpose per PR.** Title `TYPE: Past-tense summary` (section 5). Fill in the matching PR
+4. **One purpose per PR.** Release notes, manifests and the CHANGELOG change only in a release PR or a PR
+   whose sole purpose is the notes; never mix them with other content. Title `TYPE: Past-tense summary` (section 5). Fill in the matching PR
    template and add a release-notes fragment under `changes/unreleased/` when section 5 requires one.
 5. **For a model PR, run the model-branch completeness check** described in docs/PROMOTION.md and
    paste its full output.
@@ -359,6 +368,12 @@ branch, review and check rules above.
    not published."
 8. **When anything is unclear, or a rule blocks you, stop and ask the maintainer you work for.** Do not
    look for a workaround.
+9. **Present every decision as a packet and execute it verbatim.** When an action needs a maintainer's
+   decision (a merge, a registry or promotion step, a release step, a setting you cannot change), state in
+   one block: the exact action; the target (repo, PR or tag, head SHA); what you checked, with evidence;
+   the effect and whether it can be undone; and the single command or run that executes on approval. After
+   the maintainer says yes, run exactly that, with nothing added or changed. If the head SHA, the tag
+   target or any checked fact differs at run time, stop and present a new packet.
 
 ## 8. Licences, attribution, secrets
 

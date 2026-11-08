@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "name": "dsv41tp2",
+  "user": "tester",
+  "binary": "/opt/rexl3/bin/rexl3-serve",
+  "binary_max_ranks": 2,
+  "state_dir": "$HOME/.local/share/rexl3/unstarted",
+  "ssh": {
+    "options": [
+      "-F",
+      "/dev/null",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "StrictHostKeyChecking=yes",
+      "-o",
+      "ForwardAgent=no",
+      "-o",
+      "ClearAllForwardings=yes",
+      "-o",
+      "PermitLocalCommand=no",
+      "-o",
+      "SendEnv=-*",
+      "-o",
+      "ConnectTimeout=10",
+      "-o",
+      "ServerAliveInterval=15",
+      "-o",
+      "ServerAliveCountMax=2"
+    ]
+  },
+  "pack": "/models/dsv41",
+  "serve": {
+    "flags": [
+    "--slots",
+    "1",
+    "--max-model-len",
+    "1048576",
+    "--kv-dtype",
+    "q4",
+      "--no-video",
+      "--no-vision",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "on",
+      "--served-model-name",
+      "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw"
+    ],
+    "env": {
+      "REXL3_DSV41_KV": "q4",
+      "REXL3_DSV41_FAST_MOE": "1",
+      "REXL3_DSV41_SPEC_LEARN": "1",
+      "REXL3_DSV41_MOE_TOPP": "1.0"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 300,
+    "ready_timeout_s": 900,
+    "peer_timeout_s": 60,
+    "shutdown_grace_s": 5
+  },
+  "nccl": {
+    "max_nchannels": 4,
+    "socket_ifname": "eth0",
+    "hca": [
+      "mlx5_0:1"
+    ],
+    "env": {}
+  },
+  "lock_wait_s": 1,
+  "nodes": [
+    {
+      "name": "leader",
+      "address": "192.0.2.2",
+      "fabric_address": "192.0.2.2",
+      "user": "tester",
+      "local": false,
+      "env": {},
+      "flags": []
+    },
+    {
+      "name": "follower",
+      "address": "192.0.2.3",
+      "fabric_address": "192.0.2.3",
+      "user": "tester",
+      "local": false,
+      "env": {},
+      "flags": []
+    }
+  ],
+  "groups": [
+    {
+      "name": "tp2",
+      "ranks": [
+        "leader",
+        "follower"
+      ],
+      "http_host": "192.0.2.2",
+      "http_port": 8940,
+      "tp_port": 29600,
+      "leader_flags": []
+    }
+  ]
+}

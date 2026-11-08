@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The end-to-end smoke of tools/cluster_smoke.py (docs/CLUSTER_OPERATIONS.md 4.5): the repaired pack, 4 slots, 8192 tokens, ports away from the other tools, a long lock wait because it queues behind other sessions (the connect timeout only covers the start skew: up takes every lock before it starts any server).",
+  "name": "smoke",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "expected_hostname": "host-a"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "disabled": true,
+      "reason": "out of service 2026-10-10 to 2026-10-16 (the gn100s, owner rule, lifted 2026-10-16): disabled in this two-node file; cluster.nemotron-2x-tp2.json is the four-node layout"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "disabled": true,
+      "reason": "out of service 2026-10-10 to 2026-10-16 (the gn100s, owner rule, lifted 2026-10-16): disabled in this two-node file; cluster.nemotron-2x-tp2.json is the four-node layout"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "expected_hostname": "host-d"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "lib": "/srv/rexl3/nccl/lib/libnccl.so.2",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ]
+  },
+  "pack": "/srv/models/nemotron-super-exl3",
+  "memory": {
+    "min_free_gib": 45
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--no-vision",
+      "--slots",
+      "4",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "8192",
+      "--prefill-chunk",
+      "256",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "off",
+      "--served-model-name",
+      "m"
+    ]
+  },
+  "tp": {
+    "connect_timeout_s": 300,
+    "ready_timeout_s": 600,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "lock_wait_s": 3600,
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N1",
+        "N4"
+      ],
+      "tp_port": 29727,
+      "http_port": 8977,
+      "http_host": "0.0.0.0"
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 10,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 5,
+    "window_s": 900,
+    "settle_s": 25,
+    "poll_s": 2
+  }
+}

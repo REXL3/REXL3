@@ -1,0 +1,93 @@
+{
+ "animated": [
+  "animated_2f_8x8.webp"
+ ],
+ "fixtures": {
+  "flat_lossy_2048.webp": {
+   "chunk": "VP8 ",
+   "drop_sha256": "aa72df51764830e69f8d8f4811b86fee2ed8f640f57fb44da8d3d22b7f25557e",
+   "height": 2048,
+   "white_sha256": "aa72df51764830e69f8d8f4811b86fee2ed8f640f57fb44da8d3d22b7f25557e",
+   "width": 2048
+  },
+  "flat_lossy_alpha_2048.webp": {
+   "chunk": "VP8X",
+   "drop_sha256": "aa72df51764830e69f8d8f4811b86fee2ed8f640f57fb44da8d3d22b7f25557e",
+   "height": 2048,
+   "white_sha256": "e12313d180780944ff65680b552f31c58131f68dc859e2d2abeed48f3040fdec",
+   "width": 2048
+  },
+  "gray_lossy_97x61.webp": {
+   "chunk": "VP8 ",
+   "drop_sha256": "a37bfd8280d65f0c9640b7032f65d1ae7efa8c83ba17198e0dd7e7b1a834c0a5",
+   "height": 61,
+   "white_sha256": "a37bfd8280d65f0c9640b7032f65d1ae7efa8c83ba17198e0dd7e7b1a834c0a5",
+   "width": 97
+  },
+  "lossless_63x65.webp": {
+   "chunk": "VP8L",
+   "drop_sha256": "8fb5afa6cc134a79cd8dd37117e4728bdfeba4f0456c26f3c98a97057b6ffa47",
+   "height": 65,
+   "white_sha256": "8fb5afa6cc134a79cd8dd37117e4728bdfeba4f0456c26f3c98a97057b6ffa47",
+   "width": 63
+  },
+  "lossless_alpha_exact_63x65.webp": {
+   "chunk": "VP8L",
+   "drop_sha256": "911a6b664730ed4d80e80f1fc54d4398da2418aa7bcb2a1d337ba83918d05018",
+   "height": 65,
+   "white_sha256": "3f373bef8801cf45418a3467e66d86e45416f3d8e58974bef543ccee773f007c",
+   "width": 63
+  },
+  "lossless_exif6_37x21.webp": {
+   "chunk": "VP8X",
+   "drop_sha256": "8c0417ef82c15016028b520c58dac36401cda2f04d206f94e0f499b4d688d0b5",
+   "height": 37,
+   "white_sha256": "8c0417ef82c15016028b520c58dac36401cda2f04d206f94e0f499b4d688d0b5",
+   "width": 21
+  },
+  "lossless_pal4_97x61.webp": {
+   "chunk": "VP8L",
+   "drop_sha256": "de5a76c56ecec97d35c37c2239d39ac075b1c926f5f07e59f4cdb397a4a8a33b",
+   "height": 61,
+   "white_sha256": "de5a76c56ecec97d35c37c2239d39ac075b1c926f5f07e59f4cdb397a4a8a33b",
+   "width": 97
+  },
+  "lossy_alpha_q80_63x65.webp": {
+   "chunk": "VP8X",
+   "drop_sha256": "ffa2bc3b2350257a9c1e4a74e56ed29a12eb898d39685c212d5b2a69bc949f9f",
+   "height": 65,
+   "white_sha256": "6fe8b5b9e81b85ee7a63d3ed9e0b9ac2ec0423ba7b9cf0d5b4ec9ff00a2d6994",
+   "width": 63
+  },
+  "lossy_exif8_37x21.webp": {
+   "chunk": "VP8X",
+   "drop_sha256": "42ecd1e67c7d910cb871c334f5c1709dae46eaef707d9b8c74faa6e041c05e06",
+   "height": 37,
+   "white_sha256": "42ecd1e67c7d910cb871c334f5c1709dae46eaef707d9b8c74faa6e041c05e06",
+   "width": 21
+  },
+  "lossy_q0_m0_17x13.webp": {
+   "chunk": "VP8 ",
+   "drop_sha256": "865c0fe0668887e1d744405f4f18473b6480099d36f7cd8efbd8d5edd0a0b4fa",
+   "height": 13,
+   "white_sha256": "865c0fe0668887e1d744405f4f18473b6480099d36f7cd8efbd8d5edd0a0b4fa",
+   "width": 17
+  },
+  "lossy_q100_m6_63x65.webp": {
+   "chunk": "VP8 ",
+   "drop_sha256": "85c17e762226ea6173b307e95ef6cb5f78487453382a8b36c1e28adfda2bd9b3",
+   "height": 65,
+   "white_sha256": "85c17e762226ea6173b307e95ef6cb5f78487453382a8b36c1e28adfda2bd9b3",
+   "width": 63
+  },
+  "lossy_q75_97x61.webp": {
+   "chunk": "VP8 ",
+   "drop_sha256": "af76fbe36e855bb1df645b1450d2dafee5f1cfc104f7b351bf60492f30b168e4",
+   "height": 61,
+   "white_sha256": "af76fbe36e855bb1df645b1450d2dafee5f1cfc104f7b351bf60492f30b168e4",
+   "width": 97
+  }
+ },
+ "libwebp": "1.6.0",
+ "pillow": "12.3.0"
+}

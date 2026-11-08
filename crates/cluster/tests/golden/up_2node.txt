@@ -1,0 +1,176 @@
+# up: cluster crs812-2node group g0 (2 ranks)
+# GPU locks are taken in this order; each rank holds its lock and WAITS at a start barrier: N1 (rank 0), N4 (rank 1)
+# once every lock is held the launcher releases the barrier (the go step below, same order) and the servers start together
+# rendezvous: --tp-peer 192.0.2.1:29600 on every rank; leader http://192.0.2.1:8941
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.1 bash -s   # node N1: start rank 0
+d=/tmp/rexl3-cluster-crs812-2node/g0
+bin=/srv/rexl3/bin/rexl3-serve
+mkdir -p "$d" || { echo state_dir_unwritable; exit 74; }
+touch "$d/launcher.beat"
+if [ -s "$d/rank0.pid" ]; then
+  p=$(cat "$d/rank0.pid")
+  if kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF -- "$bin"; then
+    echo "already_running pid=$p"; exit 3
+  fi
+fi
+rm -f "$d/rank0.pid" "$d/rank0.wpid" "$d/rank0.exit" "$d/rank0.state" "$d/rank0.go" "$d/rank0.stop"
+[ -s "$d/rank0.log" ] && mv -f "$d/rank0.log" "$d/rank0.log.prev"
+cat > "$d/rank0.run" <<'REXL3_RUN'
+#!/usr/bin/env bash
+# rexl3-cluster: cluster crs812-2node group g0 rank 0 of 2 on node N1
+# The server's pid is written once the node's GPU lock is held, its exit status when it ends.
+# Two-phase start: the lock is taken first and the server is NOT started until the launcher has seen every rank's lock
+# held and writes this rank's go file, so no rank's connect clock runs while another rank still queues for its lock.
+for f in /proc/$$/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] 2>/dev/null && [ "$n" -lt 255 ] && eval "exec $n>&-"; done 2>/dev/null
+d=/tmp/rexl3-cluster-crs812-2node/g0
+bin=/srv/rexl3/bin/rexl3-serve
+lock=/tmp/rexl3-gpu.lock
+echo $$ > "$d/rank0.wpid"
+[ -e "$lock" ] || : > "$lock"
+exec 9<"$lock"
+if ! flock -w 300 9; then
+  echo lock_timeout > "$d/rank0.state"; echo 75 > "$d/rank0.exit"; exit 75
+fi
+envf=/srv/rexl3/nccl/nccl.env
+[ -f "$envf" ] || { echo env_file_missing > "$d/rank0.state"; echo 78 > "$d/rank0.exit"; exit 78; }
+echo locked > "$d/rank0.state"
+# the barrier: the lock is held, the server waits for the launcher's go (every rank's lock held). A launcher that
+# is gone is noticed: its heartbeat (touched by every status poll) goes stale and the lock is released.
+go="$d/rank0.go"
+beat="$d/launcher.beat"; t0=$(date +%s)
+until [ -e "$go" ]; do
+  now=$(date +%s); b=$(stat -c %Y "$beat" 2>/dev/null || echo "$t0")
+  if [ $((now - b)) -gt 180 ] || [ $((now - t0)) -gt 420 ]; then
+    echo barrier_timeout > "$d/rank0.state"; echo 75 > "$d/rank0.exit"; exit 75
+  fi
+  sleep 0.2 9<&-
+done
+# the environment is what the cluster file says: ambient REXL3_* and NCCL_* variables are cleared first
+for v in $(compgen -e | grep -E '^(REXL3_|NCCL_)'); do unset "$v"; done
+. "$envf"
+export NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1
+export NCCL_MAX_NCHANNELS=4
+export NCCL_SOCKET_IFNAME==enP7s7
+export REXL3_NCCL_LIB=/srv/rexl3/nccl/lib/libnccl.so.2
+/srv/rexl3/bin/rexl3-serve --model /srv/models/nemotron-super-exl3 --allow-unvalidated-pack --backend cuda --no-vision --slots 20 --max-model-len 40000 --kv-tokens 40000 --prefill-chunk 256 --spec auto --prefix-cache off --served-model-name m --host 0.0.0.0 --port 8941 --tp-ranks 2 --tp-rank 0 --tp-peer 192.0.2.1:29600 --tp-connect-timeout 300 --tp-ready-timeout 300 --tp-peer-timeout 15 --shutdown-grace 20 >> "$d/rank0.log" 2>&1 &
+pid=$!
+echo "$pid" > "$d/rank0.pid"
+echo running > "$d/rank0.state"
+# the watcher: it ends within a poll of the server, signals only the server it started (same start time, same binary),
+# and stops it 25 s after its /health first says the group is lost (a leader that does not exit by itself)
+health() { if command -v curl >/dev/null 2>&1; then curl -s -m 2 http://127.0.0.1:8941/health; else ( exec 3<>/dev/tcp/127.0.0.1/8941 && printf 'GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' >&3 && timeout 2 cat <&3 ) 2>/dev/null; fi; }
+stime() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+same() { [ -n "$st0" ] && [ "$(stime "$pid")" = "$st0" ] && { [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$binr" ] || tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$bin"; }; }
+binr=$(readlink -f "$bin" 2>/dev/null); st0=$(stime "$pid")
+( exec 9<&-
+  t0=$(date +%s); why=; lost=
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    case "$(health)" in
+      *'"status":"group_lost"'*|*'"state":"lost"'*)
+        lost=${lost:-$now}; if [ $((now - lost)) -ge 25 ]; then why=group_lost; break; fi;;
+      *) lost=;;
+    esac
+    sleep 2
+  done
+  if [ -n "$why" ]; then
+    echo "$why" > "$d/rank0.stop"
+    same && kill -TERM "$pid" 2>/dev/null
+    i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 10 ]; do sleep 2; i=$((i + 1)); done
+    same && kill -KILL "$pid" 2>/dev/null
+  fi
+) </dev/null >/dev/null 2>&1 &
+watcher=$!
+wait "$pid"
+code=$?
+wait "$watcher" 2>/dev/null
+echo "$code" > "$d/rank0.exit"
+echo exited > "$d/rank0.state"
+exit "$code"
+REXL3_RUN
+setsid nohup bash "$d/rank0.run" </dev/null >/dev/null 2>&1 &
+echo "launched group g0 rank 0"
+### end
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.4 bash -s   # node N4: start rank 1
+d=/tmp/rexl3-cluster-crs812-2node/g0
+bin=/srv/rexl3/bin/rexl3-serve
+mkdir -p "$d" || { echo state_dir_unwritable; exit 74; }
+touch "$d/launcher.beat"
+if [ -s "$d/rank1.pid" ]; then
+  p=$(cat "$d/rank1.pid")
+  if kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF -- "$bin"; then
+    echo "already_running pid=$p"; exit 3
+  fi
+fi
+rm -f "$d/rank1.pid" "$d/rank1.wpid" "$d/rank1.exit" "$d/rank1.state" "$d/rank1.go" "$d/rank1.stop"
+[ -s "$d/rank1.log" ] && mv -f "$d/rank1.log" "$d/rank1.log.prev"
+cat > "$d/rank1.run" <<'REXL3_RUN'
+#!/usr/bin/env bash
+# rexl3-cluster: cluster crs812-2node group g0 rank 1 of 2 on node N4
+# The server's pid is written once the node's GPU lock is held, its exit status when it ends.
+# Two-phase start: the lock is taken first and the server is NOT started until the launcher has seen every rank's lock
+# held and writes this rank's go file, so no rank's connect clock runs while another rank still queues for its lock.
+for f in /proc/$$/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] 2>/dev/null && [ "$n" -lt 255 ] && eval "exec $n>&-"; done 2>/dev/null
+d=/tmp/rexl3-cluster-crs812-2node/g0
+bin=/srv/rexl3/bin/rexl3-serve
+lock=/tmp/rexl3-gpu.lock
+echo $$ > "$d/rank1.wpid"
+[ -e "$lock" ] || : > "$lock"
+exec 9<"$lock"
+if ! flock -w 300 9; then
+  echo lock_timeout > "$d/rank1.state"; echo 75 > "$d/rank1.exit"; exit 75
+fi
+envf=/srv/rexl3/nccl/nccl.env
+[ -f "$envf" ] || { echo env_file_missing > "$d/rank1.state"; echo 78 > "$d/rank1.exit"; exit 78; }
+echo locked > "$d/rank1.state"
+# the barrier: the lock is held, the server waits for the launcher's go (every rank's lock held). A launcher that
+# is gone is noticed: its heartbeat (touched by every status poll) goes stale and the lock is released.
+go="$d/rank1.go"
+beat="$d/launcher.beat"; t0=$(date +%s)
+until [ -e "$go" ]; do
+  now=$(date +%s); b=$(stat -c %Y "$beat" 2>/dev/null || echo "$t0")
+  if [ $((now - b)) -gt 180 ] || [ $((now - t0)) -gt 420 ]; then
+    echo barrier_timeout > "$d/rank1.state"; echo 75 > "$d/rank1.exit"; exit 75
+  fi
+  sleep 0.2 9<&-
+done
+# the environment is what the cluster file says: ambient REXL3_* and NCCL_* variables are cleared first
+for v in $(compgen -e | grep -E '^(REXL3_|NCCL_)'); do unset "$v"; done
+. "$envf"
+export NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1
+export NCCL_MAX_NCHANNELS=4
+export NCCL_SOCKET_IFNAME==enP7s7
+export REXL3_NCCL_LIB=/srv/rexl3/nccl/lib/libnccl.so.2
+/srv/rexl3/bin/rexl3-serve --model /srv/models/nemotron-super-exl3 --allow-unvalidated-pack --backend cuda --no-vision --slots 20 --max-model-len 40000 --kv-tokens 40000 --prefill-chunk 256 --spec auto --prefix-cache off --served-model-name m --tp-ranks 2 --tp-rank 1 --tp-peer 192.0.2.1:29600 --tp-connect-timeout 300 --tp-ready-timeout 300 --tp-peer-timeout 15 --shutdown-grace 20 >> "$d/rank1.log" 2>&1 &
+pid=$!
+echo "$pid" > "$d/rank1.pid"
+echo running > "$d/rank1.state"
+wait "$pid"
+code=$?
+echo "$code" > "$d/rank1.exit"
+echo exited > "$d/rank1.state"
+exit "$code"
+REXL3_RUN
+setsid nohup bash "$d/rank1.run" </dev/null >/dev/null 2>&1 &
+echo "launched group g0 rank 1"
+### end
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.1 bash -s   # node N1: release the start barrier of rank 0 (once every rank reports `locked`)
+d=/tmp/rexl3-cluster-crs812-2node/g0
+r=0
+w=$(cat "$d/rank0.wpid" 2>/dev/null)
+if [ -n "$w" ] && kill -0 "$w" 2>/dev/null && tr '\0' ' ' < "/proc/$w/cmdline" 2>/dev/null | grep -qF -- "rank0.run"; then
+  : > "$d/rank0.go" && echo "go rank 0"
+else
+  echo not_waiting
+fi
+### end
+### ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 rexl3@192.0.2.4 bash -s   # node N4: release the start barrier of rank 1 (once every rank reports `locked`)
+d=/tmp/rexl3-cluster-crs812-2node/g0
+r=1
+w=$(cat "$d/rank1.wpid" 2>/dev/null)
+if [ -n "$w" ] && kill -0 "$w" 2>/dev/null && tr '\0' ' ' < "/proc/$w/cmdline" 2>/dev/null | grep -qF -- "rank1.run"; then
+  : > "$d/rank1.go" && echo "go rank 1"
+else
+  echo not_waiting
+fi
+### end

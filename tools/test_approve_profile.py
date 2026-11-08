@@ -276,9 +276,11 @@ class SyntheticSeal:
 
         The receipt document and its identity observation stay on the engine build being sealed;
         only the declared gates' raw case summaries move to the pinned source build (a T2
-        gate-scoped re-run composition). ``source`` pins the earlier build (commit/tree/binary;
-        the release lock stays strict on the sealed build per D42 option B); it defaults to a
-        synthetic build, which is fine for refusal-path tests.
+        gate-scoped re-run composition). ``source`` pins the earlier build (commit/tree/binary);
+        the carried raw evidence also keeps that build's own release lock, as a real earlier
+        build's evidence does (the release lock changes with every binary). It defaults to a
+        synthetic build, which is fine for refusal-path tests. The top-level ``rerun_gates``
+        is written as compose.py writes it.
         """
         alt = source or {k: ('f' * len(self.receipt[k]) if k in ('engine_commit', 'engine_tree')
                              else '9' * len(self.receipt[k]) if k in ('binary_sha256', 'release_lock_sha256')
@@ -288,8 +290,10 @@ class SyntheticSeal:
             raw = json.loads(raw_path.read_bytes())
             for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
                 raw[k] = alt[k]
+            raw['release_lock_sha256'] = alt.get('release_lock_sha256', '9' * 64)
             raw_path.write_bytes(encoded(raw))
             self.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+        self.receipt['rerun_gates'] = list(rerun)
         self.receipt['carried_gates'] = {gate: {
             'source_engine_commit': alt['engine_commit'],
             'source_engine_tree': alt['engine_tree'],
@@ -365,10 +369,11 @@ class ApprovalTest(unittest.TestCase):
                         approved_templates=self.f.approved, engine_dir=None)
 
     def test_seal_refuses_all_nine_gates_carried_zero_fresh(self):
-        # D42 option B: a receipt whose gates are all carried (zero fresh gates on the target
-        # build) must never seal, even when every record is otherwise well-formed.
+        # A receipt whose gates are all carried (zero fresh gates on the target build) must
+        # never seal, even when every record is otherwise well-formed: exactness and
+        # prefix_cache can never be carried, and at least one gate must be fresh.
         self.f.rewrite_engine_build_gates(*GATES, rerun=('doctor',))
-        with self.assertRaisesRegex(ValueError, 'at least one gate must be fresh'):
+        with self.assertRaisesRegex(ValueError, 'can never be carried|at least one gate .*fresh'):
             self.f.seal()
 
     def test_seal_refuses_a_carried_gate_without_a_registry_pinned_source_approval(self):
@@ -395,6 +400,58 @@ class ApprovalTest(unittest.TestCase):
             'runtime_id': doc['runtime_id'], 'binary_sha256': '9' * 64,
             'profiles': {'single': {'receipt': {'sha256': source_receipt_sha256}}}}
         return path, doc, registry
+
+    def test_verify_applies_the_effective_model_lock_rule_from_the_bundle(self):
+        # Rule A at verification: the carried gates were produced under a lock that also had a role this choice
+        # never fetches; a copy of that lock ships with the evidence. verify_assets reads the bundle's profile.json
+        # and model.lock.json to re-prove that the target record is unchanged.
+        carried = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        src_commit = self.f.git('rev-parse', 'HEAD~1')
+        src_tree = self.f.git('rev-parse', 'HEAD~1^{tree}')
+        self.f.rewrite_engine_build_gates(*carried, source={
+            'engine_commit': src_commit, 'engine_tree': src_tree, 'binary_sha256': '9' * 64})
+
+        def bind_source_lock(name, target_revision):
+            source_lock = copy.deepcopy(self.f.models)
+            source_lock['packs']['draft'] = dict(copy.deepcopy(source_lock['packs']['target']), repo='synthetic/draft')
+            source_lock['packs']['target']['revision'] = target_revision
+            lock_copy = write(self.f.assets, 'locks/' + name, encoded(source_lock))
+            for gate in carried:
+                raw_path = self.f.assets / self.f.receipt['gates'][gate]['evidence'][0]['path']
+                raw = json.loads(raw_path.read_bytes())
+                raw['model_lock_sha256'] = sha(lock_copy.read_bytes())
+                raw_path.write_bytes(encoded(raw))
+                self.f.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+                self.f.receipt['carried_gates'][gate]['source_model_lock'] = {
+                    'path': 'locks/' + name, 'sha256': sha(lock_copy.read_bytes())}
+            self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+            self.f.kwargs['receipts'] = [self.f.receipt_path]
+
+        # A lock copy whose target record differs does not carry.
+        bind_source_lock('moved-model.lock.json', 'e' * 40)
+        with self.assertRaisesRegex(ValueError, 'effective model lock differs'):
+            self.f.seal()
+        bind_source_lock('source-model.lock.json', self.f.models['packs']['target']['revision'])
+        doc = self.f.seal()
+        self.assertIn('locks/source-model.lock.json', doc['evidence_asset']['members'])
+        path, _, registry = self.f.published_fixture()
+        registry['approvals']['synthetic-demo/v0'] = {
+            'approval_sha256': '7' * 64, 'source_commit': src_commit, 'source_tree': src_tree,
+            'runtime_id': doc['runtime_id'], 'binary_sha256': '9' * 64,
+            'profiles': {'single': {'receipt': {'sha256': 'a' * 64}}}}
+        e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_an_approval_record_that_contradicts_the_receipt(self):
+        path, doc, registry = self._carry_seal_and_registry()
+        for label, edit in (('carried', lambda sel: sel['carried_gates'].pop('doctor')),
+                            ('rerun', lambda sel: sel.__setitem__('rerun_gates', ['exactness']))):
+            with self.subTest(label):
+                tampered = copy.deepcopy(doc)
+                edit(tampered['profiles']['single'])
+                path.write_bytes(encoded(tampered))
+                registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(path.read_bytes())
+                with self.assertRaisesRegex(ValueError, 'approval (carried|rerun)_gates record does not match'):
+                    e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
 
     def test_verify_refuses_another_models_pinned_approval_with_the_same_commit_and_tree(self):
         # Q56 (1): a foreign model's registry-pinned approval with the same production commit and

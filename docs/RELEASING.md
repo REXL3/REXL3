@@ -37,7 +37,11 @@ DeepSeek-V4.1-Flash-1017.
     commit, tree, binary, release lock and run paths; it must match the new build's model pack,
     profile choice, capabilities, topology and context, and its source approval must be pinned in
     the registry with `binary_sha256` and the profile's receipt digest. `exactness` and
-    `prefix_cache` always re-run.
+    `prefix_cache` always re-run. Instead of a sealed approval, the source may be a complete,
+    `all_pass` qualification bundle of the earlier build, shipped whole in the evidence with a
+    bit-identity record: the new build answers that bundle binary's requests with token-identical
+    outputs, a full-window request included. An entry sealed before carry-forward gets its pins
+    once with `tools/pin_carry_source.py`, which derives them from its verified sealed evidence.
   - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
     `Q200` runs again; nothing carries forward.
 - As the first release, v0.1.0 has no earlier engine release to carry from. The four originally

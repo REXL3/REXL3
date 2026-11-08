@@ -453,6 +453,83 @@ class ApprovalTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'approval (carried|rerun)_gates record does not match'):
                     e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
 
+    def unsealed_bundle_carry(self, record_changes=None, target_binary=None):
+        """Seal a carry whose source is an unsealed all_pass bundle of an earlier build plus a bit-identity record."""
+        f = self.f
+        ident = {k: f.receipt[k] for k in e.IDENTITY_KEYS}
+        src_commit, src_tree = f.git('rev-parse', 'HEAD~1'), f.git('rev-parse', 'HEAD~1^{tree}')
+        old = dict(ident, engine_commit=src_commit, engine_tree=src_tree, binary_sha256='9' * 64,
+                   release_lock_sha256='8' * 64)
+        obs = json.loads((f.assets / f.receipt['identity_receipt']['path']).read_bytes())
+        obs.update({k: old[k] for k in e.ENGINE_BUILD_KEYS}, release_lock_sha256=old['release_lock_sha256'])
+        for rank in obs['ranks']:
+            rank.update({k: old[k] for k in e.ENGINE_BUILD_KEYS})
+        obs_path = write(f.assets, 'r3/identity.json', encoded(obs))
+        bundle = dict(schema=e.RECEIPT_SCHEMA, **old, all_pass=True, gates={},
+                      identity_receipt={'path': 'r3/identity.json', 'sha256': sha(obs_path.read_bytes())})
+        for gate in GATES:
+            raw = json.loads((f.assets / f.receipt['gates'][gate]['evidence'][0]['path']).read_bytes())
+            raw.update({k: old[k] for k in e.IDENTITY_KEYS})
+            raw_path = write(f.assets, 'r3/%s.json' % gate, encoded(raw))
+            bundle['gates'][gate] = dict(f.receipt['gates'][gate],
+                                         evidence=[{'path': 'r3/%s.json' % gate, 'sha256': sha(raw_path.read_bytes())}])
+        bundle_path = write(f.assets, 'r3/summary.json', encoded(bundle))
+        record = {'schema': e.BIT_IDENTITY_SCHEMA, 'runtime_id': ident['runtime_id'], 'profile': ident['profile'],
+                  'window': ident['effective_max_context'], 'source_receipt_sha256': sha(bundle_path.read_bytes()),
+                  'source': {'binary_sha256': old['binary_sha256'], 'engine_commit': src_commit,
+                             'system_fingerprint': 'fp_%s_kernel' % src_commit[:12]},
+                  'target': {'binary_sha256': target_binary or ident['binary_sha256'], 'engine_commit': ident['engine_commit'],
+                             'system_fingerprint': 'fp_%s_kernel' % ident['engine_commit'][:12]},
+                  'cases': [{'name': 'full-window/long', 'request_sha256': '1' * 64,
+                             'prompt_tokens': ident['effective_max_context'] - 1146,
+                             'max_tokens': 48, 'source_output_sha256': '2' * 64, 'target_output_sha256': '2' * 64}],
+                  'method': 'synthetic fixture'}
+        record.update(record_changes or {})
+        record_path = write(f.assets, 'bits/bit-identity.json', encoded(record))
+        carried = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        rerun = ['exactness', 'prefix_cache']
+        spec = {'source_engine_commit': src_commit, 'source_engine_tree': src_tree, 'source_binary_sha256': '9' * 64,
+                'source_receipt_sha256': sha(bundle_path.read_bytes()), 'rerun_gates': rerun,
+                'source_bundle': {'path': 'r3/summary.json', 'sha256': sha(bundle_path.read_bytes())},
+                'source_bit_identity': {'path': 'bits/bit-identity.json', 'sha256': sha(record_path.read_bytes())}}
+        for gate in carried:
+            f.receipt['gates'][gate] = bundle['gates'][gate]
+        f.receipt.update(carried_gates={g: dict(spec) for g in carried}, rerun_gates=rerun)
+        f.receipt_path = write(f.assets, 'qualification.json', encoded(f.receipt))
+        f.kwargs['receipts'] = [f.receipt_path]
+        return f.published_fixture()
+
+    def test_verify_accepts_an_unsealed_source_bundle_under_a_bit_identity_record(self):
+        # D88: no registry entry for the source build exists or is needed; the bundle and record ship in the evidence.
+        path, doc, registry = self.unsealed_bundle_carry()
+        self.assertEqual(sorted(registry['approvals']), ['synthetic-demo/v1'])
+        self.assertIn('r3/summary.json', doc['evidence_asset']['members'])
+        self.assertIn('bits/bit-identity.json', doc['evidence_asset']['members'])
+        e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
+
+    def test_an_unsealed_source_bundle_needs_a_matching_full_window_bit_record(self):
+        for label, kwargs, pattern in (
+                ('other target binary', dict(target_binary='e' * 64), 'bit identity target binary differs'),
+                ('differing case', dict(record_changes={'cases': [{'name': 'full-window/long', 'request_sha256': '1' * 64,
+                    'prompt_tokens': self.f.receipt['effective_max_context'] - 1146, 'max_tokens': 48, 'source_output_sha256': '2' * 64,
+                    'target_output_sha256': '3' * 64}]}), 'output differs between the builds'),
+                ('short window', dict(record_changes={'cases': [{'name': 'long', 'request_sha256': '1' * 64,
+                    'prompt_tokens': self.f.receipt['effective_max_context'] - 1281, 'max_tokens': 48, 'source_output_sha256': '2' * 64,
+                    'target_output_sha256': '2' * 64}]}), 'no full-window case')):
+            with self.subTest(label):
+                self.setUp()
+                with self.assertRaisesRegex(ValueError, pattern):
+                    self.unsealed_bundle_carry(**kwargs)
+        # Without the record the provenance is refused outright.
+        self.setUp()
+        path, doc, registry = self.unsealed_bundle_carry()
+        receipt = json.loads(self.f.receipt_path.read_bytes())
+        for spec in receipt['carried_gates'].values():
+            del spec['source_bit_identity']
+        self.f.receipt_path.write_bytes(encoded(receipt))
+        with self.assertRaisesRegex(ValueError, 'source_bundle and source_bit_identity together'):
+            self.f.seal()
+
     def test_verify_refuses_another_models_pinned_approval_with_the_same_commit_and_tree(self):
         # Q56 (1): a foreign model's registry-pinned approval with the same production commit and
         # tree must never authorize a carry: the source is tied to the SAME runtime_id.

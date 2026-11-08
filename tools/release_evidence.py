@@ -59,8 +59,21 @@ FULL_WINDOW_MARGIN = 512
 CARRIED_SOURCE_KEYS = frozenset({'source_engine_commit', 'source_engine_tree', 'source_binary_sha256',
                                  'source_receipt_sha256', 'rerun_gates'})
 CARRIED_SOURCE_OPTIONAL = frozenset({'source_model_lock', 'source_profile', 'source_runtime_id',
-                                     'source_identity_receipt'})
+                                     'source_identity_receipt', 'source_bundle', 'source_bit_identity'})
 CROSS_CHOICE_KEYS = frozenset({'source_profile', 'source_runtime_id', 'source_identity_receipt'})
+# Unsealed source bundle (D88): a complete, all_pass qualification bundle of an earlier build may be a carry
+# source without a seal, only together with a bit-identity record proving that the target build answers that
+# bundle binary's requests (a full-window one included) with token-identical outputs.
+SOURCE_BUNDLE_KEYS = frozenset({'source_bundle', 'source_bit_identity'})
+BIT_IDENTITY_SCHEMA = 'rexl3.bit-identity.v1'
+BIT_IDENTITY_KEYS = frozenset({'schema', 'runtime_id', 'profile', 'window', 'source_receipt_sha256', 'source', 'target',
+                               'cases', 'method'})
+BIT_IDENTITY_SIDE_KEYS = frozenset({'binary_sha256', 'engine_commit', 'system_fingerprint'})
+BIT_IDENTITY_CASE_KEYS = frozenset({'name', 'request_sha256', 'prompt_tokens', 'max_tokens', 'source_output_sha256',
+                                    'target_output_sha256'})
+# A bit-identity full-window case: a greedy request whose prompt fills the window to within this many tokens, with
+# room for its reply (the full-context request convention: target window - 1024, rendered within 256 below it).
+BIT_FULL_WINDOW_HEADROOM = 1280
 # The owner-exception record a vision-off release must carry in its qualification
 # receipt (same fields the baseline gate's capability_exceptions validates, minus
 # tracking). Speculation and prefix-cache exceptions are never granted.
@@ -666,21 +679,41 @@ def validate_carried_gate_source(source):
             require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'invalid %s in carried-gate provenance' % key)
             relative_path(ref['path'])
             full_hash(ref['sha256'])
+    for key in ('source_bundle', 'source_bit_identity'):
+        if key in source:
+            ref = source[key]
+            require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'invalid %s in carried-gate provenance' % key)
+            relative_path(ref['path'])
+            full_hash(ref['sha256'])
+    bundle = SOURCE_BUNDLE_KEYS & set(source)
+    require(not bundle or bundle == SOURCE_BUNDLE_KEYS,
+            'an unsealed source bundle needs source_bundle and source_bit_identity together')
     cross = CROSS_CHOICE_KEYS & set(source)
     require(not cross or cross == CROSS_CHOICE_KEYS,
             'cross-choice provenance needs source_profile, source_runtime_id and source_identity_receipt together')
+    require(not (bundle and cross), 'a cross-choice carry from an unsealed source bundle is not supported')
     if cross:
         for key in ('source_profile', 'source_runtime_id'):
             require(isinstance(source[key], str) and ID.fullmatch(source[key]), 'invalid %s in carried-gate provenance' % key)
 
 
-def carried_source_files(carried):
-    """Evidence paths a ``carried_gates`` block binds besides gate evidence (lock copies, source observations)."""
+def carried_source_files(carried, root=None):
+    """Evidence paths a ``carried_gates`` block binds besides gate evidence.
+
+    Lock copies, source observations and bit-identity records; with ``root``, an unsealed source bundle's receipt,
+    its identity observation and every gate's evidence too, so the whole bundle ships and re-validates.
+    """
     paths = set()
     for source in (carried or {}).values():
-        for key in ('source_model_lock', 'source_identity_receipt'):
+        for key in ('source_model_lock', 'source_identity_receipt', 'source_bit_identity', 'source_bundle'):
             if isinstance(source, dict) and isinstance(source.get(key), dict):
                 paths.add(relative_path(source[key]['path']))
+        if root is not None and isinstance(source, dict) and isinstance(source.get('source_bundle'), dict):
+            bundle = load_json(safe_file(root, relative_path(source['source_bundle']['path'])))
+            require(isinstance(bundle, dict) and isinstance(bundle.get('identity_receipt'), dict)
+                    and isinstance(bundle.get('gates'), dict), 'invalid source bundle receipt')
+            paths.add(relative_path(bundle['identity_receipt']['path']))
+            paths.update(relative_path(ref['path']) for gate in bundle['gates'].values() for ref in gate['evidence'])
     return paths
 
 
@@ -810,6 +843,10 @@ def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
                                cases_out=exactness_cases if gate == 'exactness' else None)
         require(all(root / relative_path(ref['path']) != path for ref in result['evidence']), 'duplicate/self evidence')
     require_cross_choice_exactness(carried, gates, exactness_cases, expected)
+    bundles = {}
+    for gate, source in (carried or {}).items():
+        if 'source_bundle' in source:
+            validate_source_bundle(root, gate, source, gates[gate], expected, bundles)
     return doc
 
 
@@ -832,6 +869,79 @@ def require_cross_choice_exactness(carried, gates, exactness_cases, expected):
         require(name in by_name, 'cross-choice carry requires the exactness case ' + name)
         require(full_window_ok(by_name[name], expected),
                 'cross-choice carry requires %s to PASS with a prompt at the full window' % name)
+
+
+def validate_bit_identity(record, *, source, expected):
+    """A bit-identity record (``rexl3.bit-identity.v1``) for one carried source bundle.
+
+    It names the source bundle (``source_receipt_sha256``), both builds (binary sha256, engine commit and the
+    served ``system_fingerprint``, whose commit prefix must agree), the profile choice and window, and per case the
+    request digest and both builds' output digests. Every case must be token-identical, and at least one must be a
+    full-window request: prompt within ``BIT_FULL_WINDOW_HEADROOM`` tokens of the window with room for its reply.
+    """
+    require(isinstance(record, dict) and set(record) == BIT_IDENTITY_KEYS and record['schema'] == BIT_IDENTITY_SCHEMA,
+            'bit identity record schema required')
+    require(record['runtime_id'] == expected['runtime_id'] and record['profile'] == expected['profile'],
+            'bit identity record names another runtime or profile')
+    require(type(record['window']) is int and record['window'] == expected['effective_max_context'],
+            'bit identity record window differs from the target context')
+    require(record['source_receipt_sha256'] == source['source_receipt_sha256'],
+            'bit identity record names another source bundle')
+    require(isinstance(record['method'], str) and record['method'].strip(), 'bit identity record needs its method')
+    for side, binary, commit in (('source', source['source_binary_sha256'], source['source_engine_commit']),
+                                 ('target', expected['binary_sha256'], expected['engine_commit'])):
+        item = record[side]
+        require(isinstance(item, dict) and set(item) == BIT_IDENTITY_SIDE_KEYS, 'invalid bit identity %s build' % side)
+        require(item['binary_sha256'] == binary, 'bit identity %s binary differs from the carried %s build' % (side, side))
+        require(item['engine_commit'] == commit, 'bit identity %s engine commit differs' % side)
+        require(isinstance(item['system_fingerprint'], str)
+                and item['system_fingerprint'].startswith('fp_' + commit[:12] + '_'),
+                'bit identity %s system_fingerprint does not name its engine commit' % side)
+    cases = record['cases']
+    require(isinstance(cases, list) and 0 < len(cases) <= 10000, 'bit identity record needs cases')
+    names, full = set(), False
+    for case in cases:
+        require(isinstance(case, dict) and set(case) == BIT_IDENTITY_CASE_KEYS and isinstance(case['name'], str)
+                and case['name'] and case['name'] not in names, 'invalid or duplicate bit identity case')
+        names.add(case['name'])
+        for key in ('request_sha256', 'source_output_sha256', 'target_output_sha256'):
+            full_hash(case[key])
+        for key in ('prompt_tokens', 'max_tokens'):
+            require(case[key] is None or (type(case[key]) is int and case[key] > 0), 'invalid bit identity case counts')
+        require(case['source_output_sha256'] == case['target_output_sha256'],
+                'bit identity case output differs between the builds: ' + case['name'])
+        prompt, reply, window = case['prompt_tokens'], case['max_tokens'], record['window']
+        full = full or (prompt is not None and reply is not None
+                        and window - BIT_FULL_WINDOW_HEADROOM <= prompt <= window - reply)
+    require(full, 'bit identity record has no full-window case')
+    return record
+
+
+def validate_source_bundle(root, gate, source, carried_result, expected, seen):
+    """An unsealed, complete, all_pass source bundle and its bit-identity record (D88).
+
+    The bundle receipt ships in the evidence, matches ``source_receipt_sha256``, describes the provenance's source
+    build, carries nothing itself, validates strictly against its own identity (all gates PASS, every byte), and the
+    carried gate's result is the bundle's own. The bit-identity record proves the target build token-identical to it.
+    """
+    ref = source['source_bundle']
+    path = safe_file(root, relative_path(ref['path']))
+    require(sha256_file(path) == ref['sha256'] == source['source_receipt_sha256'],
+            'source bundle digest differs from the provenance')
+    if ref['path'] not in seen:
+        doc = load_json(path)
+        require(isinstance(doc, dict) and doc.get('all_pass') is True, 'source bundle is not all_pass')
+        require(not doc.get('carried_gates'), 'a source bundle must not itself carry gates')
+        validate_identity(doc)
+        require(doc['engine_commit'] == source['source_engine_commit'] and doc['engine_tree'] == source['source_engine_tree']
+                and doc['binary_sha256'] == source['source_binary_sha256'], 'source bundle names another build')
+        validate_receipt(path, evidence_root=root, expected={k: doc[k] for k in IDENTITY_KEYS})
+        seen[ref['path']] = doc
+    require(seen[ref['path']]['gates'].get(gate) == carried_result, 'carried gate is not the source bundle\'s: ' + gate)
+    bit = source['source_bit_identity']
+    bit_path = safe_file(root, relative_path(bit['path']))
+    require(sha256_file(bit_path) == full_hash(bit['sha256']), 'bit identity record hash drift')
+    validate_bit_identity(load_json(bit_path), source=source, expected=expected)
 
 
 def validate_carried_gates(carried, gates, *, rerun=None):
@@ -962,7 +1072,7 @@ def receipt_files(approval, root):
         paths.add(rel)
         paths.add(relative_path(receipt['identity_receipt']['path']))
         paths.update(relative_path(ref['path']) for gate in receipt['gates'].values() for ref in gate['evidence'])
-        paths.update(carried_source_files(receipt.get('carried_gates')))
+        paths.update(carried_source_files(receipt.get('carried_gates'), root))
     require(not paths & forbidden, 'evidence asset collision')
     return {name: dict(record(safe_file(root, name)), mode=0o644) for name in sorted(paths)}
 
@@ -1402,11 +1512,16 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
             # receipt bytes. The source must be an EARLIER build than the target (a
             # self-carry is refused). Arbitrary source hashes and another model's approval
             # with the same commit/tree are refused. A cross-choice source (rule B1) is
-            # the same receipt-pinned approval's other profile.
+            # the same receipt-pinned approval's other profile. An unsealed source bundle
+            # needs no registry entry.
             entries = (registry.get('approvals', {}) if isinstance(registry, dict) else {})
             for gate, spec in carried.items():
                 require(spec['source_engine_commit'] != expected['engine_commit'],
                         'carried gate source must name an earlier engine build than the target: ' + gate)
+                if 'source_bundle' in spec:
+                    # An unsealed source bundle (D88) is pinned by its receipt digest and the whole bundle
+                    # shipped in the evidence, under a bit-identity record; validate_receipt re-proved both.
+                    continue
                 candidates = [entry for entry in entries.values()
                               if isinstance(entry, dict)
                               and entry.get('runtime_id') == doc['runtime_id']

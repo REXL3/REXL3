@@ -860,5 +860,123 @@ class CarryRulesAtTheVerifier(unittest.TestCase):
             self.validate(path, ident)
 
 
+class RuntimeIdAliases(unittest.TestCase):
+    """The reviewed runtime-id aliases (dev #239 tp1/tp2 split): exact pairs only."""
+
+    def test_the_table_holds_only_the_reviewed_pair(self):
+        release_evidence = e
+        self.assertEqual(release_evidence.RUNTIME_ID_ALIASES, {
+            ('glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-tp2-1m'): 'glm53-flash-2.25bpw-sm121',
+            ('glm53-flash-sage-2.25', 'glm53-flash-single'): 'glm53-flash-2.25bpw-sm121',
+            ('glm53-flash-tp2-sage-2.25', 'glm53-flash-tp2-1m'): 'glm53-flash-2.25bpw-sm121',
+        })
+        self.assertEqual(release_evidence.PACK_REPO_ALIASES,
+                         {'r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw': 'r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121'})
+
+    def test_the_sage_ids_carry_from_the_sealed_id_for_their_own_choice_only(self):
+        single = {'runtime_id': 'glm53-flash-sage-2.25', 'profile': 'glm53-flash-single'}
+        tp2 = {'runtime_id': 'glm53-flash-tp2-sage-2.25', 'profile': 'glm53-flash-tp2-1m'}
+        for target in (single, tp2):
+            with self.subTest(target):
+                self.assertTrue(e.same_runtime_id('glm53-flash-2.25bpw-sm121', target))
+                self.assertFalse(e.same_runtime_id('glm53-flash-other', target))
+        self.assertFalse(e.same_runtime_id('glm53-flash-2.25bpw-sm121', dict(single, profile='glm53-flash-tp2-1m')))
+        self.assertFalse(e.same_runtime_id('glm53-flash-2.25bpw-sm121', dict(tp2, profile='glm53-flash-single')))
+
+    def test_only_the_exact_pair_is_the_same_runtime(self):
+        ev = e
+        target = {'runtime_id': 'glm53-flash-tp2-2.25bpw-sm121', 'profile': 'glm53-flash-tp2-1m'}
+        self.assertTrue(ev.same_runtime_id('glm53-flash-tp2-2.25bpw-sm121', target))
+        self.assertTrue(ev.same_runtime_id('glm53-flash-2.25bpw-sm121', target))
+        self.assertFalse(ev.same_runtime_id('glm53-flash-2.25bpw-sm121', dict(target, profile='glm53-flash-single')))
+        self.assertFalse(ev.same_runtime_id('glm53-flash-tp2-2.25bpw-sm121',
+                                            {'runtime_id': 'glm53-flash-2.25bpw-sm121', 'profile': 'glm53-flash-tp2-1m'}))
+        self.assertFalse(ev.same_runtime_id('other-runtime', target))
+
+    def test_registry_source_lookup_follows_the_alias_for_the_pair_only(self):
+        spec = dict(source_engine_commit='7' * 40, source_engine_tree='8' * 40)
+        old = dict(runtime_id='glm53-flash-2.25bpw-sm121', source_commit='7' * 40, source_tree='8' * 40)
+        entries = {'glm-5.3/glm-5.3-flash/v1': old, 'other': dict(old, runtime_id='someone-else')}
+        self.assertEqual(e.source_candidates(entries, 'glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-tp2-1m', spec), [old])
+        self.assertEqual(e.source_candidates(entries, 'glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-single', spec), [])
+        self.assertEqual(e.source_candidates(entries, 'glm53-flash-2.25bpw-sm121', 'glm53-flash-single', spec), [old])
+        self.assertEqual(e.source_candidates(entries, 'glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-tp2-1m',
+                                             dict(spec, source_engine_tree='9' * 40)), [])
+
+    def test_carried_raw_evidence_under_the_old_id_is_accepted_for_the_pair_only(self):
+        ev = e
+        expected = dict(runtime_id='glm53-flash-tp2-2.25bpw-sm121', profile='glm53-flash-tp2-1m', pack='target',
+                        model_lock_sha256='b' * 64, capabilities={'images': True}, topology={'ranks': 2},
+                        effective_max_context=1048576, profile_sha256='a' * 64,
+                        effective_profile_digest='sha256:' + 'd' * 64)
+        source = dict(source_engine_commit='1' * 40, source_engine_tree='2' * 40, source_binary_sha256='3' * 64)
+        raw = dict(expected, gate='context', runtime_id='glm53-flash-2.25bpw-sm121', engine_commit='1' * 40,
+                   engine_tree='2' * 40, binary_sha256='3' * 64)
+        ev._validate_carried_raw('context', raw, root=Path('.'), expected=expected, source=source, runtime_files=None)
+        for change in (dict(runtime_id='glm53-flash-other'), dict(pack='other'), dict(topology={'ranks': 1})):
+            with self.subTest(change):
+                with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+                    ev._validate_carried_raw('context', dict(raw, **change), root=Path('.'), expected=expected,
+                                             source=source, runtime_files=None)
+        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+            ev._validate_carried_raw('context', raw, root=Path('.'), expected=dict(expected, profile='glm53-flash-single'),
+                                     source=source, runtime_files=None)
+
+
+class PackRepoAliases(unittest.TestCase):
+    """The reviewed pack-repo rename: rule A accepts the earlier repo's lock only for identical pack records."""
+
+    NEW = 'r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw'
+    OLD = 'r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121'
+
+    def lock(self, repo, revision='b3194b87af5665bd8b1dd6316c99a48607fc137d', shard='f' * 64):
+        return {'schema': 'rexl3.model-lock.v1', 'packs': {'target': {
+            'repo': repo, 'revision': revision, 'fingerprint': 'sha256:' + '9' * 64, 'license': 'MIT',
+            'files': {'model-00001-of-00031.safetensors': {'sha256': shard, 'bytes': 7}}}}}
+
+    def run_rule_a(self, source_lock, target_lock, runtime_id='glm53-flash-sage-2.25'):
+        import hashlib as _h
+        import json as _j
+        import tempfile as _t
+        from pathlib import Path as _P
+        enc = lambda d: _j.dumps(d, sort_keys=True).encode()
+        profile = {'runtime_id': runtime_id, 'profiles': {'glm53-flash-single': {'argv': ['--model', '@MODEL_DIR@'],
+                                                                                 'pack': 'target'}}}
+        files = {'profile.json': enc(profile), 'model.lock.json': enc(target_lock)}
+        with _t.TemporaryDirectory() as d:
+            root = _P(d)
+            (root / 'source-model.lock.json').write_bytes(enc(source_lock))
+            src_sha = _h.sha256(enc(source_lock)).hexdigest()
+            expected = dict(runtime_id=runtime_id, profile='glm53-flash-single', pack='target',
+                            model_lock_sha256=_h.sha256(files['model.lock.json']).hexdigest(),
+                            profile_sha256=_h.sha256(files['profile.json']).hexdigest(),
+                            capabilities={'images': True}, topology={'ranks': 1}, effective_max_context=262144,
+                            effective_profile_digest='sha256:' + 'd' * 64)
+            source = dict(source_engine_commit='1' * 40, source_engine_tree='2' * 40, source_binary_sha256='3' * 64,
+                          source_model_lock={'path': 'source-model.lock.json', 'sha256': src_sha})
+            raw = dict(expected, gate='context', runtime_id='glm53-flash-2.25bpw-sm121', model_lock_sha256=src_sha,
+                       engine_commit='1' * 40, engine_tree='2' * 40, binary_sha256='3' * 64)
+            e._validate_carried_raw('context', raw, root=root, expected=expected, source=source, runtime_files=files)
+
+    def test_unalias_maps_only_the_listed_repo(self):
+        self.assertEqual(e.unalias_pack_repos(self.lock(self.NEW)), self.lock(self.OLD))
+        self.assertEqual(e.unalias_pack_repos(self.lock('someone/other-pack')), self.lock('someone/other-pack'))
+
+    def test_a_repo_move_with_identical_records_carries(self):
+        self.run_rule_a(self.lock(self.OLD), self.lock(self.NEW))
+
+    def test_anything_else_changed_is_refused(self):
+        for name, source in (('revision', self.lock(self.OLD, revision='0' * 40)),
+                             ('a file', self.lock(self.OLD, shard='e' * 64)),
+                             ('another repo', self.lock('someone/other-pack'))):
+            with self.subTest(name):
+                with self.assertRaisesRegex(ValueError, 'effective model lock differs'):
+                    self.run_rule_a(source, self.lock(self.NEW))
+
+    def test_another_runtime_does_not_take_the_old_id(self):
+        with self.assertRaisesRegex(ValueError, 'raw evidence identity drift'):
+            self.run_rule_a(self.lock(self.OLD), self.lock(self.NEW), runtime_id='glm53-flash-other')
+
+
 if __name__ == '__main__':
     unittest.main()

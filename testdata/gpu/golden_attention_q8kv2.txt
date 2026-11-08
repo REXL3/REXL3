@@ -1,0 +1,12 @@
+cache k 71c4804e122276b3 v 400e37c19fe0f535
+decode R1 seq0 p0 8b3c19dac1b446ed
+decode R1 seq3 p4999 5e16e123a6082891
+decode R4 seq2 p996..999 291f65393a3344ae
+decode R7 mixed 3e861d7bb76ba65c
+decode R64 seq3 bcfb70afece9ad2a
+decode R128 seq3 44cabd252881d8e3
+prefill seq2 1000 rows variant 0 615d735c62224cd9
+prefill seq2 1000 rows variant 1 615d735c62224cd9
+prefill seq2 1000 rows variant 4 615d735c62224cd9
+prefill seq3 chunks 0+4096, 4096+904 dae996cafcb881b7
+tree windows 9 + 17 nodes d01ef0feecd07663

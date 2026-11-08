@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "name": "glm-tp2-vision",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. GLM-5.3-Flash 2.25bpw with IMAGES as a two-rank tensor-parallel group (lane L13, docs/GLM_TP.md section 10): N4 = rank 0 (serves HTTP, holds the vision tower, encodes every image and sends the rows of each prefill chunk), N1 = rank 1 (no tower: the server gives a follower no vision slot whatever its flags, and the Hello's leader-only vision fact refuses a follower that holds one). Each rank maps and allocates only its share of the routed experts (46.3 GiB). No --no-vision in serve.flags (rank 0 must serve images; the schema cannot give a follower a vision flag rank 0 does not have, and the follower needs none). --prefix-cache off, --spec none (the serial legs; tools/glm_tp_vision_two_node.sh derives the --spec mtp|auto legs, lane L14), pinned --slots and --kv-tokens. The rank planner (tp_boot tests, 117 GiB free): rank 0 46.32 GiB of weights + the tower 2.09 GiB (weights 1.05, scratch at 8,000 tokens 1.04) + a features reserve of 1.95 GiB (4 slots); rank 1 46.32 GiB. N2 and N3 are the gn100s: disabled by owner rule, listed so that a rank map naming them is refused.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "expected_hostname": "host-a"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "expected_hostname": "host-d"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ]
+  },
+  "pack": "/srv/models/r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+  "memory": {
+    "_comment": "rank 0 (N4): weights 46.3 + tower 2.1 + features reserve 2.0 GiB + runtime + floor; rank 1 (N1): weights 46.3 GiB + runtime + floor. The single-node reference leg (N1 alone, the whole pack + tower) needs about 100 GiB: tools/glm_tp_vision_two_node.sh checks that itself.",
+    "min_free_gib": 78
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--slots",
+      "4",
+      "--max-model-len",
+      "12288",
+      "--kv-tokens",
+      "32768",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "none",
+      "--no-drafts",
+      "--prefix-cache",
+      "off",
+      "--max-image-tokens",
+      "8000",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-tp2v-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 600,
+    "ready_timeout_s": 900,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N4",
+        "N1"
+      ],
+      "tp_port": 29614,
+      "http_port": 8955,
+      "http_host": "0.0.0.0",
+      "min_free_gib": [
+        82,
+        78
+      ]
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 2,
+    "window_s": 900
+  }
+}

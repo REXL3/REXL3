@@ -30,11 +30,15 @@ MAX_SOURCE_BYTES = 128 * 1024 * 1024
 MAX_ENTRIES = 20000
 TEMPLATE = "tools/templates/corresponding-source-README.md"
 REQUIRED = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
+# Root settings of the source's own checks (`cargo fmt --check` reads rustfmt.toml). Exported when the commit has them,
+# never required, and not listed in the projection metadata: an archive exported before this list existed still
+# validates byte for byte with these tools.
+CHECK_CONFIG = ("rustfmt.toml",)
 ROOTS = (".cargo/", "crates/", "third_party/", "testdata/")
 INPUTS = "tools/corresponding_source_inputs.json"
 ALLOWANCES = "tools/corresponding_source_test_allowances.json"
 TOOLS = ("tools/build_corresponding_source.py", "tools/test_build_corresponding_source.py", TEMPLATE, INPUTS, ALLOWANCES)
-EXTRA_INPUTS = ("tools/dashboard_check.py", "dashboard/panels.json")
+EXTRA_INPUTS = ("tools/dashboard_check.py", "dashboard/panels.json", "tools/switch_registry.json")
 # Do not open/hash tensor payloads, even when their filename calls them a fixture.
 # Opaque containers are excluded too: this exporter does not unpack model archives.
 MODEL_SUFFIXES = (".safetensors", ".pt", ".pth", ".ckpt", ".gguf", ".ggml", ".bin",
@@ -352,7 +356,7 @@ def input_policy(entries, selected, load):
 
 def base_selection(entries):
     return {p for p in entries if not excluded_payload(p)
-            and (p in REQUIRED or p in TOOLS or p.startswith(ROOTS))}
+            and (p in REQUIRED or p in CHECK_CONFIG or p in TOOLS or p.startswith(ROOTS))}
 
 
 def c_preprocessor_text(data):

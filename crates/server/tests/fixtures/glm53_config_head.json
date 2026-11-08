@@ -1,0 +1,6 @@
+{
+ "architectures": [
+  "Glm5NextForConditionalGeneration"
+ ],
+ "model_type": "glm5_next"
+}

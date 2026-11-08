@@ -35,17 +35,19 @@ There is no auto-merge anywhere.
 Dev a model may be proposed for production, the dev repository must have, for the exact version to be
 released:
 
-- a **final runtime entry** (the release-candidate runtime, not a work-in-progress one);
+- a **final runtime entry** (the final runtime for the release, not a work-in-progress one);
 - the **capability contract proven**: speculative decoding on with counters above 0; prefix cache on
   and proven at the real contract (the real context and slots); vision on and tested, or off only
   under an unexpired owner vision exception sealed in each vision-off profile's qualification receipt
   (accepted in place of a proven does-not-fit);
 - **exactness** passed;
 - **long context** passed;
-- **GB10 receipts on the RC commit**: doctor, smoke and a gate subset run on a GB10 host, attached to
-  the release-candidate commit;
+- **GB10 receipts on the sealed build**: doctor, smoke and a gate subset run on a GB10 host,
+  attached to the engine commit the model's approval is sealed from;
 - a `KNOWN_ISSUES` file present in the tree;
-- the **dev approval sealed from the RC commit** (the sealed approval names the RC commit).
+- the **dev approval sealed from that build** (the sealed approval names the engine commit it was
+  sealed from). A model whose scope is untouched by newer engine commits may instead carry forward a
+  registry-pinned prior approval (T0); it is not re-sealed for the release.
 
 Dev tracks a model's qualification with labels `model:MODEL` and `engine`, and scope files under
 `releases/v0.1.0/models` (added by dev tooling; plain text).
@@ -85,7 +87,8 @@ python3 tools/promote_runtime.py \
 ```
 
 `--download` validates release and asset ids, sizes, the tag commit, every byte and all evidence and
-caches the verified files. The tool then writes `MODEL.json` (or validates an existing one against the
+caches the verified files in `<assets-dir>/<family>/<model>/v<N>/` (with the engine release's executables in
+its `engine/`), the directory the promotion then reads. The tool then writes `MODEL.json` (or validates an existing one against the
 derived metadata; a mismatch is a hard refusal, never an overwrite), extracts the tree, writes
 `LATEST`, verifies against the base registry, commits branch `model/<model>` and opens a PR titled
 `FEAT: Promoted <model> v<N>`. `--dry-run` verifies and prints without writing.

@@ -1,0 +1,105 @@
+{
+  "packs": {
+    "target": {
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12927,
+          "sha256": "1369e90b19976f99ce2070eb21ade8fcb4af640f008e14e82af5c5e89a9cc816"
+        },
+        "config.json": {
+          "bytes": 5916,
+          "sha256": "b53da8950ca7aff2b5105241d27d4197525fde3521b7c72f4e8e990af86a6dd0"
+        },
+        "configuration_nemotron_h_omni.py": {
+          "bytes": 7140,
+          "sha256": "83f0c11fd9fb4da4a3de434759e1a18958b69f9fce672bafed4346a616ec20d4"
+        },
+        "configuration_radio.py": {
+          "bytes": 4219,
+          "sha256": "b0f1ea1d8136272635bc8d6eeba0564542a4e48474ae98b2d8ed74b0fc5d20ce"
+        },
+        "generation_config.json": {
+          "bytes": 210,
+          "sha256": "015bf4f765008e744f4d325f9320cfc2de35539f9cb972a505979471695a0feb"
+        },
+        "image_processing_nemotron_h_omni.py": {
+          "bytes": 10159,
+          "sha256": "0344e8432097e0718672d6529c68fd6095c36bea176500f131d203d1c7d497e0"
+        },
+        "model-00001-of-00008.safetensors": {
+          "bytes": 8334506714,
+          "sha256": "bdc266908fcd20ba383ec7e7d846229a0d9e8f1e509b5e4c90937b747939cef1"
+        },
+        "model-00002-of-00008.safetensors": {
+          "bytes": 7480319098,
+          "sha256": "5725acc7f0cc5995da2f20377af9fe22f3196a9ff653913a64f4231e391736e9"
+        },
+        "model-00003-of-00008.safetensors": {
+          "bytes": 7056432202,
+          "sha256": "fabcc2c5dd572d6f1948063c0034047a04c8451bd91a987715e0252b7871985f"
+        },
+        "model-00004-of-00008.safetensors": {
+          "bytes": 7817800391,
+          "sha256": "629d161e34c4b465969ffd25f76991e0a39cb6b8761621c07354f4838e5f9fb0"
+        },
+        "model-00005-of-00008.safetensors": {
+          "bytes": 8458533352,
+          "sha256": "b6a660b6d4916d6697097c07df91f7c2f24238e4e6858f4b062eab8923e91f36"
+        },
+        "model-00006-of-00008.safetensors": {
+          "bytes": 8154121183,
+          "sha256": "f6f363054185cffc820e218fa4058b7b39f05dd8489bcdfb5c015e3c0da58bf6"
+        },
+        "model-00007-of-00008.safetensors": {
+          "bytes": 8124534471,
+          "sha256": "ea8f9aad9e940674bda3eab7560753a8b9fb16d2de97758c6da34209d441d03f"
+        },
+        "model-00008-of-00008.safetensors": {
+          "bytes": 4460278212,
+          "sha256": "42de8cb03ff6e0371cd5f2ad5bbb9a8c00c058ecc9f5e1cd16fc984d8ffc77c3"
+        },
+        "model.safetensors.index.json": {
+          "bytes": 16578544,
+          "sha256": "75291cea51e97609ab93dc51f1ec5b6884e169fdc02baf3c367ca15db9cfc75a"
+        },
+        "modeling_nemotron_h_omni.py": {
+          "bytes": 22566,
+          "sha256": "dfe88cc516f27b1dc8508ec7e448d81143aaf13d01400f5f93525b7f1271d929"
+        },
+        "modeling_radio.py": {
+          "bytes": 22804,
+          "sha256": "ceec4c1ecd2a2649a79e74b16a2ea4af60e6cd11fbecebbd681c33fb1fccb943"
+        },
+        "preprocessor_config.json": {
+          "bytes": 693,
+          "sha256": "0b80e5c895052ff2d8e528eca719a6b6e39b7b1b60afb0b94553ffae948e22bc"
+        },
+        "processing_nemotron_h_omni.py": {
+          "bytes": 16450,
+          "sha256": "406bc7689161d19e2a01e34f0ac8a7cc1bbc927f664d03bae3d23d00ea27f11a"
+        },
+        "processor_config.json": {
+          "bytes": 1062,
+          "sha256": "ce813d598192df1b09813631b5f9c78f31c1e2e8d291c7c660c8dfa92a9597a7"
+        },
+        "tokenizer.json": {
+          "bytes": 17077366,
+          "sha256": "d0432ad8b1c2984a2e2dca82e1933e3fd5628df6e95c51fba4c3ee9950dce299"
+        },
+        "tokenizer_config.json": {
+          "bytes": 619,
+          "sha256": "89fa70d31734c0c75ffdcee4114449f8cf8abd64bc233d420b58e25763f91aba"
+        },
+        "ultra_v3_reasoning_parser.py": {
+          "bytes": 2490,
+          "sha256": "14e03de50a523c1b6b4542c22d38ec11cadc515a95752e5a4c8246967f620857"
+        }
+      },
+      "fingerprint": "sha256:b17cec7004215df7f3b303bca1af552ca71b026dbb301a2fd94183eb766a1826",
+      "license": "NVIDIA Open Model License (base model card metadata of the pack repository)",
+      "repo": "vcruz305/Nemotron-Super-VL-EXL3-3.85bpw",
+      "revision": "3963815246eda892a4c3b88e18d0d1c39288c8e0"
+    }
+  },
+  "schema": "rexl3.model-lock.v1"
+}

@@ -1,0 +1,20 @@
+{
+  "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "display_name": "Qwen3.8-27B",
+  "engine_family": "qwen",
+  "family": "qwen3.8",
+  "model": "qwen3.8-27b",
+  "pack": {
+    "bits": "4.00",
+    "draft": "dflash2",
+    "draft_repo": "r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw",
+    "draft_revision": "265b5240592907d2d55ff0dc4d5f66569692604d",
+    "format": "exl3",
+    "target_repo": "r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw",
+    "target_revision": "3f1771b8c21f83cbb8e82169559ced9f38ca04e5"
+  },
+  "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
+  "schema": "rexl3.prod-model.v1"
+}

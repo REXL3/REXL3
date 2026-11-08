@@ -79,11 +79,23 @@ def build_approval(*, runtime_id, commit, tree, template_dir, archive, source_as
             effective_profile_digest=receipt['effective_profile_digest'], effective_profile_source='owned-launcher-observation',
             effective_max_context=context, capabilities=choice['capabilities'], topology={'ranks': ranks},
             **{k: v for k, v in identities.items() if k != 'source_manifest_sha256'})
-        e.validate_receipt(path, evidence_root=root, expected=expected)
+        e.validate_receipt(path, evidence_root=root, expected=expected, runtime_files=e.archive_runtime_files(archive))
         observation = e.load_json(e.safe_file(root, receipt['identity_receipt']['path']))
         e.validate_observed_profile(observation, choice)
         selected[name] = dict(identity=expected, receipt={'path': path.relative_to(root).as_posix(), 'sha256': e.sha256_file(path)})
-    e.require(set(selected) == set(profile['profiles']), 'every packaged profile requires qualification')
+        # Record the D40 carried-gate provenance (and the freshly run gate set) in
+        # the approval so an independent verifier can see exactly which gates were
+        # re-run on this build and which were carried forward from an earlier one.
+        # Only record carried/rerun gate provenance when the receipt declares it;
+        # absent, null or empty blocks are omitted instead of written as null.
+        if receipt.get('carried_gates'):
+            selected[name]['carried_gates'] = receipt['carried_gates']
+        if receipt.get('rerun_gates'):
+            selected[name]['rerun_gates'] = receipt['rerun_gates']
+    # A receipt per approved profile; packaged profiles without one are not approved (tp1 and tp2 are independent
+    # runtime units, D38/D53). The default profile must be approved.
+    e.require(selected and set(selected) <= set(profile['profiles']), 'at least one qualified profile is required')
+    e.require(profile.get('default_profile') in selected, 'the default profile requires qualification')
     approval = dict(schema=SCHEMA, runtime_id=runtime_id, version=version, approve_tag=f'approve-{runtime_id}-{version}',
         source_commit=commit, source_tree=tree, template=template, identities=identities, profiles=selected,
         bundle=e.asset_record(archive, inventory), source_asset=e.asset_record(source_asset, source_inventory),
@@ -190,8 +202,20 @@ def main(argv=None):
                                  engine_source_asset=args.engine_source_asset,
                                  evidence_root=args.evidence_root, out_dir=args.out_dir)
         # Re-read the seal and every bound file before reporting a durable result.
-        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {f'{args.runtime_id}/v{args.version}': {
-            'approval_sha256': e.sha256_file(path), 'source_commit': args.commit, 'source_tree': args.tree}}}
+        # Carry-forward receipts reference a registry-pinned prior approval, so seed the
+        # self-check registry with the repo's pinned approvals (when present) as well as
+        # this approval's own entry.
+        registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}}
+        registry_path = Path(args.repo) / 'runtimes/templates/APPROVALS.json'
+        if registry_path.is_file():
+            try:
+                prior = e.load_json(registry_path)
+            except (ValueError, OSError):
+                prior = None
+            if isinstance(prior, dict) and isinstance(prior.get('approvals'), dict):
+                registry['approvals'].update(prior['approvals'])
+        registry['approvals'][f'{args.runtime_id}/v{args.version}'] = {
+            'approval_sha256': e.sha256_file(path), 'source_commit': args.commit, 'source_tree': args.tree}
         engine_dir = engine_records(engine_files, args.engine_release_tag)[1] if engine_files else None
         e.verify_assets(path, registry=registry, approved_templates={doc['template']['version']: doc['template']['digest']},
                         engine_dir=engine_dir)

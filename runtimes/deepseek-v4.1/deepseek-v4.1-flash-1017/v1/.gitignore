@@ -1,0 +1,10 @@
+# Operator-local files never belong in a generated source repository.
+site.json
+.env
+.env.*
+*.log
+__pycache__/
+*.pyc
+models/
+state/
+metrics/local/

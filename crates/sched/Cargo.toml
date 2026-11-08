@@ -1,0 +1,10 @@
+[package]
+name = "gb-sched"
+description = "Memory admission (fail closed), paged KV blocks, prefix index (hybrid state snapshots), global verify-row budget"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

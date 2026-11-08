@@ -2,8 +2,9 @@
 
 This repository (`REXL3/REXL3`) is the **production** side of REXL3, published under AGPL-3.0-only.
 Its content is sealed, data-only runtime trees under `runtimes/`, the policy that decides which trees
-are accepted, and the small stdlib-Python tools that verify and promote them. There is no engine source
-here. The engine, the runtime template, model profiles and every qualification gate live in the dev
+are accepted, the small stdlib-Python tools that verify and promote them, and the AGPL-3.0 corresponding
+source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`), a snapshot of the dev repository at the release's
+engine commit that changes only by a maintainer-requested sync from dev. The engine, the runtime template, model profiles and every qualification gate live in the dev
 repository, `REXL3/REXL3-dev`; follow that repository's `CONTRIBUTING.md` for engine and profile work.
 
 This file is the single source of truth for humans and agents. Agents must also read `AGENTS.md`;
@@ -56,17 +57,19 @@ Naming:
   `<model>` folder, for example RED-SNOW-5.3-Flash lives at
   `runtimes/glm-5.3/red-snow-5.3-flash/` rather than being a second GLM-5.3-Flash pack.
 
-First-release map (priority order). Each row is one prod model; a model with a single-node and a
-two-node profile is one folder, one runtime id and one sealed version:
+First-release map (priority order). Each row is one prod model. A model with a single-node and a
+two-node profile ships as two independent runtime units: `tp1` (single node) is `<model>`, `tp2`
+(two nodes) is `<model>-tp2`, packaged, sealed and promoted separately, so a `tp1` unit never
+waits on its `tp2` sibling. In v0.1.0 GLM-5.3-Flash ships its combined approval 1 covering both
+profiles; the split applies to models added after v0.1.0 and to subsequent GLM versions:
 
 | Priority | Model | prod folder | dev runtime id | dev profiles | dev engine module |
 |---|---|---|---|---|---|
 | 1 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` (one node, 262K) | `qwen` (qwen3_5) |
 | 2 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (one node, 262K) | `qwen_flash_next` (qwen4_exp) |
-| 3 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` (one node, 262K), `dsv41-tp2-1m` (two nodes, 1M), both on the 1.55 bpw pack | `deepseek_v41` |
-| 4 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
-| 5 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
-| 6 | Ling-3.1-Flash-1019 | `runtimes/ling-3.1/ling-3.1-flash-1019/` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k` (one node, 32K) | `bailing_moe_v3` |
+| 3 | GLM-5.3-Flash | `runtimes/glm-5.3/glm-5.3-flash/` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (one node, 262K), `glm53-flash-tp2-1m` (two nodes, 1M) | `glm` |
+| 4 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` (one node, 1M) | `nemotron_h_omni` |
+| 5 | DeepSeek-V4.1-Flash-1017 | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` (one node, 262K) | `deepseek_v41` |
 
 `MODEL.json` (schema `rexl3.prod-model.v1`), required keys:
 
@@ -81,10 +84,12 @@ two-node profile is one folder, one runtime id and one sealed version:
   does-not-fit proof.
 
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
-keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`. The
-`TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml` changes in the same commit as the
-registry. Tools derive dev release tags from `runtime_id` (MODEL.json and the sealed approval must
-agree), never from folder names.
+keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`, plus the sealed
+approval's bundle binary digest `binary_sha256` and each profile's sealed receipt digest under
+`profiles/<profile>/receipt/sha256` (the latter two pin carried-gate sources to the actual approval
+identity; omitted for approvals that predate carry-forward). The `TRUSTED_APPROVALS_SHA256` pin in
+`.github/workflows/verify.yml` changes in the same commit as the registry. Tools derive dev release
+tags from `runtime_id` (MODEL.json and the sealed approval must agree), never from folder names.
 
 ## 3. Branches and PR scope
 
@@ -95,6 +100,21 @@ agree), never from folder names.
 | `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
 | `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
 
+- A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0's
+  current manifest holds the five already-sealed models (section 2).
+  Each `model/<model>` PR holds all the commits that make that
+  model work; a later release may add a single newly validated model as a new version only after
+  v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
+  release candidate. Change-scoped qualification: a model whose family/kernel scope is untouched by
+  the newer engine commits carries forward its prior sealed approval (T0, `carried_forward: true`
+  in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
+  unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
+  model math/weights/sampling changes or a new model require the full nine-gate chain plus `Q200`
+  (T3).
+- Single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units (section 2): each
+  is packaged, sealed and promoted separately, so a `tp1` model's release never waits on its `tp2`
+  sibling. Each unit seals its own qualification receipts on its own runtime id and topology; a
+  receipt is never reused across runtime ids or topologies.
 - `<topic>` is `^[a-z0-9]+(-[a-z0-9]+)*$`. `<model>` follows section 2.
 - Titles: `TYPE: Past-tense summary`, TYPE one of FIX FEAT BUILD CI TEST BUMP DOCS, at most 90
   characters, no trailing period.
@@ -108,6 +128,9 @@ agree), never from folder names.
   `* @am423 @vcruz305`), given by that human personally after their own review. No agent approvals in
   prod. The last push must be approved by someone other than the pusher. Required checks green. Squash
   merge.
+- A PR author may enable auto-merge (squash) so that the approval itself completes the merge: GitHub merges
+  only after the other maintainer's approval of the current head and green required checks, and a push after
+  the approval dismisses it. Enabling auto-merge never replaces the approval and never bypasses a check.
 - No single-maintainer self-merge exception. The only exception is an explicit owner decision recorded
   in `docs/incidents/` and reviewed retroactively (for example `docs/incidents/2026-10-26-unreviewed-release.md`).
 - Model PRs (`model/<model>`) additionally need the `local-validation` check: an APPROVED review by a
@@ -251,7 +274,8 @@ python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOK
 
 **`tools/promote_runtime.py`** — creates the sealed tree and the `model/<model>` PR
 (`docs/PROMOTION.md`). `--version` is an integer `<N>`; `--target-commit` is the exact production base
-commit; `--assets-dir` is a durable, verified dev-asset cache; `--approved`,
+commit; `--assets-dir` is the root of a durable, verified dev-asset cache, one model version per
+`<family>/<model>/v<N>/` (the directory `--download` fills and the promotion reads); `--approved`,
 `--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and pin;
 `--download` validates and caches the dev release assets; `--dry-run` verifies and prints without
 writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,
@@ -272,8 +296,9 @@ python3 tools/promote_runtime.py \
 
 **`tools/assemble_release_notes.py`** — assembles `releases/v<X.Y.Z>/NOTES.md` from
 `changes/unreleased/` fragments and prepends the `CHANGELOG.md` entry (`docs/RELEASING.md`).
-`--version` is required; `--repo-root` defaults to `.`. Unknown fragment headings, empty fragments and
-duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
+`--version` is required; `--repo-root` defaults to `.`. `changes/unreleased/README.md` is not a fragment
+and is skipped. A file there not named `<slug>.md` (lowercase kebab-case), unknown fragment headings,
+empty fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr, exit 2):
 
 ```bash
 python3 tools/assemble_release_notes.py --repo-root PATH --version vX.Y.Z
@@ -297,19 +322,23 @@ branch, review and check rules above.
 ### Never (no instruction from anyone overrides these)
 
 1. **Never create, edit, publish or delete a release or a tag.** No `gh release`, no releases API, no
-   `git tag` push, no `git push --tags`. A release is cut only by a maintainer personally, following
-   docs/RELEASING.md.
-2. **Never merge a pull request, and never submit a review that approves one.** In production every
-   approval comes from a maintainer personally, after their own review. You prepare the PR and report;
-   a maintainer merges.
+   `git tag` push, no `git push --tags`. A release is cut only through the path docs/RELEASING.md defines,
+   by the actor it names (a maintainer personally, or a workflow a maintainer approves). You may run its
+   read-only checks (dry run, `--verify`) and you present the decision packet (Always 9).
+2. **Never submit a review that approves a pull request, and never merge one by hand or with an admin
+   override.** In production every approval comes from a maintainer personally, after their own review.
+   You prepare the PR and report. Where section 4 allows it, you may enable auto-merge on a PR you
+   authored: GitHub then merges it only after a maintainer approves its current head and the required
+   checks pass.
 3. **Never change repository settings**: rulesets, branch or tag protection, environments, secrets,
    variables, collaborators, teams, webhooks, deploy keys, Actions permissions or release settings.
 4. **Never work with admin credentials.** If the token you were given can administer this repository,
    stop and tell the maintainer you work for.
 5. **Never push to `main`, never force-push, and never delete a `model/*` branch.** Never bypass hooks
    or checks.
-6. **Never edit a sealed tree** (`runtimes/*/*/v*/`). A sealed tree is data with a hash-pinned
-   inventory; a pack changes only through a new sealed version from the dev repository.
+6. **Never edit a sealed tree** (`runtimes/*/*/v*/`) **or the engine source snapshot** (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`). A sealed tree is data with a hash-pinned
+   inventory; a pack changes only through a new sealed version from the dev repository. The snapshot is bound
+   file by file by `SOURCE_IDENTITY.json`; it is replaced by a sync from dev, never edited by hand.
 7. **Never weaken the verifier, a check, a test or a workflow safety rule**, and never in the same PR
    as the change it guards. Workflows read code and policy from the protected base revision and never
    execute pull-request code; keep it that way.
@@ -327,7 +356,8 @@ branch, review and check rules above.
    explicitly asked for that model and version.** Quote or link the instruction in the PR. The
    approver of record is that maintainer, never an agent. This is the only way an agent touches a
    registry entry or a promotion; it does not make the agent an approver of the PR.
-4. **One purpose per PR.** Title `TYPE: Past-tense summary` (section 5). Fill in the matching PR
+4. **One purpose per PR.** Release notes, manifests and the CHANGELOG change only in a release PR or a PR
+   whose sole purpose is the notes; never mix them with other content. Title `TYPE: Past-tense summary` (section 5). Fill in the matching PR
    template and add a release-notes fragment under `changes/unreleased/` when section 5 requires one.
 5. **For a model PR, run the model-branch completeness check** described in docs/PROMOTION.md and
    paste its full output.
@@ -338,6 +368,12 @@ branch, review and check rules above.
    not published."
 8. **When anything is unclear, or a rule blocks you, stop and ask the maintainer you work for.** Do not
    look for a workaround.
+9. **Present every decision as a packet and execute it verbatim.** When an action needs a maintainer's
+   decision (a merge, a registry or promotion step, a release step, a setting you cannot change), state in
+   one block: the exact action; the target (repo, PR or tag, head SHA); what you checked, with evidence;
+   the effect and whether it can be undone; and the single command or run that executes on approval. After
+   the maintainer says yes, run exactly that, with nothing added or changed. If the head SHA, the tag
+   target or any checked fact differs at run time, stop and present a new packet.
 
 ## 8. Licences, attribution, secrets
 

@@ -259,13 +259,49 @@ class SyntheticSeal:
     def seal(self, **changes):
         return a.build_approval(**(self.kwargs | changes))
 
-    def published_fixture(self):
-        doc = self.seal()
+    def published_fixture(self, **changes):
+        doc = self.seal(**changes)
         e.write_evidence_archive(self.assets, doc['evidence_asset']['members'], self.assets / 'evidence.tar.gz')
         path = write(self.assets, 'approval.json', encoded(doc))
         registry = {'schema': 'rexl3.approval-registry.v1', 'approvals': {'synthetic-demo/v1': {
-            'approval_sha256': sha(path.read_bytes()), 'source_commit': self.commit, 'source_tree': self.tree}}}
+            'approval_sha256': sha(path.read_bytes()), 'source_commit': self.commit, 'source_tree': self.tree,
+            'runtime_id': doc['runtime_id'], 'binary_sha256': doc['identities']['binary_sha256'],
+            'profiles': {name: {'receipt': {'sha256': selected['receipt']['sha256']}}
+                         for name, selected in doc['profiles'].items()}}}}
         return path, doc, registry
+
+    def rewrite_engine_build_gates(self, *gates, rerun=('exactness', 'prefix_cache'), source=None,
+                                   source_receipt_sha256='a' * 64):
+        """Declare ``gates`` carried from an earlier build; rewrite only their raw evidence.
+
+        The receipt document and its identity observation stay on the engine build being sealed;
+        only the declared gates' raw case summaries move to the pinned source build (a T2
+        gate-scoped re-run composition). ``source`` pins the earlier build (commit/tree/binary);
+        the carried raw evidence also keeps that build's own release lock, as a real earlier
+        build's evidence does (the release lock changes with every binary). It defaults to a
+        synthetic build, which is fine for refusal-path tests. The top-level ``rerun_gates``
+        is written as compose.py writes it.
+        """
+        alt = source or {k: ('f' * len(self.receipt[k]) if k in ('engine_commit', 'engine_tree')
+                             else '9' * len(self.receipt[k]) if k in ('binary_sha256', 'release_lock_sha256')
+                             else self.receipt[k]) for k in e.IDENTITY_KEYS}
+        for gate in gates:
+            raw_path = self.assets / self.receipt['gates'][gate]['evidence'][0]['path']
+            raw = json.loads(raw_path.read_bytes())
+            for k in ('engine_commit', 'engine_tree', 'binary_sha256'):
+                raw[k] = alt[k]
+            raw['release_lock_sha256'] = alt.get('release_lock_sha256', '9' * 64)
+            raw_path.write_bytes(encoded(raw))
+            self.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+        self.receipt['rerun_gates'] = list(rerun)
+        self.receipt['carried_gates'] = {gate: {
+            'source_engine_commit': alt['engine_commit'],
+            'source_engine_tree': alt['engine_tree'],
+            'source_binary_sha256': alt['binary_sha256'],
+            'source_receipt_sha256': source_receipt_sha256,
+            'rerun_gates': list(rerun)} for gate in gates}
+        self.receipt_path = write(self.assets, 'qualification.json', encoded(self.receipt))
+        self.kwargs['receipts'] = [self.receipt_path]
 
     def published_fixture_model(self, family, model):
         """A fixture in the prod family/model layout: registry key <family>/<model>/v<N> + runtime_id."""
@@ -302,6 +338,210 @@ class ApprovalTest(unittest.TestCase):
         self.assertEqual(doc['profiles']['single']['receipt']['sha256'], sha(self.f.receipt_path.read_bytes()))
         self.assertEqual(doc['identities']['profile_sha256'], sha(self.f.source['profile.json']))
 
+    def test_seal_accepts_a_carried_forward_receipt_from_an_earlier_engine_build(self):
+        # A T2 gate-scoped re-run: exactness/prefix_cache are fresh on the engine build being
+        # sealed and the other gates carry forward from a REAL earlier commit in the fixture
+        # repo (the "synthetic source" commit), declared in the receipt. The sealed approval's
+        # profile identity names the current engine commit, records the carried gates and their
+        # rerun gates, and the carried declaration travels inside the receipt so verification
+        # accepts it against a registry that pins the source approval.
+        target = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        src_commit = self.f.git('rev-parse', 'HEAD~1')
+        src_tree = self.f.git('rev-parse', 'HEAD~1^{tree}')
+        source_receipt_sha256 = 'a' * 64
+        self.f.rewrite_engine_build_gates(*target, source={
+            'engine_commit': src_commit, 'engine_tree': src_tree,
+            'binary_sha256': '9' * 64},
+            source_receipt_sha256=source_receipt_sha256)
+        doc = self.f.seal()
+        self.assertEqual(doc['profiles']['single']['identity']['engine_commit'], self.f.commit)
+        self.assertEqual(doc['profiles']['single']['receipt']['sha256'],
+                         sha(self.f.receipt_path.read_bytes()))
+        recorded = doc['profiles']['single']['carried_gates']
+        self.assertEqual(recorded['doctor']['source_engine_commit'], src_commit)
+        self.assertEqual(doc['profiles']['single']['rerun_gates'], ['exactness', 'prefix_cache'])
+        path, _, registry = self.f.published_fixture()
+        registry['approvals']['synthetic-demo/v0'] = {
+            'approval_sha256': '7' * 64, 'source_commit': src_commit, 'source_tree': src_tree,
+            'runtime_id': doc['runtime_id'], 'binary_sha256': '9' * 64,
+            'profiles': {'single': {'receipt': {'sha256': source_receipt_sha256}}}}
+        e.verify_assets(path, registry=registry,
+                        approved_templates=self.f.approved, engine_dir=None)
+
+    def test_seal_refuses_all_nine_gates_carried_zero_fresh(self):
+        # A receipt whose gates are all carried (zero fresh gates on the target build) must
+        # never seal, even when every record is otherwise well-formed: exactness and
+        # prefix_cache can never be carried, and at least one gate must be fresh.
+        self.f.rewrite_engine_build_gates(*GATES, rerun=('doctor',))
+        with self.assertRaisesRegex(ValueError, 'can never be carried|at least one gate .*fresh'):
+            self.f.seal()
+
+    def test_seal_refuses_a_carried_gate_without_a_registry_pinned_source_approval(self):
+        # The carried record must name a registry-pinned prior approval; a fabricated source
+        # with no such approval is refused at verification, not silently accepted.
+        self.f.rewrite_engine_build_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
+        path, _, registry = self.f.published_fixture()
+        with self.assertRaisesRegex(ValueError, 'not pinned in the trusted registry'):
+            e.verify_assets(path, registry=registry,
+                            approved_templates=self.f.approved, engine_dir=None)
+
+    def _carry_seal_and_registry(self, approval_sha256='7' * 64, source_receipt_sha256='a' * 64):
+        """Seal a carried-forward approval; return (path, doc, registry with a pinned source entry)."""
+        target = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        src_commit = self.f.git('rev-parse', 'HEAD~1')
+        src_tree = self.f.git('rev-parse', 'HEAD~1^{tree}')
+        self.f.rewrite_engine_build_gates(*target, source={
+            'engine_commit': src_commit, 'engine_tree': src_tree, 'binary_sha256': '9' * 64},
+            source_receipt_sha256=source_receipt_sha256)
+        doc = self.f.seal()
+        path, _, registry = self.f.published_fixture()
+        registry['approvals']['synthetic-demo/v0'] = {
+            'approval_sha256': approval_sha256, 'source_commit': src_commit, 'source_tree': src_tree,
+            'runtime_id': doc['runtime_id'], 'binary_sha256': '9' * 64,
+            'profiles': {'single': {'receipt': {'sha256': source_receipt_sha256}}}}
+        return path, doc, registry
+
+    def test_verify_applies_the_effective_model_lock_rule_from_the_bundle(self):
+        # Rule A at verification: the carried gates were produced under a lock that also had a role this choice
+        # never fetches; a copy of that lock ships with the evidence. verify_assets reads the bundle's profile.json
+        # and model.lock.json to re-prove that the target record is unchanged.
+        carried = [g for g in GATES if g not in ('exactness', 'prefix_cache')]
+        src_commit = self.f.git('rev-parse', 'HEAD~1')
+        src_tree = self.f.git('rev-parse', 'HEAD~1^{tree}')
+        self.f.rewrite_engine_build_gates(*carried, source={
+            'engine_commit': src_commit, 'engine_tree': src_tree, 'binary_sha256': '9' * 64})
+
+        def bind_source_lock(name, target_revision):
+            source_lock = copy.deepcopy(self.f.models)
+            source_lock['packs']['draft'] = dict(copy.deepcopy(source_lock['packs']['target']), repo='synthetic/draft')
+            source_lock['packs']['target']['revision'] = target_revision
+            lock_copy = write(self.f.assets, 'locks/' + name, encoded(source_lock))
+            for gate in carried:
+                raw_path = self.f.assets / self.f.receipt['gates'][gate]['evidence'][0]['path']
+                raw = json.loads(raw_path.read_bytes())
+                raw['model_lock_sha256'] = sha(lock_copy.read_bytes())
+                raw_path.write_bytes(encoded(raw))
+                self.f.receipt['gates'][gate]['evidence'][0]['sha256'] = sha(raw_path.read_bytes())
+                self.f.receipt['carried_gates'][gate]['source_model_lock'] = {
+                    'path': 'locks/' + name, 'sha256': sha(lock_copy.read_bytes())}
+            self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+            self.f.kwargs['receipts'] = [self.f.receipt_path]
+
+        # A lock copy whose target record differs does not carry.
+        bind_source_lock('moved-model.lock.json', 'e' * 40)
+        with self.assertRaisesRegex(ValueError, 'effective model lock differs'):
+            self.f.seal()
+        bind_source_lock('source-model.lock.json', self.f.models['packs']['target']['revision'])
+        doc = self.f.seal()
+        self.assertIn('locks/source-model.lock.json', doc['evidence_asset']['members'])
+        path, _, registry = self.f.published_fixture()
+        registry['approvals']['synthetic-demo/v0'] = {
+            'approval_sha256': '7' * 64, 'source_commit': src_commit, 'source_tree': src_tree,
+            'runtime_id': doc['runtime_id'], 'binary_sha256': '9' * 64,
+            'profiles': {'single': {'receipt': {'sha256': 'a' * 64}}}}
+        e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_an_approval_record_that_contradicts_the_receipt(self):
+        path, doc, registry = self._carry_seal_and_registry()
+        for label, edit in (('carried', lambda sel: sel['carried_gates'].pop('doctor')),
+                            ('rerun', lambda sel: sel.__setitem__('rerun_gates', ['exactness']))):
+            with self.subTest(label):
+                tampered = copy.deepcopy(doc)
+                edit(tampered['profiles']['single'])
+                path.write_bytes(encoded(tampered))
+                registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(path.read_bytes())
+                with self.assertRaisesRegex(ValueError, 'approval (carried|rerun)_gates record does not match'):
+                    e.verify_assets(path, registry=registry, approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_another_models_pinned_approval_with_the_same_commit_and_tree(self):
+        # Q56 (1): a foreign model's registry-pinned approval with the same production commit and
+        # tree must never authorize a carry: the source is tied to the SAME runtime_id.
+        path, _, registry = self._carry_seal_and_registry()
+        registry['approvals']['synthetic-demo/v0']['runtime_id'] = 'other-model'
+        with self.assertRaisesRegex(ValueError, 'not pinned in the trusted registry'):
+            e.verify_assets(path, registry=registry,
+                            approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_arbitrary_source_binary_sha256(self):
+        # Q56 (1): the declared source binary must equal the registry-pinned approval's actual
+        # binary; a fabricated value is refused.
+        path, _, registry = self._carry_seal_and_registry()
+        registry['approvals']['synthetic-demo/v0']['binary_sha256'] = 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'carried gate source binary identity mismatch'):
+            e.verify_assets(path, registry=registry,
+                            approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_arbitrary_source_receipt_sha256(self):
+        # Q56 (1): the declared source receipt must equal the registry-pinned approval's actual
+        # receipt for the profile; a fabricated value is refused.
+        path, _, registry = self._carry_seal_and_registry()
+        registry['approvals']['synthetic-demo/v0']['profiles']['single']['receipt']['sha256'] = 'c' * 64
+        with self.assertRaisesRegex(ValueError, 'carried gate source receipt identity mismatch'):
+            e.verify_assets(path, registry=registry,
+                            approved_templates=self.f.approved, engine_dir=None)
+
+    def test_verify_refuses_a_registry_source_entry_without_binary_or_receipt_pins(self):
+        # The registry entry must carry the source approval's binary and receipt pins; without
+        # them a carried gate cannot be tied to the registry's actual approval identity.
+        path, _, registry = self._carry_seal_and_registry()
+        del registry['approvals']['synthetic-demo/v0']['binary_sha256']
+        with self.assertRaisesRegex(ValueError, 'carried gate source binary identity mismatch'):
+            e.verify_assets(path, registry=registry,
+                            approved_templates=self.f.approved, engine_dir=None)
+
+    def test_seal_omits_null_carried_gates_and_rerun_gates(self):
+        # Q56 (3): the sealer omits carried_gates/rerun_gates when the receipt carries none;
+        # it never writes explicit nulls into the profile record.
+        doc = self.f.seal()
+        self.assertNotIn('carried_gates', doc['profiles']['single'])
+        self.assertNotIn('rerun_gates', doc['profiles']['single'])
+
+    def test_verify_accepts_explicit_null_carried_gates_records(self):
+        # Dev main's sealer writes carried_gates/rerun_gates as null; prod verification must
+        # accept both that shape and the omitted shape.
+        path, doc, registry = self.f.published_fixture()
+        doc['profiles']['single']['carried_gates'] = None
+        doc['profiles']['single']['rerun_gates'] = None
+        path.write_bytes(encoded(doc))
+        registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(path.read_bytes())
+        self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=self.f.approved)[0], doc)
+
+    def test_verify_refuses_one_sided_null_carried_gates(self):
+        path, doc, registry = self.f.published_fixture()
+        doc['profiles']['single']['carried_gates'] = None
+        path.write_bytes(encoded(doc))
+        registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'invalid profile approval'):
+            e.verify_assets(path, registry=registry, approved_templates=self.f.approved)
+
+    def test_verify_refuses_null_carried_gates_when_the_receipt_declares_them(self):
+        path, doc, registry = self._carry_seal_and_registry()
+        doc['profiles']['single']['carried_gates'] = None
+        doc['profiles']['single']['rerun_gates'] = None
+        path.write_bytes(encoded(doc))
+        registry['approvals']['synthetic-demo/v1']['approval_sha256'] = sha(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'approval omits carried_gates that the receipt declares'):
+            e.verify_assets(path, registry=registry, approved_templates=self.f.approved)
+
+    def test_seal_refuses_a_carried_forward_receipt_with_pack_drift(self):
+        # Even with a valid carried_gates declaration the pack/profile binding stays strict.
+        self.f.rewrite_engine_build_gates(*[g for g in GATES if g not in ('exactness', 'prefix_cache')])
+        self.f.receipt['model_lock_sha256'] = 'e' * 64
+        self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+        self.f.kwargs['receipts'] = [self.f.receipt_path]
+        with self.assertRaises(ValueError):
+            self.f.seal()
+
+    def test_seal_refuses_a_fully_drifted_receipt_without_a_declaration(self):
+        # Every gate's raw evidence on another build, with no carried_gates declaration, cannot
+        # seal: undeclared cross-engine-build gate evidence stays refused.
+        self.f.rewrite_engine_build_gates(*GATES, rerun=('doctor',))
+        del self.f.receipt['carried_gates']
+        self.f.receipt_path = write(self.f.assets, 'qualification.json', encoded(self.f.receipt))
+        self.f.kwargs['receipts'] = [self.f.receipt_path]
+        with self.assertRaises(ValueError):
+            self.f.seal()
+
     def test_only_real_commit_tree_pairs(self):
         for changes in ({'commit': 'f' * 40}, {'tree': 'e' * 40}, {'commit': 'HEAD'}, {'commit': self.f.tree}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -331,13 +571,27 @@ class ApprovalTest(unittest.TestCase):
             self.f.seal()
 
     def test_manifest_release_model_and_profile_drift(self):
-        for name in ('source.manifest.json', 'release.lock.json', 'profile.json', 'model.lock.json'):
+        # profile/model/source manifest are pack/source-bound: drift stays refused.
+        # release.lock.json is an engine-build key (release_lock_sha256) and must match exactly
+        # too: a receipt is strict on every identity key unless it declares carried_gates
+        # (see the scoped carry-forward tests).
+        for name in ('source.manifest.json', 'profile.json', 'model.lock.json', 'release.lock.json'):
             with self.subTest(name=name):
                 bundle = copy.deepcopy(self.f.bundle)
                 bundle[name] += b' '
                 self.f.tar(self.f.archive, bundle)
                 with self.assertRaises(ValueError):
                     self.f.seal()
+
+    def test_release_lock_drift_is_refused_without_a_carried_declaration(self):
+        # release.lock.json is engine-build identity (release_lock_sha256). A receipt is strict on
+        # every identity key by default, so a bundle whose release lock differs from the receipt is
+        # refused unless the receipt declares the gate carried from that earlier build.
+        bundle = copy.deepcopy(self.f.bundle)
+        bundle['release.lock.json'] += b' '
+        self.f.tar(self.f.archive, bundle)
+        with self.assertRaises(ValueError):
+            self.f.seal()
 
     def _reseal_with_release(self, **changes):
         release = copy.deepcopy(self.f.release)
@@ -433,6 +687,35 @@ class PerProfilePackTest(unittest.TestCase):
         self.assertEqual((identities['alt']['runtime_id'], identities['alt']['pack']), ('synthetic-alt', 'alt'))
         self.assertEqual(approval['runtime_id'], 'synthetic-demo')
         self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=fixture.approved)[0], approval)
+
+    def test_an_approval_may_name_a_subset_of_the_packaged_profiles(self):
+        # tp1 and tp2 are independent runtime units (D38/D53): a receipt for the default profile alone seals and verifies.
+        fixture = self.fixture()
+        path, approval, registry = fixture.published_fixture(receipts=[fixture.receipt_path])
+        self.assertEqual(set(approval['profiles']), {'single'})
+        self.assertEqual(e.verify_assets(path, registry=registry, approved_templates=fixture.approved)[0], approval)
+
+    def test_an_approval_without_the_default_profile_does_not_seal(self):
+        fixture = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'default profile requires qualification'):
+            fixture.seal(receipts=[fixture.alt_receipt_path])
+
+    def test_the_verifier_refuses_a_profile_set_outside_the_packaged_set_or_without_the_default(self):
+        # Re-derive the evidence inventory so the profile-set rule itself is what refuses.
+        for label, edit, message in (
+                ('unpackaged', lambda doc: doc['profiles'].update(ghost=copy.deepcopy(doc['profiles']['single'])),
+                 'receipt profile set mismatch'),
+                ('no default', lambda doc: doc['profiles'].pop('single'), 'default profile is not approved')):
+            with self.subTest(label):
+                fixture = self.fixture(label.replace(' ', '-'))
+                path, approval, registry = fixture.published_fixture()
+                edit(approval)
+                approval['evidence_asset'] = e.evidence_asset(approval, fixture.assets)
+                (fixture.assets / 'evidence.tar.gz').unlink()
+                e.write_evidence_archive(fixture.assets, approval['evidence_asset']['members'], fixture.assets / 'evidence.tar.gz')
+                self.rebind(fixture, path, approval, registry)
+                with self.assertRaisesRegex(ValueError, message):
+                    e.verify_assets(path, registry=registry, approved_templates=fixture.approved)
 
     def test_the_prod_family_model_registry_key_verifies_a_per_profile_approval(self):
         fixture = self.fixture()

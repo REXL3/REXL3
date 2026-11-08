@@ -1,0 +1,81 @@
+window R=1 raw 9f85454a8946e01c
+window R=1 g 56b02da8c2920237
+window R=1 beta cd31801a8d72e394
+window R=1 z 2e2c49ca81b04e72
+window R=1 y 51f0dcd08a5e630d
+window R=1 norm bc3d975a7949c24b
+window R=1 commit 1 S 993f32e06c0bf224
+window R=1 commit 1 conv 667be768cfaa2f50
+window R=1 flip S 993f32e06c0bf224
+window R=1 flip conv 667be768cfaa2f50
+window R=2 raw 7f2aa86aef99736b
+window R=2 g 0f558a6a738099cc
+window R=2 beta 05ed06f70c22841d
+window R=2 z 8f73b4531fd9aa63
+window R=2 y 9f98218b3ea65480
+window R=2 norm 962d5f11ac2047b0
+window R=2 commit 1 S 993f32e06c0bf224
+window R=2 commit 1 conv 667be768cfaa2f50
+window R=2 commit 2 S 5f3c322ba1ac3a74
+window R=2 commit 2 conv 861acb9f67d1ff46
+window R=2 flip S 5f3c322ba1ac3a74
+window R=2 flip conv 861acb9f67d1ff46
+window R=8 raw af1e52c4532ce15f
+window R=8 g c3a8fb69b60cb360
+window R=8 beta 970811a492ea0c17
+window R=8 z a96a7f476db3c4d1
+window R=8 y e09f38f62a295d38
+window R=8 norm 8f311b67a36bd07d
+window R=8 commit 4 S 9fe2420a3211d857
+window R=8 commit 4 conv 96c8657492cb9b09
+window R=8 commit 8 S 99c437434dacb967
+window R=8 commit 8 conv d728a5662a3b5fd6
+window R=8 flip S 99c437434dacb967
+window R=8 flip conv d728a5662a3b5fd6
+window R=9 raw fe35a53d65c820b3
+window R=9 g ed6a087e257ba55d
+window R=9 beta 1541a9521f020c17
+window R=9 z c3471b1dd045a404
+window R=9 y ae7e477479afa970
+window R=9 norm 14e57e4362a4e45e
+window R=9 commit 4 S 9fe2420a3211d857
+window R=9 commit 4 conv 96c8657492cb9b09
+window R=9 commit 9 S 25201726499d56ec
+window R=9 commit 9 conv 866cebc3fed98170
+window R=9 flip S 25201726499d56ec
+window R=9 flip conv 866cebc3fed98170
+window R=33 raw bea50b54de5b95b6
+window R=33 g e6437668e97e9fd7
+window R=33 beta 884e4a19395700b6
+window R=33 z 8ac4c8fbf172ae32
+window R=33 y 5e9661974363d4d1
+window R=33 norm 6e63becab083922f
+window R=33 commit 16 S d89667a42ee0d4f3
+window R=33 commit 16 conv 2de10d7f26d21800
+window R=33 commit 33 S 0eb5f74283a46339
+window R=33 commit 33 conv 7ab146af69db50bb
+window R=33 flip S 0eb5f74283a46339
+window R=33 flip conv 7ab146af69db50bb
+window R=128 raw c216a2a2289d3ffb
+window R=128 g 668513c2b5c92ceb
+window R=128 beta 32b9a2365c45304f
+window R=128 z cb8d060aefc423b0
+window R=128 y f93a83ee610194b8
+window R=128 norm 25a5d94922d9d072
+window R=128 commit 64 S e0f4c242dde2eb4c
+window R=128 commit 64 conv 79689fecb0ad6504
+window R=128 commit 128 S 99c9e9b137d31542
+window R=128 commit 128 conv a5b885781f6373d4
+window R=128 flip S 99c9e9b137d31542
+window R=128 flip conv a5b885781f6373d4
+batch 3,7,1 norm d88b8b8ccc6e1fb4
+batch 3,7,1 commit 2,7,0 slot 0 S ac7b1392a4ce1f80
+batch 3,7,1 commit 2,7,0 slot 0 conv 3b7bc591bc5a7e54
+batch 3,7,1 commit 2,7,0 slot 1 S 02273dc5ac993079
+batch 3,7,1 commit 2,7,0 slot 1 conv 2645584d94aa9b52
+batch 3,7,1 commit 2,7,0 slot 2 S 5f3c322ba1ac3a74
+batch 3,7,1 commit 2,7,0 slot 2 conv 861acb9f67d1ff46
+prefill 300 norm 5564a3d386bb10a0
+prefill 300 S 5b1696ec805e1a2f
+prefill 300 conv 7d8e77eb3c87344d
+window R=8 RZ y 83871a29e4301038

@@ -10,11 +10,13 @@ from tools.test_release_evidence import write, encoded
 VERSION = 'v0.1.0'
 HEX40 = 'a' * 40
 HEX64 = 'b' * 64
+ENGINE_TAG = 'engine-v0.1.2-4208d848'
+DEV_COMMIT = '4208d848' * 5
 
 
 def manifest(version=VERSION):
     return {'schema': 'rexl3.release-manifest.v1', 'version': version,
-            'engine': {'dev_commit': HEX40, 'dev_tree': HEX40, 'engine_release_tag': 'engine-v0.1.2-4208d848',
+            'engine': {'dev_commit': DEV_COMMIT, 'dev_tree': HEX40, 'engine_release_tag': ENGINE_TAG,
                        'artifacts': {'rexl3-serve.tar.gz': HEX64}},
             'models': [{'family': 'qwen3.8', 'model': 'qwen3.8-27b', 'version': 'v1',
                         'runtime_id': 'qwen38-27b-dflash2-exl3-4.00', 'approval_sha256': HEX64}],
@@ -45,12 +47,29 @@ class NotesTest(unittest.TestCase):
         self.assertIn('Faster.', notes)
         self.assertIn('qwen3.8/qwen3.8-27b v1', notes)
         self.assertIn('rexl3-serve.tar.gz', notes)
-        self.assertIn(HEX40, notes)
+        self.assertIn(DEV_COMMIT, notes)
+        self.assertIn('All models are sealed from the same dev engine release commit.', notes)
         changelog = (self.root / 'CHANGELOG.md').read_text()
         self.assertIn(f'[{VERSION}]', changelog)
         self.assertIn('First release.', changelog)
         self.assertIn('- Models: qwen3.8/qwen3.8-27b v1.', changelog)
         self.assertNotIn('vv1', changelog)
+
+    def test_provenance_lists_each_carried_models_own_engine_commit(self):
+        doc = manifest()
+        doc['models'][0].update(carried_forward=True,
+                                qualified_engine_release_tag='engine-v0.1.1-99999999',
+                                qualification_tier='T0', scope_diff_base=HEX40)
+        doc['models'].append({'family': 'qwen3.8', 'model': 'qwen3.8-flash-next', 'version': 'v1',
+                              'runtime_id': 'qwen38-flash-next-exl3-3.05', 'approval_sha256': HEX64})
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(doc))
+        tree = self.root / 'runtimes/qwen3.8/qwen3.8-27b/v1'
+        write(tree, 'approval.json', encoded({'source_commit': HEX40}))
+        self.assertEqual(n.assemble(str(self.root), VERSION), 0)
+        notes = (self.root / f'releases/{VERSION}/NOTES.md').read_text()
+        self.assertIn(f'Models sealed from the engine dev commit `{DEV_COMMIT}`: qwen3.8/qwen3.8-flash-next v1.', notes)
+        self.assertIn(f'qwen3.8/qwen3.8-27b v1 carries forward its previously sealed approval at commit `{HEX40}`', notes)
+        self.assertIn('engine release `engine-v0.1.1-99999999`', notes)
 
     def test_repeat_assembly_is_idempotent(self):
         n.assemble(str(self.root), VERSION)
@@ -81,6 +100,34 @@ class NotesTest(unittest.TestCase):
         write(self.root, 'changes/unreleased/slug.md', b'## Highlights\n- one.\n')
         write(self.root, 'changes/unreleased/slug-2.md', b'## Highlights\n- two.\n')
         n.assemble(str(self.root), VERSION)
+
+    def test_the_rules_readme_is_not_a_fragment(self):
+        # changes/unreleased/README.md documents the fragment rules with headings of its own; it used to be read
+        # as a fragment and refused every assembly with "unknown heading".
+        rules = Path(n.__file__).resolve().parent.parent / 'changes/unreleased/README.md'
+        self.assertTrue(rules.is_file())
+        write(self.root, 'changes/unreleased/README.md', rules.read_bytes())
+        write(self.root, 'changes/unreleased/qwen3.8-27b.md', b'## Known issues\n- A dotted slug is a fragment.\n')
+        self.assertEqual(n.assemble(str(self.root), VERSION), 0)
+        notes = (self.root / f'releases/{VERSION}/NOTES.md').read_text()
+        self.assertIn('First release.', notes)
+        self.assertNotIn('When a fragment is required', notes)
+        self.assertIn('- A dotted slug is a fragment.', n.parse_fragments(self.fragments)['KNOWN_ISSUES'])
+
+    def test_a_file_not_named_as_a_slug_is_refused(self):
+        for name in ('Fix_Thing.md', 'Readme.md', 'bad--slug.md'):
+            with self.subTest(name=name):
+                path = self.fragments / name
+                path.write_bytes(b'## Bug fixes\n- a fix.\n')
+                with self.assertRaisesRegex(ValueError, 'not a lowercase kebab-case'):
+                    n.assemble(str(self.root), VERSION)
+                path.unlink()
+
+    def test_only_the_rules_readme_is_no_fragments(self):
+        (self.fragments / 'slug.md').unlink()
+        write(self.root, 'changes/unreleased/README.md', b'# Release-notes fragments\n\n## Rules\n\n- rules.\n')
+        with self.assertRaisesRegex(ValueError, 'no fragments'):
+            n.assemble(str(self.root), VERSION)
 
     def test_manifest_schema_is_enforced(self):
         bad = manifest()

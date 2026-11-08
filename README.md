@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/rexl3-logo.jpg" alt="REXL3 logo" width="240">
+</p>
+
 # REXL3
 
 REXL3 is an inference engine for **NVIDIA GB10** systems (DGX Spark class, `sm_121`) that serves
@@ -11,15 +15,19 @@ This repository is the **production** repository. It holds:
   approval and promotion tooling and never edited by hand;
 - the policy that decides which trees production accepts (`runtimes/templates/APPROVED.json` and
   `runtimes/templates/APPROVALS.json`);
-- the stdlib-Python verifier and promotion tools in `tools/`.
+- the stdlib-Python verifier and promotion tools in `tools/`;
+- the AGPL-3.0 corresponding source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`,
+  `Cargo.lock`, `rust-toolchain.toml`, `SOURCE_BUILD.md`, `SOURCE_IDENTITY.json`), a snapshot of the
+  development repository at the release's engine commit.
 
 Engine development, model validation and sealing happen in the development repository,
-`REXL3/REXL3-dev`. There is no engine source here. Rules for contributing are in
+`REXL3/REXL3-dev`; the engine source here is a snapshot of it, and `SOURCE_BUILD.md` says how to build it.
+Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: no pack is released yet.** The first release (v0.1.0) is being prepared; none of the
-> first-release models below is published. Everything in this README describes how the release will
-> work and how recipes are structured, not something that is already available.
+> **Status: v0.1.0 is released.** The five models below are published as assets of the
+> [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
+> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`.
 
 ## First release (v0.1.0) models
 
@@ -27,20 +35,25 @@ Engine development, model validation and sealing happen in the development repos
 | --- | --- | --- | --- | --- |
 | Qwen3.8-27B | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on |
 | Qwen3.8-Flash-Next | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k`: 262,144 tokens, one node, port 8899 | off |
-| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940; `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off on both profiles |
 | GLM-5.3-Flash | `glm` (glm5_next) | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single`: 262,144 tokens, one node, port 8950; `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on |
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
-| Ling-3.1-Flash-1019 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-32k`: 32,768 tokens, one node, port 8889 (the same port as Qwen3.8-27B) | off |
+| DeepSeek-V4.1-Flash-1017 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940 | off |
+
+Planned for v0.1.1: Ling-3.1-Flash-1019 and DeepSeek-V4.1-Flash-1017's two-node profile (`dsv41-tp2-1m`, 1,048,576 tokens).
 
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
-two-node profile is one recipe with one runtime id. The release page and each recipe's sealed
-`profile.json` are authoritative: a sealed runtime id, profile or port can differ from the table above.
-A recipe with vision off says so in its `KNOWN_ISSUES.md`.
+two-node profile ships as two independent runtime units: `tp1` (single node) as `<model>`, and `tp2`
+(two nodes) as `<model>-tp2`. They are packaged, sealed and approved separately, so a `tp1` unit never
+waits on its `tp2` sibling. In v0.1.0 the GLM-5.3-Flash approval is the combined approval 1
+(`glm53-flash-2.25bpw-sm121`) covering both `glm53-flash-single` and `glm53-flash-tp2-1m`; the
+`<model>` / `<model>-tp2` split applies to models added after v0.1.0 and to subsequent GLM versions. The
+release page and each recipe's sealed `profile.json` are authoritative: a sealed runtime id, profile
+or port can differ from the table above. A recipe with vision off says so in its `KNOWN_ISSUES.md`.
 
-**Two-node profiles** (the 1,048,576-token profiles of GLM-5.3-Flash and DeepSeek-V4.1-Flash-1017)
-listen on the leader node's network address, not on localhost, and in v0.1.0 the server has no API key
-and no request log. Run them only on a private, trusted network, or behind a firewall or an SSH tunnel.
-An API key option is planned for v0.1.1.
+**The `tp2` two-node profile in v0.1.0** (GLM-5.3-Flash's 1,048,576-token profile,
+`glm53-flash-tp2-1m`) listens on the leader node's network address, not on localhost, and in v0.1.0
+the server has no API key and no request log. Run it only on a private, trusted network, or behind a
+firewall or an SSH tunnel. An API key option is planned for v0.1.1.
 
 None of these is released. Qualification on the exact release binary, sealing and promotion are the
 remaining steps; the release notes document what each model's evidence proves.
@@ -61,7 +74,18 @@ privileges, network, GitHub access).
 There is **one versioned product release** — the engine and its recipes ship together — not a release
 per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 
-- All models in a release are sealed from the same dev release-candidate commit.
+- Releases are cut from an agreed group of models listed in the release manifest; v0.1.0's current
+  manifest holds the five already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
+  GLM-5.3-Flash, Nemotron-3.5-Super-VL and DeepSeek-V4.1-Flash-1017).
+  Each model enters prod through its own `model/<model>` PR, validated
+  (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
+  only after every in-scope model PR has been validated and merged. No model gets its own release or
+  release candidate; a later release may add a single newly validated model as a new version only
+  after v0.1.0 is released.
+- Every model in a release is either sealed on the dev freeze commit, or carries forward a previously
+  sealed approval whose newer engine commits do not touch its scope, or re-seals on the new engine
+  build with carried gate receipts; the freeze exists only so the whole group is validated on one
+  engine build, and is never a release per model.
 - A release is a `v<X.Y.Z>` tag on the prod repository. Per-runtime releases are retired; a release
   contains the bundle archives for every recipe in it, their `approval.json` records, and the engine
   corresponding source.
@@ -309,15 +333,28 @@ The workflows read code and policy from the protected base checkout only (`pull_
 head is checked out as inert data and never executed. `DEV_ASSETS_TOKEN` is the only secret, used by a
 single download step; actions are pinned by full commit SHA.
 
-## Reporting a problem
+## Reporting a problem or submitting a coded fix/feature
 
-Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
-tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
-line, the exact command with its exit code and error token, the request and response for a bad answer,
-the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
-expected.
-Issues are visible to the maintainers and every invited tester; never paste raw logs, prompts,
-credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
+Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+and check the model's `KNOWN_ISSUES.md`; if an open issue already covers the same symptom or bottleneck, add your findings,
+diagnostics, or tested patch as a comment on that issue instead of opening a duplicate.
+Always use the structured templates in `.github/ISSUE_TEMPLATE/` (including when submitting via `gh issue create`, preserving the `[report] ` or `[finding] ` title prefix and all required headings):
+
+- **Bug or failure report (`.github/ISSUE_TEMPLATE/tester-report.yml`, `[report] `):** asks for the release
+  tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
+  line, the exact command with its exit code and error token, the request and response for a bad answer,
+  the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
+  expected.
+- **Finding, fix, or feature proof (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, `[finding] `):**
+  **no bare feature requests.** Because this repository ships the complete engine source tree (`crates/`,
+  `Cargo.toml`, `SOURCE_BUILD.md`), any proposed feature, drafter integration, kernel optimization, or
+  runtime improvement must include a **working `git diff` that you built, tested, and validated on your
+  own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`)**,
+  together with exactness checks (`drafted == serial`) and measured before/after numbers so the
+  maintainers can test it in `REXL3/REXL3-dev`, validate it, and promote it to `REXL3/REXL3`.
+
+Issues are public: anyone can read them, and only invited testers and the maintainers can open or
+comment on them. Testers submit code as a `git diff` in an issue and do not open pull requests. Never paste raw logs, prompts, credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
 
 ## Licence and corresponding source
 
@@ -328,5 +365,6 @@ and that repository's own licence governs the weights. Third-party notices are i
 
 Binaries in a release archive are built from the source commit recorded in the recipe's approval
 record (`approval.json` in the sealed tree, `<runtime-id>-v<N>-approval.json` on the release), in the
-dev repository. Releases attach the engine corresponding source as a release
-asset; anyone who receives a binary and needs its Corresponding Source can also ask the maintainers.
+dev repository. The same Corresponding Source is in this repository (`SOURCE_BUILD.md`,
+`SOURCE_IDENTITY.json`) and is attached to each release as an asset; anyone who receives a binary and
+needs its Corresponding Source can also ask the maintainers.

@@ -1,0 +1,14 @@
+[
+  {
+    "file": "CaseFolding.txt",
+    "url": "https://www.unicode.org/Public/9.0.0/ucd/CaseFolding.txt",
+    "sha256": "37d40cf8c2c35637f4a04e746814e1fc4eb764c272bed9238a87ee96a4866857",
+    "bytes": 78161
+  },
+  {
+    "file": "license.txt",
+    "url": "https://www.unicode.org/license.txt",
+    "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
+    "bytes": 1995
+  }
+]

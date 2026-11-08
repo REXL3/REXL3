@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "NemotronH_Omni_Reasoning_V3"
+  ],
+  "display_name": "Nemotron-3.5-Super-VL",
+  "engine_family": "nemotron_h_omni",
+  "family": "nemotron-3.5",
+  "model": "nemotron-3.5-super-vl",
+  "pack": {
+    "bits": "3.85",
+    "format": "exl3",
+    "target_repo": "vcruz305/Nemotron-Super-VL-EXL3-3.85bpw",
+    "target_revision": "3963815246eda892a4c3b88e18d0d1c39288c8e0"
+  },
+  "runtime_id": "nemotron35-super-vl-sage-3.85",
+  "schema": "rexl3.prod-model.v1"
+}

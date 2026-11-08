@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "name": "glm-sc410-tp2-longctx",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The sc_4.10bpw pack at TP=2 (N3 rank 0, N2 rank 1) with a 131,072-token window, 2 slots, 262,144 KV tokens: the LONG-CONTEXT kit of PASS_RULES_GLM_ADDENDUM_GEOMETRY D-G1 (NIAH and R-G-serve's whole-window request), frozen in PASS_RULES_GLM_ADDENDUM_LONGCTX (D-L1, D-L5). Text only: --no-vision, --prefix-cache off, --spec none --no-drafts. The rank planner grants these flags from 97.000 GiB free on either rank (tp_boot::tests::the_sc410_long_context_kit_plans_from_its_share); 1.6 GiB of margin, rounded up. Every other block (nodes, nccl with lib, pack, binary, tp, supervisor, user) is cluster.glm-sc410-tp2.json's, verbatim.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "expected_hostname": "host-b"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "expected_hostname": "host-c"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ],
+    "lib": "/srv/rexl3/nccl/lib/libnccl.so.2"
+  },
+  "pack": "/srv/models/glm53-flash-exl3-sc410",
+  "memory": {
+    "min_free_gib": 99
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--no-vision",
+      "--slots",
+      "2",
+      "--max-model-len",
+      "131072",
+      "--kv-tokens",
+      "262144",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "none",
+      "--no-drafts",
+      "--prefix-cache",
+      "off",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-sc410-longctx-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 900,
+    "ready_timeout_s": 1800,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N3",
+        "N2"
+      ],
+      "tp_port": 29618,
+      "http_port": 8959,
+      "http_host": "0.0.0.0"
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 0,
+    "window_s": 900
+  }
+}

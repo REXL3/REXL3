@@ -1,0 +1,86 @@
+F16 len=1 last rows=1 q_lat 3718d283b32619ff o_lat 7c447321750b60a5 out 09ea83ff6f6b124c
+F16 len=1 first rows=1 q_lat 3718d283b32619ff o_lat 7c447321750b60a5 out 09ea83ff6f6b124c
+F16 len=1 win2 rows=1 q_lat 3718d283b32619ff o_lat 7c447321750b60a5 out 09ea83ff6f6b124c
+F16 len=1 win8 rows=1 q_lat 3718d283b32619ff o_lat 7c447321750b60a5 out 09ea83ff6f6b124c
+F16 len=1 win9 rows=1 q_lat 3718d283b32619ff o_lat 7c447321750b60a5 out 09ea83ff6f6b124c
+F16 len=255 last rows=1 q_lat 9393c52e7a68e6c7 o_lat d8e2147d8ee59046 out 56256f1f5385fb74
+F16 len=255 first rows=1 q_lat a703f816ecbd8115 o_lat 3a365d0229886b25 out 8e3ab27ae10d22b6
+F16 len=255 win2 rows=2 q_lat 8387d3e1ea1c0b59 o_lat 46ed493f58714f37 out f7abaa242a0fc982
+F16 len=255 win8 rows=8 q_lat ee59c86b10e709dd o_lat 5122a15e45f721e1 out 9739dfc3afee166e
+F16 len=255 win9 rows=9 q_lat 60f2cf299541e22e o_lat 333aad39cbeda309 out 4c0bca9e7b778cb1
+F16 len=257 last rows=1 q_lat 8f8b7d4a08ecf20d o_lat 5905245f3aa41718 out 3e622797080d7306
+F16 len=257 first rows=1 q_lat 09a83396e5d51352 o_lat 0880082a7ec37325 out eef7d883ab68107a
+F16 len=257 win2 rows=2 q_lat 241b6872395a99d5 o_lat b14364a0999711a9 out 96178fa34ed31bf0
+F16 len=257 win8 rows=8 q_lat b0628e96aa335960 o_lat eda648979f38a9b6 out 110c6d232ceb96b0
+F16 len=257 win9 rows=9 q_lat 1581181537a4e951 o_lat 08aed16aa2b13be9 out a6b407efaf13e241
+F16 len=1000 last rows=1 q_lat 698dcae9209e28bc o_lat a8c873f5adf7381b out 7eaa341ec63ce560
+F16 len=1000 first rows=1 q_lat 2916298c2158fbfd o_lat abd4bf27968ee625 out 35f6ffa98065cd38
+F16 len=1000 win2 rows=2 q_lat 56f7e9aee228fafb o_lat 36acbf9dcffe9ab2 out 8a0139d6bc56b358
+F16 len=1000 win8 rows=8 q_lat a781711231cc3f74 o_lat 00d1a40a6b3a18a8 out 37608ef6258b279d
+F16 len=1000 win9 rows=9 q_lat 579d52a0152ac217 o_lat ed4c5a78abc14b65 out 4094a4ff718bf45e
+F16 len=2048 last rows=1 q_lat c8ba23328373c93f o_lat 586f81f1ffe28a77 out 562cdfd9b88324d5
+F16 len=2048 first rows=1 q_lat 9a0edb57461ffcdd o_lat 743e4cb5d080ea25 out 4012e22f87e6b76b
+F16 len=2048 win2 rows=2 q_lat dce780655c325037 o_lat 2125d19e23d4df64 out 06f5e77f410e70e1
+F16 len=2048 win8 rows=8 q_lat dd8f6bd98c32f16c o_lat def734e1f3bcfcca out 04ed7eb77cef8a34
+F16 len=2048 win9 rows=9 q_lat 193acaa9839daa57 o_lat dd1551ccd3219f58 out 4e8f8199e14f006a
+F16 len=2051 last rows=1 q_lat 568f223d1939621a o_lat ec23c604093fb6f9 out ff8ce88e88b4dcd7
+F16 len=2051 first rows=1 q_lat 1977a7799b90451c o_lat d50f6af92006e1a5 out 816d5fecbe1fe10c
+F16 len=2051 win2 rows=2 q_lat 6638a342cfb4f92d o_lat 5219537342106823 out b1c04b9eba8cc0c8
+F16 len=2051 win8 rows=8 q_lat 2245315b21f80079 o_lat 2ee7ef815111d1cd out ffa2b41ae1da0f02
+F16 len=2051 win9 rows=9 q_lat f18f287b68098ca2 o_lat 79bbbbeb7abb9fbe out 2bfa8697a259ee35
+F16 len=3000 last rows=1 q_lat 36f8ebe2ecb38d2f o_lat 11f073e17214b898 out a97b82630973db7b
+F16 len=3000 first rows=1 q_lat 3910b7c034bd8dc5 o_lat ef9f0a64fdc30c25 out 1f0faa9bfc810c02
+F16 len=3000 win2 rows=2 q_lat 47aeb2281bec1ca7 o_lat 18883be6699f006f out 39142b6a956aa3f4
+F16 len=3000 win8 rows=8 q_lat 347fb5607cccd19d o_lat ef29357e31932c39 out f23a8e0b824c9316
+F16 len=3000 win9 rows=9 q_lat 60c21f40f571c84c o_lat 8f82cedcc3c2808f out 97a085b336e1085e
+F16 win128 q_lat 3ac7b6666e535691 o_lat aa3830c3d7120d52 out 5c71bf3ee9429ea7
+F16 batch12 q_lat 1627d994b1806f0a o_lat 7b5fb2dc06b6e4b2 out bcc026e7ee36add2
+F16 sparse2048 rows=1 o_lat e008ac55ed48c1fe out 1770ff06c39a34c0
+F16 sparse4999 rows=1 o_lat 201b918b38e6880c out 67a8d578f52aa108
+F16 straddle8 rows=8 o_lat fbcb7af885b9a428 out fe6009379f2f496b
+F16 list257 rows=1 o_lat 330da5d889d3aef6 out 87e974ec8a31accb
+F16 list2051 rows=1 o_lat 78168832348a4200 out 1e0a2bf870c2b777
+F16 mixed6 rows=6 o_lat 2eaa7a7d7f476926 out 364ddccb42e838c4
+BF16 len=1 last rows=1 q_lat 000723f7f4b5a618 o_lat adcd1664a7c84b25 out f6a5ca485c1fd7ef
+BF16 len=1 first rows=1 q_lat 000723f7f4b5a618 o_lat adcd1664a7c84b25 out f6a5ca485c1fd7ef
+BF16 len=1 win2 rows=1 q_lat 000723f7f4b5a618 o_lat adcd1664a7c84b25 out f6a5ca485c1fd7ef
+BF16 len=1 win8 rows=1 q_lat 000723f7f4b5a618 o_lat adcd1664a7c84b25 out f6a5ca485c1fd7ef
+BF16 len=1 win9 rows=1 q_lat 000723f7f4b5a618 o_lat adcd1664a7c84b25 out f6a5ca485c1fd7ef
+BF16 len=255 last rows=1 q_lat ba0b00f880bce046 o_lat fbf9d93e293046bf out bfb32e6e971720f9
+BF16 len=255 first rows=1 q_lat e83913fe3921a439 o_lat 58327d61178a7925 out a5eb216f9d7b9c2b
+BF16 len=255 win2 rows=2 q_lat ba3ef9af8808c94b o_lat 9c3f97956fdbad54 out 2c5b4ebd285721e5
+BF16 len=255 win8 rows=8 q_lat efacf6e89c2ffe06 o_lat 9bd06acb297b71bc out 64755007bb330560
+BF16 len=255 win9 rows=9 q_lat 4fcab524aa8cda6e o_lat 9fc884f3179d093e out 0ecfc409d150b814
+BF16 len=257 last rows=1 q_lat 7a5feff412b33616 o_lat 88cbd39a74539af4 out e1537853de07c57d
+BF16 len=257 first rows=1 q_lat 08075b38b28259c7 o_lat 77516b8d82cdf6a5 out 7ec41b40540b9b93
+BF16 len=257 win2 rows=2 q_lat afe340b2ace57bde o_lat 86edc15a1ea65996 out 0723391e445c2bbe
+BF16 len=257 win8 rows=8 q_lat f1e6b4b1ff00e78b o_lat e17f44daebcc40e5 out 1f2afd6cba934a1a
+BF16 len=257 win9 rows=9 q_lat 8e30295f5009dd1b o_lat 9b5c1332e9deb0f5 out a3a19f81fa9b89b3
+BF16 len=1000 last rows=1 q_lat b0f11ee02b8f4a0c o_lat 086548ddc0461f1e out f9118aa0dbf0b1f0
+BF16 len=1000 first rows=1 q_lat e754fe36c10e4008 o_lat ffa09946e5c0db25 out a1e92095fbcbe2fd
+BF16 len=1000 win2 rows=2 q_lat 134b953e9a2ae0b5 o_lat 85d41a7e5c017da4 out e94ac461536e8469
+BF16 len=1000 win8 rows=8 q_lat 22f2dd30c5c57acd o_lat f0c11061f76ab18f out 465f8fec7ec83c58
+BF16 len=1000 win9 rows=9 q_lat 57965651746950f7 o_lat 49802e6f27279eda out 0ac628b61e727534
+BF16 len=2048 last rows=1 q_lat 91d63a3a66b75385 o_lat d606873acf82aa88 out ce4a16d95c331a95
+BF16 len=2048 first rows=1 q_lat 35853370aa5c7e20 o_lat ca4585e4323a59a5 out 0c4035eaa0cf953a
+BF16 len=2048 win2 rows=2 q_lat 985c4529173daa88 o_lat 5c1ed0a07dd10fac out 4466fea7e1b5d5e0
+BF16 len=2048 win8 rows=8 q_lat 646b1b58f6fff4bf o_lat 69e81967f6ea7d76 out d95d50c1dd3b90d4
+BF16 len=2048 win9 rows=9 q_lat 19142460337341a2 o_lat 12655a08ec4477b3 out 1e99c573e5b3633e
+BF16 len=2051 last rows=1 q_lat 3153ae88f175fa21 o_lat 77b977a4a2c91cd6 out b0c0f762cc44612e
+BF16 len=2051 first rows=1 q_lat c8a8574b50aeeb0f o_lat 8b64b66c75e260a5 out 85a71e3dff30183c
+BF16 len=2051 win2 rows=2 q_lat 9d2ed579b0930422 o_lat d262dfbc19cb2148 out c060e90eabe6f8ac
+BF16 len=2051 win8 rows=8 q_lat 08a3e3b59b2f78f3 o_lat 9f8368fe10e36df4 out 0a7790f62d79be77
+BF16 len=2051 win9 rows=9 q_lat 5bfd95cd2e9bbf02 o_lat f8f0775aec26e511 out 05859105eb79e0c2
+BF16 len=3000 last rows=1 q_lat c921c0859e320020 o_lat dd8b09dd03096182 out 80eb948a30802724
+BF16 len=3000 first rows=1 q_lat 80177061b5eb1d1e o_lat dda549cd483a5b25 out 459bbe4e70493aca
+BF16 len=3000 win2 rows=2 q_lat 3c5f5592b85b29c5 o_lat 56ed6ea356f88192 out 3068ab2cfc04e696
+BF16 len=3000 win8 rows=8 q_lat db12a504cd0f0934 o_lat fc0c381ac95c274c out 424434db54558ab4
+BF16 len=3000 win9 rows=9 q_lat 373845a952f5159c o_lat 7832211d512d0c02 out 358ea5bac96e36f6
+BF16 win128 q_lat fe7d3c4779af8a7a o_lat 7630bfc211c3b5ba out 8177a468c3fcab25
+BF16 batch12 q_lat b4ac2aee5a5561ea o_lat cda6a6903384d40a out 14aa4ea1c2f53748
+BF16 sparse2048 rows=1 o_lat 855d89a045e05ab9 out d8cbfcf9fb97f0c7
+BF16 sparse4999 rows=1 o_lat c59f6b0c6732bca2 out 9c0895fa3b6c8f1b
+BF16 straddle8 rows=8 o_lat 33621f890a859d1f out a747e828a51d25fc
+BF16 list257 rows=1 o_lat 11e305cf4b6346a1 out b693a28c39e1de05
+BF16 list2051 rows=1 o_lat f730e774c44a014f out ede82278984e4324
+BF16 mixed6 rows=6 o_lat 41c791d89a446cb0 out 1d4e25f1326222bd

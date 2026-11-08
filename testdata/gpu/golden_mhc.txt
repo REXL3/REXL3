@@ -1,0 +1,104 @@
+rows=1 amp=0.05 fn=F16 partials be5126d8b042da26 post dd1680af29f4b53f comb 05d0354f7f8bd40d pre cfcda52fe63964b2 normed_f16 c9dd2fab742e2448 collapsed_bf16 509c4a4b3018809e
+rows=1 amp=0.05 apply_bf16 67feb3c235bcd7d0 apply_partials_x 7bcef7e772879414 apply_partials_part 21b39b8600083805 mean_normed_f16 1b09ce06d3c8499a mean_f32 ff17222d16e3441a expand_bf16 386ee4d25499a0dd
+rows=1 amp=0.05 fn=Bf16 partials d1b8daa13f4b8e4e post f03b49ee4d5c732c comb 1c5e2bdc4a6993f0 pre c270506d50a99e25 normed_f16 98b7cc0f350ad131 collapsed_bf16 7b3ebb7b24212e53
+rows=1 amp=0.05 fn=F32 partials d1b8daa13f4b8e4e post f03b49ee4d5c732c comb 1c5e2bdc4a6993f0 pre c270506d50a99e25 normed_f16 98b7cc0f350ad131 collapsed_bf16 7b3ebb7b24212e53
+rows=1 amp=8 fn=F16 partials 0f3a27e8538a082e post 93a2932c8322b987 comb b5c6ac7a6b012f60 pre 92cefaa1b160467f normed_f16 373bd3c807224a14 collapsed_bf16 d21a35b48420c903
+rows=1 amp=8 apply_bf16 eeac9b7ae0cb3daa apply_partials_x 594ec776681dd6b4 apply_partials_part 302173f74379d623 mean_normed_f16 643f7e423c46d460 mean_f32 67e0e7db7d304034 expand_bf16 ff92a79449c6d24d
+rows=1 amp=8 fn=Bf16 partials e150de09acafece5 post fc089a886fe62b88 comb 54bb8029de71d444 pre 0d641993dd9c3a7a normed_f16 bb772649ab7f60b0 collapsed_bf16 066cced3fb2af1e1
+rows=1 amp=8 fn=F32 partials e150de09acafece5 post fc089a886fe62b88 comb 54bb8029de71d444 pre 0d641993dd9c3a7a normed_f16 bb772649ab7f60b0 collapsed_bf16 066cced3fb2af1e1
+rows=2 amp=0.05 fn=F16 partials 2dad96a11a6f428e post c93462e07ee09a91 comb 7a2ed88e0da3888d pre 5e9e26510038aeab normed_f16 683fcc489be10748 collapsed_bf16 8e9a8e444d0e6165
+rows=2 amp=0.05 apply_bf16 5fc7d4ab8b1b1672 apply_partials_x 358047855438d096 apply_partials_part 241f2219d34b4411 mean_normed_f16 cfd2e77f98652fd8 mean_f32 0e07d4e92c5afcec expand_bf16 cf3fe13764141655
+rows=2 amp=0.05 fn=Bf16 partials 5c63c9421d6d1af9 post db56266b170fd32a comb 6ece139b94ad5665 pre c2fe1181775d390c normed_f16 6110eea50195d97e collapsed_bf16 5bd5c03edb6f2fb1
+rows=2 amp=0.05 fn=F32 partials 5c63c9421d6d1af9 post db56266b170fd32a comb 6ece139b94ad5665 pre c2fe1181775d390c normed_f16 6110eea50195d97e collapsed_bf16 5bd5c03edb6f2fb1
+rows=2 amp=8 fn=F16 partials 41b623e433871773 post 85fd7fb963c1fadc comb e6c51993393e4f0c pre bfc021ec343efadb normed_f16 c262a3ef171727d1 collapsed_bf16 e352d9f95ff2999d
+rows=2 amp=8 apply_bf16 f6fa04342845f06a apply_partials_x 07013e5f8f4411ca apply_partials_part e3b3738e05a8b492 mean_normed_f16 ca6e646a2885405a mean_f32 56fc3956ce7a5b70 expand_bf16 0d58ec71f9b7319d
+rows=2 amp=8 fn=Bf16 partials 96bf90fafb3203c4 post 6af8c7a03daff8aa comb 7bc725177ffcc873 pre f705ca53ba0aec07 normed_f16 fd7d24653785cd3f collapsed_bf16 374f386032cfe204
+rows=2 amp=8 fn=F32 partials 96bf90fafb3203c4 post 6af8c7a03daff8aa comb 7bc725177ffcc873 pre f705ca53ba0aec07 normed_f16 fd7d24653785cd3f collapsed_bf16 374f386032cfe204
+rows=3 amp=0.05 fn=F16 partials 25db3ddf551363c0 post 8172bc80984f02e5 comb 578c63b5a463cf5e pre aefbbaf3fd528491 normed_f16 6da1896ba8d1b1ce collapsed_bf16 d9d847ee42b2bb97
+rows=3 amp=0.05 apply_bf16 59a8b209a2afbcde apply_partials_x de3552eaaca7d251 apply_partials_part 204ac22377811c0d mean_normed_f16 e5b4b2b4ac4cb738 mean_f32 9616b4e44fec9a39 expand_bf16 78df73aedb311ded
+rows=3 amp=0.05 fn=Bf16 partials 865261268659002d post 65ccaff68dd3b3e2 comb 658264f292841b47 pre 58a9ced3d8ed63db normed_f16 c116f5f790436fba collapsed_bf16 418756f57d3769dc
+rows=3 amp=0.05 fn=F32 partials 865261268659002d post 65ccaff68dd3b3e2 comb 658264f292841b47 pre 58a9ced3d8ed63db normed_f16 c116f5f790436fba collapsed_bf16 418756f57d3769dc
+rows=3 amp=8 fn=F16 partials a9cafe49afaa02f3 post a0701ec2eb1e7c4a comb a03c92d2341bc8d2 pre d520a64bb1b683b3 normed_f16 16f39a97058149ea collapsed_bf16 bcc6cca24c8689f4
+rows=3 amp=8 apply_bf16 e7919fdf1dd05097 apply_partials_x 8f82842b0658bcfd apply_partials_part 6d3546a8f4112e8f mean_normed_f16 4e078bfcff835502 mean_f32 d0718dd7882f1f4f expand_bf16 cfffa656c86a7805
+rows=3 amp=8 fn=Bf16 partials 520ce7ef054a1aae post fcc7fea0f94e2d39 comb 54395422eb99fc87 pre 8bf4220060087c77 normed_f16 a2e2598a5f154c09 collapsed_bf16 638a7c52dc92d241
+rows=3 amp=8 fn=F32 partials 520ce7ef054a1aae post fcc7fea0f94e2d39 comb 54395422eb99fc87 pre 8bf4220060087c77 normed_f16 a2e2598a5f154c09 collapsed_bf16 638a7c52dc92d241
+rows=8 amp=0.05 fn=F16 partials 8d97191dbe9134f7 post 5c1cc9dcf9f745c4 comb af106f958d6eecb6 pre 3059f54747761f48 normed_f16 218f3261b14aaeb8 collapsed_bf16 299d56e5e7d038f4
+rows=8 amp=0.05 apply_bf16 01e41dcf1880cdc7 apply_partials_x 74fb94bef78ff3a6 apply_partials_part d9cff6e17dcf9852 mean_normed_f16 48bf0afb6032e1f6 mean_f32 c29679a98420975c expand_bf16 1e42250f7071205d
+rows=8 amp=0.05 fn=Bf16 partials 1f136953007efd3a post 51c6375e83826926 comb 1d8221d8b399adfb pre b67dea6333397e58 normed_f16 ef7367b1a024a133 collapsed_bf16 5cfe573bab83765f
+rows=8 amp=0.05 fn=F32 partials 1f136953007efd3a post 51c6375e83826926 comb 1d8221d8b399adfb pre b67dea6333397e58 normed_f16 ef7367b1a024a133 collapsed_bf16 5cfe573bab83765f
+rows=8 amp=8 fn=F16 partials c96e40b066335afe post 7adb3cc38eac92ac comb c52d5660f32481bd pre 7ff77d537741c6e6 normed_f16 d17eddfdf8d0efb3 collapsed_bf16 9dfabb19fc77e240
+rows=8 amp=8 apply_bf16 2da5778943fc8a37 apply_partials_x 12d9d030c665e16c apply_partials_part 64e67d776a0e7d30 mean_normed_f16 6e8e0a7e646b226b mean_f32 da357c27ec835e2d expand_bf16 84f5ca587bd40c0d
+rows=8 amp=8 fn=Bf16 partials 482612e6d72884bd post 2a29520e15f47340 comb 0fd1cef674ef466c pre a45dbecf658dd324 normed_f16 1b1ca311a9bf661c collapsed_bf16 9cb09ac60a4753a7
+rows=8 amp=8 fn=F32 partials 482612e6d72884bd post 2a29520e15f47340 comb 0fd1cef674ef466c pre a45dbecf658dd324 normed_f16 1b1ca311a9bf661c collapsed_bf16 9cb09ac60a4753a7
+rows=15 amp=0.05 fn=F16 partials ca84ebf29846b89b post 7516cdd0f487e343 comb 9f37799c1f5527a9 pre 1f9ff659b14015c4 normed_f16 481cae6ca7825946 collapsed_bf16 3e54dc777d02b6d4
+rows=15 amp=0.05 apply_bf16 a681eb0d93e117a3 apply_partials_x 9982dc8deb9a7d63 apply_partials_part bfd1cbbba4a744f8 mean_normed_f16 11f8897b390435b6 mean_f32 ccde5c094eb99576 expand_bf16 9caf3ac32c432dc5
+rows=15 amp=0.05 fn=Bf16 partials 614800e56b0630cc post fd9fb3613d08eb8b comb 8543a65ff401b321 pre 1612c28c46ed299e normed_f16 d00f6ef5ffa173bd collapsed_bf16 ffa1122f0009a271
+rows=15 amp=0.05 fn=F32 partials 614800e56b0630cc post fd9fb3613d08eb8b comb 8543a65ff401b321 pre 1612c28c46ed299e normed_f16 d00f6ef5ffa173bd collapsed_bf16 ffa1122f0009a271
+rows=15 amp=8 fn=F16 partials 5a6d0b62810a8f20 post 9c335a29c1aded2b comb 068322e8bcaf384b pre 3b498cabd6343c83 normed_f16 c47f8ea808fb8955 collapsed_bf16 c34d98513b12cd9c
+rows=15 amp=8 apply_bf16 e3a074043e4e41c5 apply_partials_x 4a6fa6636999d2f9 apply_partials_part 0fc934429508f9a4 mean_normed_f16 b306471c11a84496 mean_f32 182c9045d7f2d169 expand_bf16 81c689d8fa4159e5
+rows=15 amp=8 fn=Bf16 partials a5de43accf3dc00b post 2f60eb62280d114e comb edfbc723a116522b pre ac49923d61620542 normed_f16 dd17351ae403c776 collapsed_bf16 ee1f39dace1a171d
+rows=15 amp=8 fn=F32 partials a5de43accf3dc00b post 2f60eb62280d114e comb edfbc723a116522b pre ac49923d61620542 normed_f16 dd17351ae403c776 collapsed_bf16 ee1f39dace1a171d
+rows=16 amp=0.05 fn=F16 partials 20220099e90cccf0 post e9c0d521c4e678b6 comb 65f1da1b437c381c pre 92bf3b4685123689 normed_f16 dd203dba606956fc collapsed_bf16 4b707680710a58b6
+rows=16 amp=0.05 apply_bf16 f7bf65d4b73f4515 apply_partials_x 4bbb32d5755c8ad2 apply_partials_part c863f5ef86801880 mean_normed_f16 db7534f1d3e49393 mean_f32 50a763d56747085c expand_bf16 50cf3390eecceba5
+rows=16 amp=0.05 fn=Bf16 partials 6e15d5a2a8c4e349 post 299aac63395ff91d comb a29aef7ada2546c6 pre c47efd44af1ef31e normed_f16 60e2482f6635e8f2 collapsed_bf16 b03202be1b06abbe
+rows=16 amp=0.05 fn=F32 partials 6e15d5a2a8c4e349 post 299aac63395ff91d comb a29aef7ada2546c6 pre c47efd44af1ef31e normed_f16 60e2482f6635e8f2 collapsed_bf16 b03202be1b06abbe
+rows=16 amp=8 fn=F16 partials 3c4146652ed8ed6d post 98d389ef6ddf305f comb 92236311e44ae95d pre 9bfe984d264b0b59 normed_f16 630f488f7ea86460 collapsed_bf16 7eabec6d39d6a526
+rows=16 amp=8 apply_bf16 3e575fd1fbc44a9e apply_partials_x 6bcf02b6b1c242ed apply_partials_part dc5b02a57ca4c925 mean_normed_f16 f6b02ae8418da4e9 mean_f32 d6c5ecb99e024aa8 expand_bf16 9740b77a2da81245
+rows=16 amp=8 fn=Bf16 partials 4563440e3fb3b302 post 41c3f8f6c1510891 comb 64cfbf0ae57dc053 pre 7bc1ca160e26a013 normed_f16 ce007a253d29f13d collapsed_bf16 ce31a45e403809aa
+rows=16 amp=8 fn=F32 partials 4563440e3fb3b302 post 41c3f8f6c1510891 comb 64cfbf0ae57dc053 pre 7bc1ca160e26a013 normed_f16 ce007a253d29f13d collapsed_bf16 ce31a45e403809aa
+rows=17 amp=0.05 fn=F16 partials c2719af8e423c0c1 post c480c6ce643b355e comb bcba4f2d803547fc pre a71561621967e970 normed_f16 614bbabc01bc0261 collapsed_bf16 e237681aef3d8afd
+rows=17 amp=0.05 apply_bf16 3bb417e35698ff1e apply_partials_x 32f0948958478aa9 apply_partials_part d568cb89d5452a17 mean_normed_f16 3afa806fdff02dd0 mean_f32 7bd1c55dcb029e62 expand_bf16 33ee564de4fead3d
+rows=17 amp=0.05 fn=Bf16 partials c882bd65d8752683 post 5099da9f82af7ba0 comb dcbc316fa68a0ca2 pre 03aef7b89a263467 normed_f16 3bb7a361acf40835 collapsed_bf16 7268e4fc0511a868
+rows=17 amp=0.05 fn=F32 partials c882bd65d8752683 post 5099da9f82af7ba0 comb dcbc316fa68a0ca2 pre 03aef7b89a263467 normed_f16 3bb7a361acf40835 collapsed_bf16 7268e4fc0511a868
+rows=17 amp=8 fn=F16 partials 80a86fd9cc7413be post 054cc62f296725aa comb e9d6a5ea0a9becae pre ab9c313b9d2a4069 normed_f16 17b6ac0704364b93 collapsed_bf16 bcb3c86560d57f2c
+rows=17 amp=8 apply_bf16 567a214d3aa911fc apply_partials_x 9d9c05d3b3face09 apply_partials_part 2b3bf15edab5e73e mean_normed_f16 a31fcdba6703bda8 mean_f32 c3b0cd32996937f5 expand_bf16 4995398265fd36bd
+rows=17 amp=8 fn=Bf16 partials 001223ab55c3dcd9 post 8fdced0183378cd5 comb 3014998cd7cb97af pre 8494e2d2210b9418 normed_f16 57e20f53e3418956 collapsed_bf16 0c8a810a0693bbda
+rows=17 amp=8 fn=F32 partials 001223ab55c3dcd9 post 8fdced0183378cd5 comb 3014998cd7cb97af pre 8494e2d2210b9418 normed_f16 57e20f53e3418956 collapsed_bf16 0c8a810a0693bbda
+rows=32 amp=0.05 fn=F16 partials 7d49083ed2cf1933 post 33399bff458875b4 comb 035b8303962d528e pre f8cded13cf39e3ec normed_f16 28741700ff352bc7 collapsed_bf16 ba85b66fd8119624
+rows=32 amp=0.05 apply_bf16 7622779d39cce5a5 apply_partials_x e7672a83fb20d128 apply_partials_part dc838335329e365a mean_normed_f16 e7e53e050c4539cf mean_f32 71cea856e4913611 expand_bf16 e2d51b59c57768cd
+rows=32 amp=0.05 fn=Bf16 partials 77c59b96cb904fbd post 06cd5d3cf7a4df18 comb dbe32b82e020c488 pre 939de78c2ebded84 normed_f16 a32c860a7ba5e98c collapsed_bf16 51ef606c06bb4dde
+rows=32 amp=0.05 fn=F32 partials 77c59b96cb904fbd post 06cd5d3cf7a4df18 comb dbe32b82e020c488 pre 939de78c2ebded84 normed_f16 a32c860a7ba5e98c collapsed_bf16 51ef606c06bb4dde
+rows=32 amp=8 fn=F16 partials 0d9e85a1ea733fd7 post e0138c5cb1650b72 comb 9ccd22716578bc97 pre 2ba4ca1ebe48d21f normed_f16 2c7f52da80e62b8e collapsed_bf16 e0830969fd1ffc32
+rows=32 amp=8 apply_bf16 f46d66032daefb91 apply_partials_x b8d31723fc312f84 apply_partials_part 3ff148bc0685e78d mean_normed_f16 2fa9e15b343e9605 mean_f32 e3c41a862aaa902e expand_bf16 b8f7fedd0190b7e5
+rows=32 amp=8 fn=Bf16 partials 69108c7dd0f28e2f post 00ce5b7f6d906ca5 comb bd13ca0ccf111bd2 pre 8508243aa174ae89 normed_f16 2e13d8fe48e0224d collapsed_bf16 31da6c66c03342f4
+rows=32 amp=8 fn=F32 partials 69108c7dd0f28e2f post 00ce5b7f6d906ca5 comb bd13ca0ccf111bd2 pre 8508243aa174ae89 normed_f16 2e13d8fe48e0224d collapsed_bf16 31da6c66c03342f4
+rows=33 amp=0.05 fn=F16 partials 6180345216a74052 post be84bf1c5a678379 comb ffd47daf2833f692 pre 5f1c1822d47f9d9f normed_f16 cbc91c3491618078 collapsed_bf16 8052777a541224a0
+rows=33 amp=0.05 apply_bf16 726095332e6afdb2 apply_partials_x ad6d5ddf01160109 apply_partials_part 5968a357e54b3934 mean_normed_f16 acab464d3ef094ec mean_f32 50d2e72d3733302f expand_bf16 99218cb5a3137805
+rows=33 amp=0.05 fn=Bf16 partials dd224b3aa4f6faa7 post 5bac4b88e1817156 comb 26059c295647fcf7 pre 4e63b66477b8e9d5 normed_f16 d9f9f6018145fc13 collapsed_bf16 f60cc8df0f2e1d93
+rows=33 amp=0.05 fn=F32 partials dd224b3aa4f6faa7 post 5bac4b88e1817156 comb 26059c295647fcf7 pre 4e63b66477b8e9d5 normed_f16 d9f9f6018145fc13 collapsed_bf16 f60cc8df0f2e1d93
+rows=33 amp=8 fn=F16 partials 1c0e017390aec7aa post 3b206c6d41c0b090 comb 894c4fb1d1d2c8d8 pre f2e4c72b02bb829e normed_f16 c64371a4d73b1131 collapsed_bf16 2f3a251e36aad7c2
+rows=33 amp=8 apply_bf16 b4eba31bb24739aa apply_partials_x 82b89d34028e3363 apply_partials_part 53032a506ceb98dc mean_normed_f16 9f3942bf584faf45 mean_f32 fc6c5ff3582bf07d expand_bf16 0dbf4e748920495d
+rows=33 amp=8 fn=Bf16 partials db13d3fe7092bed2 post f17d2efb680c8677 comb 570f60b3c1ac98c0 pre d9d0862d2a79c4f6 normed_f16 f63e5a8857ca7d30 collapsed_bf16 09c9f7dbefa8734b
+rows=33 amp=8 fn=F32 partials db13d3fe7092bed2 post f17d2efb680c8677 comb 570f60b3c1ac98c0 pre d9d0862d2a79c4f6 normed_f16 f63e5a8857ca7d30 collapsed_bf16 09c9f7dbefa8734b
+rows=64 amp=0.05 fn=F16 partials fc8c2ae984b873bc post b70bb6add73ad879 comb 3fddde0b514e3cb0 pre 85875f80729f0b24 normed_f16 0ae0ca5f6a1c5841 collapsed_bf16 7a46abf7ac1e7dcc
+rows=64 amp=0.05 apply_bf16 3d88e213d5b50f52 apply_partials_x 321336ba137c0dc5 apply_partials_part 5a5bc56cf0698be3 mean_normed_f16 e11fb71163459c81 mean_f32 7d588536175f1f44 expand_bf16 78226c35e061cb25
+rows=64 amp=0.05 fn=Bf16 partials 19bddc1d329dcefe post bc194360272a6b11 comb f354ce981f137198 pre 6143c90e58cebf99 normed_f16 fbdee96c42f1ee0a collapsed_bf16 7cf419e7ad737ff3
+rows=64 amp=0.05 fn=F32 partials 19bddc1d329dcefe post bc194360272a6b11 comb f354ce981f137198 pre 6143c90e58cebf99 normed_f16 fbdee96c42f1ee0a collapsed_bf16 7cf419e7ad737ff3
+rows=64 amp=8 fn=F16 partials b79096cbc2c26160 post 7e7ee75a4aabf22e comb 1989a229e30442f3 pre 698bc3356c25bbe6 normed_f16 8a44af2842f13384 collapsed_bf16 cfb86899f40668fd
+rows=64 amp=8 apply_bf16 da160ead1faaea12 apply_partials_x f3c509057108059d apply_partials_part 8678071c01829fc1 mean_normed_f16 27a4e9cf5d71fd53 mean_f32 3ba078e344bc787c expand_bf16 77520c019eaa231d
+rows=64 amp=8 fn=Bf16 partials 33cbec397f0c6303 post 9dce756275b46af8 comb ae7bc7981aa775cc pre 98aa9f215ba35379 normed_f16 ad4b406bb943612a collapsed_bf16 f6b96fb9fc34e52e
+rows=64 amp=8 fn=F32 partials 33cbec397f0c6303 post 9dce756275b46af8 comb ae7bc7981aa775cc pre 98aa9f215ba35379 normed_f16 ad4b406bb943612a collapsed_bf16 f6b96fb9fc34e52e
+rows=127 amp=0.05 fn=F16 partials 7e3e1e5eab250eb8 post 952afc1ea553436c comb 4640d8aee33724b5 pre 74dc19c58d74a53d normed_f16 c71bdb7411b31f71 collapsed_bf16 840671dd7e5f4387
+rows=127 amp=0.05 apply_bf16 1eb98ce96580b6aa apply_partials_x e260ca6141decbe5 apply_partials_part 3290814f4da3c08c mean_normed_f16 6616e4a2e4288327 mean_f32 ade306fdd2284301 expand_bf16 44d913a1c7a997fd
+rows=127 amp=0.05 fn=Bf16 partials 1b7be0347c8ea70f post 48e202dab8ca5a1e comb d94a53d4f7354c03 pre bafe8e7776df1d8f normed_f16 4a75389ce4901c1a collapsed_bf16 f8a81a9bf2c32aa7
+rows=127 amp=0.05 fn=F32 partials 1b7be0347c8ea70f post 48e202dab8ca5a1e comb d94a53d4f7354c03 pre bafe8e7776df1d8f normed_f16 4a75389ce4901c1a collapsed_bf16 f8a81a9bf2c32aa7
+rows=127 amp=8 fn=F16 partials be23b6576c460bd7 post fecf618fa1a5f538 comb 04aee1e4a3102b9a pre a6e691e11347891d normed_f16 eb5a282729959304 collapsed_bf16 0a847b71380c07ea
+rows=127 amp=8 apply_bf16 2e82f18ab1bdd60a apply_partials_x 8c75095af067f59a apply_partials_part cd2e1bdc96ceb03a mean_normed_f16 7045de84274f9949 mean_f32 76e292f3283c95c7 expand_bf16 a94c0c7c507dfebd
+rows=127 amp=8 fn=Bf16 partials e576467eb6f34d87 post dd2e520fdc64f15c comb 012dae711d4a3356 pre 372ba6a6bb12bd4a normed_f16 bafc6e714f938bc3 collapsed_bf16 60b6f894bae1f1c8
+rows=127 amp=8 fn=F32 partials e576467eb6f34d87 post dd2e520fdc64f15c comb 012dae711d4a3356 pre 372ba6a6bb12bd4a normed_f16 bafc6e714f938bc3 collapsed_bf16 60b6f894bae1f1c8
+rows=128 amp=0.05 fn=F16 partials c3c18a7ccc75c93b post eb5b23d6fc2e8c70 comb 31b4c371883474c2 pre 41f4f1f5b7f2e3c9 normed_f16 b496ddebe4889316 collapsed_bf16 6239473f0d017629
+rows=128 amp=0.05 apply_bf16 63f7225fe29bc965 apply_partials_x 41bf1760a5e340cc apply_partials_part fb8dc4adccfc79f8 mean_normed_f16 e5ee7cb6a8084253 mean_f32 5300916737483e5a expand_bf16 e6bd51211e8bf3b5
+rows=128 amp=0.05 fn=Bf16 partials 6390f269d478e1dd post 14aff529280be858 comb 3a6cf84105aa6499 pre 9f45bb3169e08147 normed_f16 e7794fd2c7a747da collapsed_bf16 fa94e54e9deab7e4
+rows=128 amp=0.05 fn=F32 partials 6390f269d478e1dd post 14aff529280be858 comb 3a6cf84105aa6499 pre 9f45bb3169e08147 normed_f16 e7794fd2c7a747da collapsed_bf16 fa94e54e9deab7e4
+rows=128 amp=8 fn=F16 partials 8ae8f50731d9ed9d post 9ddc232b54a873b8 comb 207c7550bc9afcad pre 2ec64555c858c655 normed_f16 57436c070981c650 collapsed_bf16 3ecc24cce92793df
+rows=128 amp=8 apply_bf16 a234316ecf764b81 apply_partials_x 507bb74afa301228 apply_partials_part 9a8543dc6ef91daf mean_normed_f16 9b92d637732a3ebd mean_f32 756f20a50edd2610 expand_bf16 c46a02c10c9b6f1d
+rows=128 amp=8 fn=Bf16 partials 59c12b5ce685ad1e post a74881f15d0d3819 comb 1533fe707ce86466 pre 122062f4959d566f normed_f16 12025bba6b87e9ca collapsed_bf16 cad3ccd13fc4e19e
+rows=128 amp=8 fn=F32 partials 59c12b5ce685ad1e post a74881f15d0d3819 comb 1533fe707ce86466 pre 122062f4959d566f normed_f16 12025bba6b87e9ca collapsed_bf16 cad3ccd13fc4e19e
+rows=300 amp=0.05 fn=F16 partials 769ed9f481b376d9 post c0f9d968c4b5fc46 comb 5a389dbdda4698f2 pre c91b2a5534498926 normed_f16 8c5192805d17ad3d collapsed_bf16 f4372a33f000d29a
+rows=300 amp=0.05 apply_bf16 5267970856b7dacf apply_partials_x 21e77cad057eff5e apply_partials_part c22f378d24681699 mean_normed_f16 7b69d35f6f23b2e6 mean_f32 b7a058b66787193a expand_bf16 c7bea16711b26fd5
+rows=300 amp=0.05 fn=Bf16 partials 8757465e0f133c9c post 3378f53e91809ff4 comb 6906917db644dd7d pre b89ded0cf88fec50 normed_f16 eceb28851a8aad0b collapsed_bf16 75700cf287c81e1c
+rows=300 amp=0.05 fn=F32 partials 8757465e0f133c9c post 3378f53e91809ff4 comb 6906917db644dd7d pre b89ded0cf88fec50 normed_f16 eceb28851a8aad0b collapsed_bf16 75700cf287c81e1c
+rows=300 amp=8 fn=F16 partials fb1f7e8332f2f6e7 post 7744f9e63729c89b comb a3e5887d5af18005 pre dd24b582b509a92b normed_f16 8d763eed72c0c6a1 collapsed_bf16 b1ebcfc5c0b0784c
+rows=300 amp=8 apply_bf16 c5b73f6a47649d44 apply_partials_x 92da70229ef99ca2 apply_partials_part 9cab9be4c18faf99 mean_normed_f16 1f3012b1b8d198d2 mean_f32 db990126a01fc264 expand_bf16 6a2cb26005dfe0cd
+rows=300 amp=8 fn=Bf16 partials d7d37d333195c1c7 post 681c868ba4152da8 comb 49b147a0a9a05dbf pre 68155e1f5eb3825d normed_f16 8cf04e2b37bcf083 collapsed_bf16 96bdd2138bea8efb
+rows=300 amp=8 fn=F32 partials d7d37d333195c1c7 post 681c868ba4152da8 comb 49b147a0a9a05dbf pre 68155e1f5eb3825d normed_f16 8cf04e2b37bcf083 collapsed_bf16 96bdd2138bea8efb

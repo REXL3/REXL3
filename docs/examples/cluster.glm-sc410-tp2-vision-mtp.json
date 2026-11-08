@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "name": "glm-sc410-tp2-vision-mtp",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The turboderp GLM-5.3-Flash-exl3 sc_4.10bpw pack (exllamav3 1.6.2, 156.19 GiB: routed experts K4 with one layer at K5, attention and the shared experts K8, lm_head K6, an EXL3 K6 vision tower) as a two-rank tensor-parallel group on the GLM track's nodes: N3 = rank 0 (it holds the verified pack), N2 = rank 1 (a copy at the same path). Each rank maps the pack with its share of the routed experts (0..144 | 144..288) and reads and allocates only those; a rank that does not serve images claims and skips the vision tower (--no-vision; a follower always). The binary must be a build that maps this pack (branch glm/sc410-vision or later: older builds refuse its EXL3 tower even under --no-vision). NCCL as the other CRS812 kits (enP7s7, rocep1s0f0 and roceP2p1s0f0 and the env file are present on both gn100s, checked 2026-10-17). The launcher (rexl3-cluster) must have the gn100 deny list lifted (4ca3356b, on integ/main-families and nemotron/main; this file validates with that launcher, checked 2026-10-17): the GLM TP branches' launcher still refuses N2 and N3 by address. Not run yet: the figures are the rank planner's on the pack's header (crates/model/src/families/glm/tp_boot.rs the_sc410_ranks_plan_from_their_share, docs/GLM_TP.md section 12). Images WITH the pack's NextN layer drafting (--spec auto; the two-node tool's `mtp` variant swaps it for --spec mtp with REXL3_MTP_DEPTH=3): every rank also holds the NextN layer's trunk (replicated) and its share of the layer's experts (PASS_RULES_GLM_ADDENDUM_GEOMETRY D-G2). Rank 0 runs the EXL3 tower (0.416 GiB of weights, 0.72 GiB of scratch for 4,096-token images) and sends each chunk's rows; rank 1 claims and skips the tower. Rank 0 also holds the server's image-preparation credit (host memory for decoding and preparing images, HTTP side, rank 0 only): the group's leader_flags cap it at 1.125 GiB (--image-preparation-bytes 1207959552) instead of the 2 GiB default, to keep rank 0 within the box's 20 GiB MemAvailable rule (PASS_RULES_GLM_ADDENDUM_GEOMETRY D-G3; not plan-affecting: the follower serves no HTTP). 1.125 GiB, not D-G3's 1 GiB: the server charges one image's preparation as image_work_bytes(--max-image-tokens) = 4,096 x 32 KiB + 1 GiB (crates/server/src/preparation.rs) and refuses a request whose charge exceeds the cap, so a 1 GiB cap refused every image with 503 (lane G-2N 2026-10-17; proposed as D-G6). Images are prepared one at a time, as at the 2 GiB default (2 x 1.125 GiB > 2 GiB). nccl.lib names the CRS812 fabric's own NCCL build (2.30.7, the path the cluster.crs812-2node.json and cluster.smoke-2node.json kits use, byte-identical on N2 and N3): the gn100s have no system libnccl and the runtime guesses no directory (crates/cuda/src/nccl.rs), so without it the group cannot boot there (added by lane G-2N 2026-10-17, proposed to the main session as D-G5).",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "expected_hostname": "host-b"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "expected_hostname": "host-c"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ],
+    "lib": "/srv/rexl3/nccl/lib/libnccl.so.2"
+  },
+  "pack": "/srv/models/glm53-flash-exl3-sc410",
+  "memory": {
+    "_comment": "with the NextN layer every rank's regions are 82.37 GiB (80.53 without); rank 0 (N3) also the tower 1.141 GiB (weights and scratch) and the features reserve 0.50 GiB: the planner grants these flags from 97.875 GiB free on rank 0 and 96.125 GiB on rank 1 (tp_boot::tests::the_sc410_ranks_plan_from_their_share, 'images on rank 0 + NextN'); 1.6 GiB of margin, rounded up: [100, 98]. The restricted draft head (about 0.23 GiB) comes on top, out of the planner's headroom",
+    "min_free_gib": 100
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--slots",
+      "2",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "16384",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "off",
+      "--max-image-tokens",
+      "4096",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-sc410-vision-mtp-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 900,
+    "ready_timeout_s": 1800,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N3",
+        "N2"
+      ],
+      "tp_port": 29617,
+      "http_port": 8958,
+      "http_host": "0.0.0.0",
+      "leader_flags": [
+        "--image-preparation-bytes",
+        "1207959552"
+      ],
+      "min_free_gib": [
+        100,
+        98
+      ]
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 0,
+    "window_s": 900
+  }
+}

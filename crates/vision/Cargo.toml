@@ -1,0 +1,18 @@
+[package]
+name = "gb-vision"
+description = "Image preprocessing for the vision towers (Qwen3.8 and GLM-5.3-Flash): decode, canvas rules, PIL-exact bicubic, normalize, patchify (CPU only), behind the ImagePreprocessor trait"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+png = "0.18"
+zune-jpeg = "0.5"
+# WebP (lossy VP8, lossless VP8L, alpha): pure safe Rust (`#![forbid(unsafe_code)]`), MIT OR Apache-2.0; pinned, see docs/VISION.md
+image-webp = "=0.2.4"
+serde_json = "1"
+
+[dev-dependencies]
+sha2 = "0.10"

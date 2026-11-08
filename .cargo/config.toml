@@ -1,0 +1,4 @@
+# Native tuning for the GB10's Arm cores (Cortex-X925 / A725). Plain IEEE arithmetic is unaffected: Rust never fuses
+# multiply-adds on its own, so results do not change. Other targets (CI on x86) are left alone.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]

@@ -1,0 +1,41 @@
+[package]
+name = "gb-server"
+description = "OpenAI-compatible HTTP server: tokenizer, chat template, streaming, reasoning split, and the engine thread"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+reqwest = { version = "=0.12.24", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+futures-util = "0.3.34"
+gb-cuda = { path = "../cuda" }
+gb-engine = { path = "../engine" }
+gb-model = { path = "../model" }
+gb-sampling = { path = "../sampling" }
+gb-sched = { path = "../sched" }
+gb-spec = { path = "../spec" }
+gb-vision = { path = "../vision" }
+# the accept loop (`listen.rs`): the versions axum already brings, with the timer axum::serve does not install
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "service"] }
+minijinja = { version = "3", features = ["builtins", "json", "serde", "multi_template", "macros", "preserve_order", "loop_controls"] }
+minijinja-contrib = { version = "3", features = ["pycompat"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tokio-stream = "0.1.19"
+
+[dev-dependencies]
+socket2 = "0.6.5"
+base64 = "=0.23.1"
+crc32fast = "=1.5.3"
+png = "=0.18.1"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+
+[[bin]]
+name = "rexl3-serve"
+path = "src/main.rs"

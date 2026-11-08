@@ -33,7 +33,11 @@ DeepSeek-V4.1-Flash-1017.
     (`carried_forward: true`, `qualification_tier: "T0"`).
   - **T1 / T2** (shared-glue smoke / gate-scoped re-run): the required gates re-run on the new
     engine binary, unaffected gate receipts carry forward (`carried_gates`), and a NEW approval is
-    sealed on the new engine build.
+    sealed on the new engine build. A carried gate's evidence keeps its source build's engine
+    commit, tree, binary, release lock and run paths; it must match the new build's model pack,
+    profile choice, capabilities, topology and context, and its source approval must be pinned in
+    the registry with `binary_sha256` and the profile's receipt digest. `exactness` and
+    `prefix_cache` always re-run.
   - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
     `Q200` runs again; nothing carries forward.
 - As the first release, v0.1.0 has no earlier engine release to carry from. The four originally

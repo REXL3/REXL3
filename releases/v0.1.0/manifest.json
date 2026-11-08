@@ -1,0 +1,99 @@
+{
+  "engine": {
+    "artifacts": {
+      "rexl3-cluster-0.1.0-afc9b5df-linux-aarch64-sm121": "29bf146f707e1a6acef7ef1f45a47b3671f6d7112cf66254c7574c5f13c4f306",
+      "rexl3-engine-0.1.0-afc9b5df-source.tar.gz": "ade2a05b0629cbbbc8921ee945cad18ffff1e899a3f9c83dd74b24504fe7a046",
+      "rexl3-serve-0.1.0-afc9b5df-linux-aarch64-sm121": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318"
+    },
+    "dev_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
+    "dev_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8",
+    "engine_release_tag": "engine-v0.1.0-afc9b5df"
+  },
+  "models": [
+    {
+      "approval_sha256": "d26800e692a5ac147a774da8505cd36b77a555cfb79414b2329ca923c38441de",
+      "architectures": "Qwen3_5ForConditionalGeneration",
+      "carried_forward": true,
+      "context": "262,144 (single-node)",
+      "evidence": "qwen38-27b-dflash2-exl3-4.00-v3-evidence.tar.gz",
+      "family": "qwen3.8",
+      "model": "qwen3.8-27b",
+      "pack_format": "EXL3 4.00 bpw + DFlash2 4.00 bpw",
+      "prefix_cache": "on",
+      "qualification_tier": "T0",
+      "qualified_engine_release_tag": "engine-v0.1.0-799fa750",
+      "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
+      "scope_diff_base": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
+      "speculative_decoding": "DFlash2 (k=16, auto)",
+      "version": "v3",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "7d1cca67cc1d39871eabc9c786530dda50719c96339a2ee9d1ad3dcafc39492f",
+      "architectures": "Glm5NextForConditionalGeneration",
+      "carried_forward": true,
+      "context": "262,144 (single-node) / 1,048,576 (two-node)",
+      "evidence": "glm53-flash-2.25bpw-sm121-v1-evidence.tar.gz",
+      "family": "glm-5.3",
+      "model": "glm-5.3-flash",
+      "pack_format": "EXL3 2.25 bpw",
+      "prefix_cache": "on",
+      "qualification_tier": "T0",
+      "qualified_engine_release_tag": "engine-v0.1.0-799fa750",
+      "runtime_id": "glm53-flash-2.25bpw-sm121",
+      "scope_diff_base": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "bb6a5a00929fd05185f74c91d9d4aca6f955e94c43827413eb0d66b89abd4548",
+      "architectures": "NemotronH_Omni_Reasoning_V3",
+      "carried_forward": true,
+      "context": "1,048,576 (single-node)",
+      "evidence": "nemotron35-super-vl-sage-3.85-v1-evidence.tar.gz",
+      "family": "nemotron-3.5",
+      "model": "nemotron-3.5-super-vl",
+      "pack_format": "EXL3 3.85 bpw",
+      "prefix_cache": "on",
+      "qualification_tier": "T0",
+      "qualified_engine_release_tag": "engine-v0.1.0-799fa750",
+      "runtime_id": "nemotron35-super-vl-sage-3.85",
+      "scope_diff_base": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "fdbd312cbf6d7345bbb61c9c803d11771933511ed332b3218e1630ac50b7ab2e",
+      "architectures": "Qwen4ExpForConditionalGeneration",
+      "context": "262,144 (single-node)",
+      "evidence": "qwen38-flash-next-exl3-3.05-v2-evidence.tar.gz",
+      "family": "qwen3.8",
+      "model": "qwen3.8-flash-next",
+      "pack_format": "EXL3 3.05 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "qwen38-flash-next-exl3-3.05",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v2",
+      "vision": "off (owner exception through 2027-01-31)"
+    },
+    {
+      "approval_sha256": "2485106e16499278c95c49c846992018e1c5eb227b738ae0a2e37fb8cf649d73",
+      "architectures": "DeepseekV41ForCausalLM",
+      "context": "262,144 (single-node, dsv41-single-262k)",
+      "evidence": "dsv41-flash-1017-sage-1.55-v1-evidence.tar.gz",
+      "family": "deepseek-v4.1",
+      "model": "deepseek-v4.1-flash-1017",
+      "pack_format": "EXL3 1.55 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "dsv41-flash-1017-sage-1.55",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "off (owner exception through 2026-12-31)"
+    }
+  ],
+  "notes": "First production release of REXL3 (v0.1.0): five GB10 runtime bundles across Qwen3.8-27B, GLM-5.3-Flash (single-node and two-node), Nemotron-3.5-Super-VL, Qwen3.8-Flash-Next, and DeepSeek-V4.1-Flash-1017 (single-node tp1).",
+  "schema": "rexl3.release-manifest.v1",
+  "version": "v0.1.0"
+}

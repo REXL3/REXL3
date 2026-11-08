@@ -1,0 +1,120 @@
+# MiniCPM-V-4.7 vision oracle references (tools/minicpmv_vision_oracle.py refs): checksums of the fp32 stage tensors and packed pixels
+# bitsum64: tools/minicpmv_vision_oracle.py (u32 words, sum of (w + 1) * (MIX * (i + 1)) mod 2^64, xor byte length)
+# case <name> <mode> <patches> <pixels_bitsum64>
+# stage <name> <stage> <rows> <fp32_bitsum64> <bf16_vs_fp32_rel_l2 (informational)>
+case doc_1000x1400_text 16x 7152 b350b20f73f6e9b5
+stage doc_1000x1400_text embed 7152 88dd64d1d8025ddc 2.3927e-03
+stage doc_1000x1400_text layer6 7152 6fbb2ed598535ba1 1.0029e-02
+stage doc_1000x1400_text merger 1788 260e2967f1e607dc 1.1125e-02
+stage doc_1000x1400_text layer26 1788 5e35f6a22318ad5e 1.4947e-02
+stage doc_1000x1400_text post_ln 1788 063f9948e7815ec1 3.5004e-03
+stage doc_1000x1400_text projector 447 c7dd6bf568b5f0b2 2.4667e-02
+case gray_640x480 16x 3248 959f5e7d01d61336
+stage gray_640x480 embed 3248 d06dafb00e50a5da 1.9593e-03
+stage gray_640x480 layer6 3248 a53954342a4a1764 8.3783e-03
+stage gray_640x480 merger 812 e0c3111cbfb88835 9.2691e-03
+stage gray_640x480 layer26 812 4bea0ae1beff08d1 1.1831e-02
+stage gray_640x480 post_ln 812 5862315ef2679003 3.1963e-03
+stage gray_640x480 projector 203 56e5d2d14b5c5ca6 1.5954e-02
+case mandel_1920x1080 16x 9248 8cc4aec97428bb00
+stage mandel_1920x1080 embed 9248 e0e5278a6ce5f61e 2.2975e-03
+stage mandel_1920x1080 layer6 9248 522f483269bd7677 1.3179e-02
+stage mandel_1920x1080 merger 2312 26ba80e37cc033f9 1.5047e-02
+stage mandel_1920x1080 layer26 2312 c114b72b3ac8221c 3.5787e-02
+stage mandel_1920x1080 post_ln 2312 61248df6d2bd120c 6.9273e-03
+stage mandel_1920x1080 projector 578 7b5cb823af1e6380 4.3924e-02
+case noise_700x500 16x 3248 6f1cd9d2568e52e2
+stage noise_700x500 embed 3248 f1311c4fded2814d 2.0715e-03
+stage noise_700x500 layer6 3248 2ba94fe972c3ab47 1.2151e-02
+stage noise_700x500 merger 812 61123a2760a557bc 1.5417e-02
+stage noise_700x500 layer26 812 6c34b551ba1f6aaa 1.8480e-02
+stage noise_700x500 post_ln 812 7c975ba33fa8ed43 4.2345e-03
+stage noise_700x500 projector 203 e546d0eee26d0ecc 3.6239e-02
+case photo_1344x896_slices 16x 7264 5829e1439656eb1c
+stage photo_1344x896_slices embed 7264 2afc6626ca31bbc6 2.0585e-03
+stage photo_1344x896_slices layer6 7264 f9902ad6ac4cc66d 9.4387e-03
+stage photo_1344x896_slices merger 1816 16eb9ea8596af88c 1.0563e-02
+stage photo_1344x896_slices layer26 1816 6a31bb8a833639a5 2.0388e-02
+stage photo_1344x896_slices post_ln 1816 223c5844c088c4a8 7.2985e-03
+stage photo_1344x896_slices projector 454 7a5f7b713acc059f 3.1955e-02
+case photo_1792x1344_slices 16x 10080 ca50f01f0854cec6
+stage photo_1792x1344_slices embed 10080 5d94d6828eb714ce 2.0581e-03
+stage photo_1792x1344_slices layer6 10080 d2a73ee79a89f519 9.4515e-03
+stage photo_1792x1344_slices merger 2520 dd1d8c749557911e 1.0608e-02
+stage photo_1792x1344_slices layer26 2520 ee6118d14d540437 1.7385e-02
+stage photo_1792x1344_slices post_ln 2520 bbc5df77c136300a 5.8816e-03
+stage photo_1792x1344_slices projector 630 30c5809303b00082 2.3868e-02
+case photo_1792x1344_slices_4x 4x 10080 ca50f01f0854cec6
+stage photo_1792x1344_slices_4x embed 10080 5d94d6828eb714ce 2.0581e-03
+stage photo_1792x1344_slices_4x layer6 10080 d2a73ee79a89f519 9.4515e-03
+stage photo_1792x1344_slices_4x layer26 10080 5908e958ed393afa 3.0554e-02
+stage photo_1792x1344_slices_4x post_ln 10080 06bdf2d0fbac8194 7.3697e-03
+stage photo_1792x1344_slices_4x projector 2520 1e538e1bd64135b2 2.8802e-02
+case photo_448 16x 1024 2f6a8daca3a289d8
+stage photo_448 embed 1024 5e8008ad5bf333ed 2.1384e-03
+stage photo_448 layer6 1024 fe721fe14e63bf45 9.3423e-03
+stage photo_448 merger 256 36d58e6b4aa4c14d 1.0384e-02
+stage photo_448 layer26 256 029f21ce7f738c23 1.4480e-02
+stage photo_448 post_ln 256 9118c02336a9bc68 4.9202e-03
+stage photo_448 projector 64 c533bdaaecd6eb3a 2.0465e-02
+case photo_900x600 16x 3136 e8ad2f7efe8501dd
+stage photo_900x600 embed 3136 1103c9f36a0172c9 2.1010e-03
+stage photo_900x600 layer6 3136 d04d57326dcb4d40 9.4353e-03
+stage photo_900x600 merger 784 191c5316b5e73576 1.0646e-02
+stage photo_900x600 layer26 784 8d35f524f0b2d1d9 2.1891e-02
+stage photo_900x600 post_ln 784 c8fe25ea5db90508 5.9358e-03
+stage photo_900x600 projector 196 a1a83b75201c7764 2.6031e-02
+case photo_900x600_4x 4x 3136 e8ad2f7efe8501dd
+stage photo_900x600_4x embed 3136 1103c9f36a0172c9 2.1010e-03
+stage photo_900x600_4x layer6 3136 d04d57326dcb4d40 9.4353e-03
+stage photo_900x600_4x layer26 3136 22a603a7d6e0c667 1.9927e-02
+stage photo_900x600_4x post_ln 3136 e028c7e5ba19956f 4.9357e-03
+stage photo_900x600_4x projector 784 236f69be7a13e8c2 2.2427e-02
+case rgba_512x384 16x 1008 c2df92c827d62478
+stage rgba_512x384 embed 1008 852194b1081d969b 1.9865e-03
+stage rgba_512x384 layer6 1008 04cbacfc05261706 1.0858e-02
+stage rgba_512x384 merger 252 c59bb7ab4a38a84d 1.1511e-02
+stage rgba_512x384 layer26 252 a046b5f72c178e4f 1.4412e-02
+stage rgba_512x384 post_ln 252 cd88baf7cbbc5fc4 3.6639e-03
+stage rgba_512x384 projector 63 d2812e7c310e5a0f 2.1038e-02
+case single_336x504_gradient 16x 1120 5aa98c9d25e731ee
+stage single_336x504_gradient embed 1120 636a4dad02e1b04e 1.9942e-03
+stage single_336x504_gradient layer6 1120 05c55b31c0422ca9 1.0788e-02
+stage single_336x504_gradient merger 280 931585c946b47227 1.0924e-02
+stage single_336x504_gradient layer26 280 35697bbb5febe7ec 1.0774e-02
+stage single_336x504_gradient post_ln 280 fcc829c1f041fb83 3.4409e-03
+stage single_336x504_gradient projector 70 1fcffdfa7f859e4a 1.9568e-02
+case single_448_rings 16x 1024 efa745ec7099952b
+stage single_448_rings embed 1024 871c7b09206f2f75 2.2369e-03
+stage single_448_rings layer6 1024 5ee79ee521420723 8.3071e-03
+stage single_448_rings merger 256 9ba954f8e5e1575f 8.7538e-03
+stage single_448_rings layer26 256 4e41e8e5c334003d 9.7600e-03
+stage single_448_rings post_ln 256 64315650651f71c5 3.7221e-03
+stage single_448_rings projector 64 bb0928906b9613f8 1.5928e-02
+case single_448_rings_4x 4x 1024 efa745ec7099952b
+stage single_448_rings_4x embed 1024 871c7b09206f2f75 2.2369e-03
+stage single_448_rings_4x layer6 1024 5ee79ee521420723 8.3071e-03
+stage single_448_rings_4x layer26 1024 0ac70f3ffd00804d 9.8145e-03
+stage single_448_rings_4x post_ln 1024 301d11f8d8e9d6ee 3.5481e-03
+stage single_448_rings_4x projector 256 b7e050f426938c0b 1.6540e-02
+case small_200x150_checker 16x 1008 a71eb4edc70a4e6e
+stage small_200x150_checker embed 1008 5a5a76c4d7bc03b3 2.3307e-03
+stage small_200x150_checker layer6 1008 6c4e52f879cbe2f6 9.7643e-03
+stage small_200x150_checker merger 252 ecb1943e6af5aae7 1.1118e-02
+stage small_200x150_checker layer26 252 dd324c0e5c2ea2ec 1.3653e-02
+stage small_200x150_checker post_ln 252 2c571fa678676d04 3.9071e-03
+stage small_200x150_checker projector 63 93f5faa78cb137d0 2.0932e-02
+case tall_300x1500_rings 16x 5184 25cdbdc02fca5c30
+stage tall_300x1500_rings embed 5184 5234b5f1deef3a5b 2.2109e-03
+stage tall_300x1500_rings layer6 5184 e536b96688a046d9 8.7837e-03
+stage tall_300x1500_rings merger 1296 2cb88938720576be 9.1085e-03
+stage tall_300x1500_rings layer26 1296 3b8c7ec125553100 1.1672e-02
+stage tall_300x1500_rings post_ln 1296 e2ce98f018e4eb74 3.9647e-03
+stage tall_300x1500_rings projector 324 3ef82a7b63d6afb7 1.8513e-02
+case wide_2000x300_gradient 16x 4848 7ba221ec2852a5b8
+stage wide_2000x300_gradient embed 4848 ab6fd07810d42f49 2.0349e-03
+stage wide_2000x300_gradient layer6 4848 c0e223f43d6c9254 1.1669e-02
+stage wide_2000x300_gradient merger 1212 6b549a43d5c7cc3e 1.2120e-02
+stage wide_2000x300_gradient layer26 1212 01a0f39c2ed8de40 1.4394e-02
+stage wide_2000x300_gradient post_ln 1212 7946c80d5cf994ac 3.8200e-03
+stage wide_2000x300_gradient projector 303 4363b956b4a9acff 2.2390e-02

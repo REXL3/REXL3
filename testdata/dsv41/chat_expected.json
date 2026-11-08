@@ -1,0 +1,141 @@
+{
+ "source": "DeepSeek-V4.1 encoding/encoding.py encode_messages (drop_thinking=True, add_default_bos_token=True)",
+ "cases": [
+  {
+   "name": "single/chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is 17 * 23?"
+    }
+   ],
+   "enable_thinking": false,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>What is 17 * 23?<\uff5cAssistant\uff5c></think>"
+  },
+  {
+   "name": "single/thinking",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is 17 * 23?"
+    }
+   ],
+   "enable_thinking": true,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<\uff5cUser\uff5c>What is 17 * 23?<\uff5cAssistant\uff5c><think>"
+  },
+  {
+   "name": "system/chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are terse."
+    },
+    {
+     "role": "user",
+     "content": "Name the capital of France."
+    }
+   ],
+   "enable_thinking": false,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>You are terse.<\uff5cUser\uff5c>Name the capital of France.<\uff5cAssistant\uff5c></think>"
+  },
+  {
+   "name": "system/thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are terse."
+    },
+    {
+     "role": "user",
+     "content": "Name the capital of France."
+    }
+   ],
+   "enable_thinking": true,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are terse.<\uff5cUser\uff5c>Name the capital of France.<\uff5cAssistant\uff5c><think>"
+  },
+  {
+   "name": "multi/chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "Write a Python function that reverses a string."
+    }
+   ],
+   "enable_thinking": false,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>Hi<\uff5cAssistant\uff5c></think>Hello! How can I help?<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>Write a Python function that reverses a string.<\uff5cAssistant\uff5c></think>"
+  },
+  {
+   "name": "multi/thinking",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "Write a Python function that reverses a string."
+    }
+   ],
+   "enable_thinking": true,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<\uff5cUser\uff5c>Hi<\uff5cAssistant\uff5c></think>Hello! How can I help?<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>Write a Python function that reverses a string.<\uff5cAssistant\uff5c><think>"
+  },
+  {
+   "name": "midsys/chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello."
+    },
+    {
+     "role": "system",
+     "content": "Answer in French."
+    },
+    {
+     "role": "user",
+     "content": "Thanks"
+    }
+   ],
+   "enable_thinking": false,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>Hi<\uff5cAssistant\uff5c></think>Hello.<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Answer in French.<\uff5cUser\uff5c>Thanks<\uff5cAssistant\uff5c></think>"
+  },
+  {
+   "name": "midsys/thinking",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello."
+    },
+    {
+     "role": "system",
+     "content": "Answer in French."
+    },
+    {
+     "role": "user",
+     "content": "Thanks"
+    }
+   ],
+   "enable_thinking": true,
+   "expected": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<\uff5cUser\uff5c>Hi<\uff5cAssistant\uff5c></think>Hello.<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Answer in French.<\uff5cUser\uff5c>Thanks<\uff5cAssistant\uff5c><think>"
+  }
+ ]
+}

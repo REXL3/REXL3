@@ -1,0 +1,21 @@
+[package]
+name = "gb-model"
+description = "Qwen3.8 model runtime on the GPU: configuration, weight loading, the forward pass, KV and recurrent state, DFlash2 drafting"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gb-cuda = { path = "../cuda" }
+gb-engine = { path = "../engine" }
+gb-exl3 = { path = "../exl3" }
+gb-sampling = { path = "../sampling" }
+gb-sched = { path = "../sched" }
+gb-spec = { path = "../spec" }
+gb-vision = { path = "../vision" }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+crc32fast = "1"
+libc = "0.2"

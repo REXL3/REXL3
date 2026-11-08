@@ -1,0 +1,79 @@
+{
+  "configuration_state": "frozen",
+  "default_profile": "qwen38-flash-next-single-262k",
+  "profiles": {
+    "qwen38-flash-next-single-262k": {
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--max-model-len",
+        "262144",
+        "--spec",
+        "mtp",
+        "--prefix-cache",
+        "on",
+        "--prefix-cache-mib",
+        "22528",
+        "--no-vision",
+        "--served-model-name",
+        "default",
+        "--slots",
+        "2",
+        "--queue-timeout",
+        "1500",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@"
+      ],
+      "capabilities": {
+        "audio": false,
+        "images": false,
+        "json_schema": false,
+        "prefix_cache": true,
+        "reasoning": true,
+        "sse": true,
+        "text": true,
+        "tools": true,
+        "video": false
+      },
+      "env": {
+        "REXL3_NGRAM_WARM": "0"
+      },
+      "files": {},
+      "http_host": "127.0.0.1",
+      "http_port": 8899,
+      "kind": "single",
+      "readiness_timeout_s": 600,
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir"
+      ],
+      "smoke_request": {
+        "max_tokens": 2048,
+        "messages": [
+          {
+            "content": "Reply with the single word: ready",
+            "role": "user"
+          }
+        ],
+        "model": "default"
+      }
+    }
+  },
+  "qualification": {
+    "evidence": [],
+    "state": "unverified"
+  },
+  "runtime_id": "qwen38-flash-next-exl3-3.05",
+  "schema": "rexl3.runtime-profile.v1",
+  "source": {
+    "commit": "b80f9fcb379c24907efb22e021a0ab80705a9e4b",
+    "path": "docs/examples/cluster.qwen38-flash-next-exl3-3.05-single.json",
+    "repository": "REXL3/REXL3-dev",
+    "sha256": "af6dc416551d8e8c1955edd1dcb4c93702064b71a80bff81ff634421c518c50b"
+  },
+  "state": "final",
+  "target_repo": "turboderp/Qwen3.8-Flash-Next-exl3"
+}

@@ -1,0 +1,20 @@
+[package]
+name = "gb-router"
+description = "rexl3-router: DP-fleet reverse proxy in front of N rexl3-serve backends (least-outstanding-requests with prefix affinity)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+futures-util = "0.3.34"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+
+[[bin]]
+name = "rexl3-router"
+path = "src/main.rs"

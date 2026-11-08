@@ -1,0 +1,9 @@
+{
+  "schema": "rexl3.template-approval.v1",
+  "version": "v1",
+  "digest": "sha256:b97918f80561f9d28eced8154abc225ecd5fdf5cca579e0702a646eef6ccdc1d",
+  "approved_commit": "1a982df81f6599800d6d2172e33a6f6900975e8a",
+  "approved_at": "2026-10-31",
+  "approved_by": "vcruz305",
+  "note": "Digest approved by vcruz305 on 2026-10-31 (board D61). It is the content digest of runtimes/template-v1 (tools/runtime_template_digest.py) as introduced by #179, the commit approved_commit names: the DSV single-node contract default was re-pinned from the EXL3 1.55bpw pack to the REXL3 1.55bpw pack (contract.py DSV_REPO). Any later edit to the template changes the digest and needs a new approval."
+}

@@ -1,0 +1,86 @@
+{
+ "tensorfold_commit": "9cd52ab4daba68ddd09be89be8f23ad43175e821",
+ "numpy": "2.4.4",
+ "groups": {
+  "model.layers.0.mlp.up_proj": {
+   "bits": 4.0,
+   "codebook": "mul1",
+   "k": 128,
+   "n": 256,
+   "in_scales": "suh",
+   "out_scales": "svh",
+   "bias": false,
+   "files": [
+    "model-00001-of-00002.safetensors"
+   ]
+  },
+  "model.layers.0.self_attn.o_proj": {
+   "bits": 3.0,
+   "codebook": "3inst",
+   "k": 256,
+   "n": 128,
+   "in_scales": "su",
+   "out_scales": "sv",
+   "bias": true,
+   "files": [
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors"
+   ]
+  },
+  "model.visual.blocks.0.attn.qkv": {
+   "bits": 6.0,
+   "codebook": "mul1",
+   "k": 128,
+   "n": 384,
+   "in_scales": "suh",
+   "out_scales": "svh",
+   "bias": false,
+   "files": [
+    "model-00002-of-00002.safetensors"
+   ]
+  }
+ },
+ "plain": {
+  "model.embed_tokens.weight": {
+   "dtype": "F16",
+   "shape": [
+    512,
+    128
+   ]
+  },
+  "model.layers.0.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ]
+  },
+  "model.norm.weight": {
+   "dtype": "F16",
+   "shape": [
+    128
+   ]
+  },
+  "lm_head.weight": {
+   "dtype": "F16",
+   "shape": [
+    512,
+    128
+   ]
+  },
+  "model.layers.4.dense.bias": {
+   "dtype": "F16",
+   "shape": [
+    128
+   ]
+  }
+ },
+ "bad": [
+  "model.layers.1.mlp.down_proj",
+  "model.layers.2.self_attn.q_proj",
+  "model.layers.3.mlp.gate_proj"
+ ],
+ "markers": {
+  "model.layers.0.mlp.up_proj.mul1": 2212286765,
+  "model.visual.blocks.0.attn.qkv.mul1": 2212286765
+ }
+}

@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "Qwen4ExpForConditionalGeneration"
+  ],
+  "display_name": "Qwen3.8-Flash-Next",
+  "engine_family": "qwen_flash_next",
+  "family": "qwen3.8",
+  "model": "qwen3.8-flash-next",
+  "pack": {
+    "bits": "3.05",
+    "format": "exl3",
+    "target_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
+    "target_revision": "69e33439ae950f17bcbe95c98f117d80f759ab6d"
+  },
+  "runtime_id": "qwen38-flash-next-exl3-3.05",
+  "schema": "rexl3.prod-model.v1"
+}

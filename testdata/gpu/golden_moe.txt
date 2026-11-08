@@ -1,0 +1,58 @@
+sigmoid table 7307ae157730035e
+bias 48dbb01063a1dea8
+router rows=1 logits 331462ac288ce8bd picks baa178cc613900f8 wts 85345023ddcf001b
+router rows=9 logits 6fe8731b287ab757 picks a948e8ac632876b6 wts 100951020e548704
+router rows=128 logits 15ed8a19b37e4835 picks 33236f5e6e113811 wts 5c45474fcc38ed92
+experts synthetic gu=1 d=8 mul1 rows=1 out 9b33297cf33e14ec y 321651f2ca722f27
+experts synthetic gu=1 d=8 mul1 rows=8 out 330fb94ce411eac7 y af6ff61ed22064bf
+experts synthetic gu=1 d=8 mul1 rows=17 out 18c976e6d67fd14c y 6e569f029fc9a219
+experts synthetic gu=1 d=8 mul1 rows=33 out 3881a14dcaba4d25 y 2aea31995148115e
+experts synthetic gu=2 d=2 mul1 rows=1 out 5ed0dc4f0a713e84 y dbf9013e045fa7c2
+experts synthetic gu=2 d=2 mul1 rows=8 out b01cbc5a0618bc97 y 5c46850f870dcc1b
+experts synthetic gu=2 d=2 mul1 rows=17 out 05cae0afc0053a49 y 5ebda333927be998
+experts synthetic gu=2 d=2 mul1 rows=33 out f54d16f333826666 y b0be039293d96d10
+experts synthetic gu=3 d=3 mul1 rows=1 out e3eeffa26782d011 y 289a7412350895bb
+experts synthetic gu=3 d=3 mul1 rows=8 out 6d1da250da32893c y 8ae1d947cf40b404
+experts synthetic gu=3 d=3 mul1 rows=17 out 909f1dab06198e66 y 5b62d3aa8d2c79bf
+experts synthetic gu=3 d=3 mul1 rows=33 out ef5349c4d0053ebd y e1994845a8bdaeb9
+experts synthetic gu=4 d=2 mul1 rows=1 out ee6ef8b1b772f13f y c481592151d71e03
+experts synthetic gu=4 d=2 mul1 rows=8 out 16658d33bae01da8 y 1e646689abc70708
+experts synthetic gu=4 d=2 mul1 rows=17 out 06516b401bd72ded y 3bd6cc77f4af549b
+experts synthetic gu=4 d=2 mul1 rows=33 out cd36f62fe19412fc y cf626675e1b1dcb1
+experts synthetic gu=6 d=5 mul1 rows=1 out 4507f8f468824aad y 34eb2cce458db9f2
+experts synthetic gu=6 d=5 mul1 rows=8 out 1b5120f2b470e58e y d423dc20a131d9a1
+experts synthetic gu=6 d=5 mul1 rows=17 out dd8ecb7dccfe9498 y 91ab495c3d478d5e
+experts synthetic gu=6 d=5 mul1 rows=33 out 3ddd6f42684d6a39 y ba47fce6f45b5cb3
+experts synthetic gu=8 d=1 mul1 rows=1 out bfc38c78653ce989 y c647a8ccf3288897
+experts synthetic gu=8 d=1 mul1 rows=8 out d9674425dc36c3bd y b82ad586418952ea
+experts synthetic gu=8 d=1 mul1 rows=17 out 81fce75539f365ad y 5a3a37269e143484
+experts synthetic gu=8 d=1 mul1 rows=33 out b2eaabc6999f5a0f y 4a7fa05d5e28508f
+experts synthetic gu=4 d=4 mcg rows=1 out 414804cd00331632 y a122b6011f4f92e3
+experts synthetic gu=4 d=4 mcg rows=8 out dd35235369a4db53 y 6a578cfb40c25432
+experts synthetic gu=4 d=4 mcg rows=17 out 317bb129bc6728d3 y aaf00c21f519e9d0
+experts synthetic gu=4 d=4 mcg rows=33 out 2bf680fa47005ea8 y e38c5adff143fb03
+experts synthetic gu=3 d=2 3inst rows=1 out f470891cdc02e3b5 y 3ead29a8944f68b3
+experts synthetic gu=3 d=2 3inst rows=8 out 41d22b1ddba56cad y 877437b8fb1af1a2
+experts synthetic gu=3 d=2 3inst rows=17 out 6056360e921788ab y 0cb0108ad876d6e6
+experts synthetic gu=3 d=2 3inst rows=33 out 78619cc6c2d2da92 y 69fac29a407735a9
+experts layer 6 rows=1 out 84811a1c760b0b5d y 9ab8bd26f5d96238
+experts layer 6 rows=8 out 7989b6497cf6605a y 7ab6a8ee16dce647
+experts layer 6 rows=16 out 1e3da5e67675aba7 y 7254f14eddb31b02
+experts layer 6 rows=33 out 46bbff38965c8bfc y d071fde928319edb
+shared layer 6 rows=1 out 6bfe189f71abcf28
+shared layer 6 rows=8 out a01d66e2262c568a
+shared layer 6 rows=33 out e6beb0a8f123b9a9
+experts layer 3 rows=1 out 707bd55313ff1715 y e87bea2c563d9675
+experts layer 3 rows=8 out 90854766101d572f y 1c36eab6e422119a
+experts layer 3 rows=16 out 3e1f561902489c1f y 24175053d0c72d14
+experts layer 3 rows=33 out 19f93bca73e74e4e y b26465d1c94dc8dd
+shared layer 3 rows=1 out 4aa95ed0d30903c5
+shared layer 3 rows=8 out 8ba5e01622b2df72
+shared layer 3 rows=33 out b22c258aeaf0d852
+experts layer 45 rows=1 out c868de9d8d0e0678 y a8120bbc8ed601b4
+experts layer 45 rows=8 out 30861bf570f4aa35 y b0494b77444d82a3
+experts layer 45 rows=16 out 5d385d4c762ccadc y c1fce4fa08622789
+experts layer 45 rows=33 out b44e6599ac53eeb4 y 65dad88ebc34c7f3
+shared layer 45 rows=1 out 83df069a5969669f
+shared layer 45 rows=8 out e567938982cf3529
+shared layer 45 rows=33 out e1ee311934c98032

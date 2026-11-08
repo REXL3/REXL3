@@ -1,0 +1,25 @@
+arith glm-moe-fold128-2grp-v1 default Fold128
+p2m glm-moe-chain-2grp-v1 2/2-bit E=48 rows=1 y 5c7ea9ce017c5ccb out f24f8abd1c694974
+p2m glm-moe-fold128-2grp-v1 2/2-bit E=48 rows=1 y 15d5ffe51d2cd75f out 973e5d2640bbe48d
+p2m glm-moe-chain-2grp-v1 2/2-bit E=48 rows=37 y 70a6c52cbb884443 out e381c35e591ce697
+p2m glm-moe-fold128-2grp-v1 2/2-bit E=48 rows=37 y 5d257e5e02fd28f4 out d502baf7a0c8460d
+p2m glm-moe-chain-2grp-v1 2/2-bit E=48 rows=300 y 0797116f5ebeaea6 out a1d9d726254e564e
+p2m glm-moe-fold128-2grp-v1 2/2-bit E=48 rows=300 y a15e487d19864a90 out a8f236e1b7285bbd
+p2m glm-moe-chain-2grp-v1 3/3-bit E=48 rows=1 y 23e82ad8ccd1ff36 out e2ba3642f94a2ba9
+p2m glm-moe-fold128-2grp-v1 3/3-bit E=48 rows=1 y fa320126aee38f95 out 579dcd4c909d5327
+p2m glm-moe-chain-2grp-v1 3/3-bit E=48 rows=37 y bb2630d3313abb65 out 107f13a404765c4a
+p2m glm-moe-fold128-2grp-v1 3/3-bit E=48 rows=37 y f7fe56684bb27bca out c0118e77605c19db
+p2m glm-moe-chain-2grp-v1 3/3-bit E=48 rows=300 y 2e071a929ee75efd out 5f85e39da1aaad75
+p2m glm-moe-fold128-2grp-v1 3/3-bit E=48 rows=300 y 2b06901760c4c1cc out 62c88e5335d8781d
+p2m glm-moe-chain-2grp-v1 4/4-bit E=48 rows=1 y 8d351caf74c79e4e out 833b89c3802a359b
+p2m glm-moe-fold128-2grp-v1 4/4-bit E=48 rows=1 y 1833647ce1bbe68f out dee6f401070329b1
+p2m glm-moe-chain-2grp-v1 4/4-bit E=48 rows=37 y 408e9fddcf774947 out 8d70bb76f5ca1f86
+p2m glm-moe-fold128-2grp-v1 4/4-bit E=48 rows=37 y 834ba020e21fef9a out f167fa671fd3e324
+p2m glm-moe-chain-2grp-v1 4/4-bit E=48 rows=300 y 625e48f8c57f2985 out 2cbe46a599ee5422
+p2m glm-moe-fold128-2grp-v1 4/4-bit E=48 rows=300 y 5734aaf129e4faf7 out acb9ba081122ecd6
+p2m glm-moe-chain-2grp-v1 5/4-bit E=48 rows=1 y 3f5ef19f86cd7ff7 out 7d646dbfc02b48ba
+p2m glm-moe-fold128-2grp-v1 5/4-bit E=48 rows=1 y 553e010eeeb6ec9b out 5cfc959642654e52
+p2m glm-moe-chain-2grp-v1 5/4-bit E=48 rows=37 y c7f907f462d82ddf out b79d7da3df4e8cab
+p2m glm-moe-fold128-2grp-v1 5/4-bit E=48 rows=37 y 190cd54f95acfec5 out 3e94cf5ee561f489
+p2m glm-moe-chain-2grp-v1 5/4-bit E=48 rows=300 y b36e339c9c37c29c out 4ffd24a63650ad57
+p2m glm-moe-fold128-2grp-v1 5/4-bit E=48 rows=300 y 652c0040e2c97378 out 5a77b70905a69436

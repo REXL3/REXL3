@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/vision", "crates/sampling", "crates/exl3", "crates/spec", "crates/sched", "crates/engine", "crates/cuda", "crates/server", "crates/model", "crates/router", "crates/cluster"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+version = "0.1.0"
+publish = false
+license = "AGPL-3.0-only"
+
+[profile.release]
+debug = 1
+
+# The tensor-parallel boot gate hashes the running executable (`lockstep::exe_sha256`): optimised even in test builds, so a debug
+# test binary of 100 MB hashes in a fraction of a second instead of several (and does not starve the timing tests beside it).
+[profile.dev.package.sha2]
+opt-level = 3

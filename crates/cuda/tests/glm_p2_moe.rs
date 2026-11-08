@@ -1,0 +1,822 @@
+//! Lane P step 3 (GLM-5.3-Flash, contract P2): the routed experts of a prompt chunk on tensor cores (`gb_cuda::glm_p2_moe`,
+//! `csrc/glm_p2_moe.cu`), on SYNTHETIC Mul1 EXL3 experts of GLM's shapes (hidden 4,096, expert width 2,048, top-8; 2 and 3 bits as the
+//! 2.25 bpw pack's layers, 4 as its NextN layer, 4 and 5 as sc_4.10's).
+//!
+//! Gates (not ignored), for both K orders (`Order::Chain`, `Order::Fold128`):
+//! * `p2_experts_are_as_close_to_fp64_as_the_decode_path`: every pair's y and every row's out against an f64 reference of the exact
+//!   dequantized experts; P2's error beside the decode path's (P1's large-row kernel, the decode path's bits). P2 within 1.5x of P1's
+//!   rms and under 1e-3.
+//! * `p2_pairs_are_bit_identical_in_any_call`: 288 experts, five routing styles (uniform, skewed, one hot set, a quarter unrouted, many
+//!   single-pair experts): run to run with a poisoned scratch, calls of 1, 17, 129 and 333 rows, a row permutation: every computed pair's
+//!   y and every row's out bit for bit.
+//! * `the_two_group_combine_is_the_tp_split`: the combine of one node (`Both`) equals each rank's own group (`Own(0)`, `Own(1)`) followed by
+//!   `Parts`, bit for bit, and equals the host's fmaf chains of the two groups (the contract's order, operation for operation).
+//! * `p2_per_subbank_equals_p2_single_bank` and `p2_mixed_width_subbanks_equal_the_uniform_banks_they_are_made_of` (mixed-width layers,
+//!   `glm_p2_moe::run_subbanks`): a layer split into artificial subbanks of one width runs P2 bit for bit as the single bank does, at 1,
+//!   16, 129 and 300 rows and in calls of other widths; a layer whose subbanks have different widths gives every pair the y of a
+//!   uniform bank of that pair's widths.
+//!
+//! Timing (ignored, `bench` in the name): ms a layer and TFLOP/s of P1's large-row path against P2 at 512 to 4,096 rows, 288 experts,
+//! uniform routing, a 256 MiB memset before each call, median of 5; the stages of P2 separately.
+//!
+//!     cargo test -p gb-cuda --release --test glm_p2_moe -- --test-threads=1 --nocapture
+//!     cargo test -p gb-cuda --release --test glm_p2_moe -- --ignored --test-threads=1 --nocapture bench
+#![cfg(not(gb_no_cuda))]
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+mod common;
+mod exl3_ref;
+
+use common::exl3_synth::synth_group;
+use common::Rng;
+use exl3_ref::{err, linear_ref, weights};
+use gb_cuda::exl3_linear::Dtype;
+use gb_cuda::glm_p2_moe::{self, CombineMode, Order};
+use gb_cuda::moe::{MoeDims, MoeExperts};
+use gb_cuda::moe_owned::{ExpertOwnership, OwnScratch};
+use gb_cuda::moe_prefill::PrefillScratch;
+use gb_cuda::moe_subbanks::MoeSubbanks;
+use gb_cuda::{device_available, DevBuf, Stream};
+use gb_exl3::checkpoint::LoadedGroup;
+use gb_exl3::f16::{f16_to_f64, f64_to_f16};
+use gb_exl3::Codebook;
+
+macro_rules! gpu {
+    () => {
+        if !device_available() {
+            eprintln!("no CUDA device: skipping");
+            return;
+        }
+    };
+}
+
+const ORDERS: [Order; 2] = [Order::Chain, Order::Fold128];
+
+fn glm_dims(experts: usize) -> MoeDims {
+    MoeDims { hidden: 4096, inter: 2048, experts, topk: 8, scale: 2.5, limit: 10.0 }
+}
+
+struct Layer {
+    ex: MoeExperts,
+    groups: Option<[Vec<LoadedGroup>; 3]>,
+}
+
+fn synth_layer(dims: MoeDims, bits_gu: usize, bits_d: usize, seed: u64, keep: bool) -> Layer {
+    let e = dims.experts;
+    let mk = |k, n, bits, tag: u64| -> Vec<LoadedGroup> {
+        (0..e).map(|x| synth_group(k, n, bits, Codebook::Mul1, seed * 1000 + tag * 100 + x as u64)).collect()
+    };
+    let gate = mk(dims.hidden, dims.inter, bits_gu, 1);
+    let up = mk(dims.hidden, dims.inter, bits_gu, 2);
+    let down = mk(dims.inter, dims.hidden, bits_d, 3);
+    let ex = MoeExperts::from_groups(&gate, &up, &down, dims).unwrap();
+    Layer { ex, groups: keep.then_some([gate, up, down]) }
+}
+
+fn below(r: &mut Rng, n: usize) -> usize {
+    (r.next_u64() % n as u64) as usize
+}
+
+fn normal(r: &mut Rng) -> f64 {
+    let (a, b) = ((r.next_u64() >> 11) as f64 / (1u64 << 53) as f64, (r.next_u64() >> 11) as f64 / (1u64 << 53) as f64);
+    (-2.0 * a.max(1e-300).ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Style {
+    Uniform,
+    Skewed,
+    Hot,
+    Holes,
+    Sparse,
+}
+
+fn make_picks(r: &mut Rng, style: Style, rows: usize, e: usize, topk: usize) -> (Vec<i32>, Vec<u16>) {
+    let mut pick = Vec::with_capacity(rows * topk);
+    let mut wts = Vec::with_capacity(rows * topk);
+    for row in 0..rows {
+        let ids: Vec<usize> = match style {
+            Style::Uniform | Style::Holes => {
+                let mut all: Vec<usize> = (0..e).collect();
+                for i in (1..all.len()).rev() {
+                    all.swap(i, below(r, i + 1));
+                }
+                all[..topk].to_vec()
+            }
+            Style::Skewed => {
+                let mut chosen: Vec<usize> = Vec::new();
+                while chosen.len() < topk {
+                    let u = (r.next_u64() >> 40) as f64 / 16777216.0 + 1e-6;
+                    let c = ((1.0 / u) as usize - 1).min(e - 1);
+                    if !chosen.contains(&c) {
+                        chosen.push(c);
+                    }
+                }
+                chosen
+            }
+            Style::Hot => (0..topk).map(|k| (k * 37) % e).collect(),
+            Style::Sparse => {
+                let mut v: Vec<usize> = (0..topk).map(|k| (row * 5 + k * 13 + 1) % e).collect();
+                v.sort_unstable();
+                v.dedup();
+                while v.len() < topk {
+                    v.push((v[v.len() - 1] + 1) % e);
+                    v.sort_unstable();
+                    v.dedup();
+                }
+                v
+            }
+        };
+        for &id in &ids {
+            let hole = matches!(style, Style::Holes) && below(r, 4) == 0;
+            pick.push(if hole { -1 + (below(r, 2) as i32) * (e as i32 + 1) } else { id as i32 });
+            wts.push(f64_to_f16(0.05 + 0.6 * (r.next_u64() >> 40) as f64 / 16777216.0));
+        }
+    }
+    (pick, wts)
+}
+
+/// fp16 rows at the scale of a normed hidden row (a few percent of entries four times larger).
+fn activations(r: &mut Rng, rows: usize, k: usize, scale: f64) -> Vec<u16> {
+    (0..rows * k)
+        .map(|_| {
+            let v = r.uniform(-1.0, 1.0) as f64;
+            let v = if r.next_u64() % 32 == 0 { 4.0 * v } else { v };
+            f64_to_f16(v * scale)
+        })
+        .collect()
+}
+
+fn up<T: Copy>(v: &[T]) -> DevBuf {
+    DevBuf::from_slice(v).unwrap()
+}
+
+struct Run {
+    out: Vec<f32>,
+    y: Vec<f32>,
+}
+
+/// `path`: None P1's large-row path (`run_prefill`: the decode path's bits), Some(order) P2. Calls of `chunk` rows (the last shorter).
+fn run(
+    ex: &MoeExperts,
+    st: &Stream,
+    s: &mut PrefillScratch,
+    xh: &[u16],
+    pick: &[i32],
+    wts: &[u16],
+    shared: &[f32],
+    rows: usize,
+    chunk: usize,
+    path: Option<Order>,
+) -> Run {
+    let d = ex.dims;
+    let (mut out, mut y) = (Vec::new(), Vec::new());
+    let mut at = 0;
+    while at < rows {
+        let n = chunk.min(rows - at);
+        s.set_picks(&pick[at * d.topk..(at + n) * d.topk], &wts[at * d.topk..(at + n) * d.topk]).unwrap();
+        let x = up(&xh[at * d.hidden..(at + n) * d.hidden]);
+        let sh = up(&shared[at * d.hidden..(at + n) * d.hidden]);
+        let mut o = DevBuf::zeroed(n * d.hidden * 4).unwrap();
+        match path {
+            None => ex.run_prefill(&x, Dtype::F16, n, Some(&sh), &mut o, s, st).unwrap(),
+            Some(ord) => glm_p2_moe::run_with(ex, &x, Dtype::F16, n, Some(&sh), &mut o, s, ord, st, &mut |_| Ok(())).unwrap(),
+        }
+        st.sync().unwrap();
+        out.extend(o.to_vec::<f32>().unwrap());
+        // only this call's pairs (the scratch holds `s.max_rows` rows of them)
+        let mut yy = vec![0f32; n * d.topk * d.hidden];
+        s.y_pairs.download_range(0, &mut yy).unwrap();
+        y.extend(yy);
+        at += n;
+    }
+    Run { out, y }
+}
+
+fn valid(e: i32, d: &MoeDims) -> bool {
+    e >= 0 && (e as usize) < d.experts
+}
+
+/// Every computed pair's y and every row's out equal, bit for bit.
+fn assert_same(what: &str, got: &Run, want: &Run, d: &MoeDims, pick: &[i32]) {
+    assert_eq!(got.out.len(), want.out.len(), "{what}: out length");
+    for (p, &e) in pick.iter().enumerate() {
+        if !valid(e, d) {
+            continue;
+        }
+        let r = p * d.hidden..(p + 1) * d.hidden;
+        if let Some(i) = got.y[r.clone()].iter().zip(&want.y[r.clone()]).position(|(a, b)| a.to_bits() != b.to_bits()) {
+            panic!(
+                "{what}: pair {p} (row {}, slot {}) column {i} of y differs: {} vs {}",
+                p / d.topk,
+                p % d.topk,
+                got.y[r.start + i],
+                want.y[r.start + i]
+            );
+        }
+    }
+    if let Some(i) = got.out.iter().zip(&want.out).position(|(a, b)| a.to_bits() != b.to_bits()) {
+        panic!("{what}: row {} column {} of out differs: {} vs {}", i / d.hidden, i % d.hidden, got.out[i], want.out[i]);
+    }
+}
+
+#[test]
+fn p2_experts_are_as_close_to_fp64_as_the_decode_path() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let rows = 48;
+    for (li, &(bits_gu, bits_d)) in [(2usize, 2usize), (3, 3), (4, 4), (5, 5)].iter().enumerate() {
+        let d = glm_dims(12);
+        let lay = synth_layer(d, bits_gu, bits_d, 40 + li as u64, true);
+        let [gate, upg, down] = lay.groups.as_ref().unwrap();
+        let ex = &lay.ex;
+        assert!(glm_p2_moe::supported(ex), "{bits_gu}/{bits_d} bits");
+        let mut r = Rng(7 + li as u64);
+        let xh = activations(&mut r, rows, d.hidden, 1.5);
+        let (pick, wts) = make_picks(&mut r, Style::Uniform, rows, d.experts, d.topk);
+        let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+        let mut s = PrefillScratch::new(&d, rows).unwrap();
+        let p1 = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, None);
+        let p2: Vec<Run> = ORDERS.iter().map(|&o| run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o))).collect();
+        // the f64 reference of every pair and row
+        let wg: Vec<Vec<f32>> = gate.iter().map(|g| weights(g, &st)).collect();
+        let wu: Vec<Vec<f32>> = upg.iter().map(|g| weights(g, &st)).collect();
+        let wd: Vec<Vec<f32>> = down.iter().map(|g| weights(g, &st)).collect();
+        let lim = d.limit as f64;
+        let (mut yref, mut oref) = (Vec::new(), Vec::new());
+        let (mut y1, mut y2): (Vec<f32>, Vec<Vec<f32>>) = (Vec::new(), vec![Vec::new(); 2]);
+        for row in 0..rows {
+            let x: Vec<f64> = (0..d.hidden).map(|i| f16_to_f64(xh[row * d.hidden + i])).collect();
+            let mut o: Vec<f64> = (0..d.hidden).map(|i| shared[row * d.hidden + i] as f64).collect();
+            for k in 0..d.topk {
+                let p = row * d.topk + k;
+                let e = pick[p] as usize;
+                let g = linear_ref(&gate[e], &wg[e], &x);
+                let u = linear_ref(&upg[e], &wu[e], &x);
+                let a: Vec<f64> =
+                    g.iter().zip(&u).map(|(&g, &u)| (g / (1.0 + (-g).exp())).min(lim) * u.clamp(-lim, lim)).collect();
+                let y = linear_ref(&down[e], &wd[e], &a);
+                let w = f16_to_f64(wts[p]);
+                for j in 0..d.hidden {
+                    o[j] += w * y[j];
+                }
+                yref.extend_from_slice(&y);
+                y1.extend_from_slice(&p1.y[p * d.hidden..(p + 1) * d.hidden]);
+                for (i, r2) in p2.iter().enumerate() {
+                    y2[i].extend_from_slice(&r2.y[p * d.hidden..(p + 1) * d.hidden]);
+                }
+            }
+            oref.extend(o);
+        }
+        let (m1, r1, s1, k1) = err(&yref, &y1);
+        let (om1, or1, _, _) = err(&oref, &p1.out);
+        let mut line = format!(
+            "{bits_gu}/{bits_d}-bit experts, {rows} rows x 8: P1 y max {m1:.2e} rms {r1:.2e} mean {s1:+.1e} shrink {k1:+.1e} out rms {or1:.2e} (max {om1:.2e})"
+        );
+        for (i, &o) in ORDERS.iter().enumerate() {
+            let (m2, r2, s2, k2) = err(&yref, &y2[i]);
+            let (om2, or2, _, _) = err(&oref, &p2[i].out);
+            line += &format!(
+                " | {} y max {m2:.2e} rms {r2:.2e} mean {s2:+.1e} shrink {k2:+.1e} out rms {or2:.2e} (max {om2:.2e})",
+                o.id()
+            );
+            assert!(r2 <= 1.5 * r1 + 1e-7 && r2 < 1e-3, "{bits_gu}/{bits_d} {o:?}: P2 y rms {r2:e} against P1's {r1:e}");
+            assert!(or2 <= 1.5 * or1 + 1e-7, "{bits_gu}/{bits_d} {o:?}: P2 out rms {or2:e} against P1's {or1:e}");
+            assert!(p2[i].y.iter().any(|v| *v != 0.0) && p2[i].out.iter().all(|v| v.is_finite()), "{o:?}: degenerate output");
+        }
+        eprintln!("{line}");
+    }
+}
+
+#[test]
+fn p2_pairs_are_bit_identical_in_any_call() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(288);
+    let lay = synth_layer(d, 2, 2, 3, false);
+    let ex = &lay.ex;
+    let rows = 700;
+    let mut s = PrefillScratch::new(&d, rows).unwrap();
+    for (si, &style) in [Style::Uniform, Style::Skewed, Style::Hot, Style::Holes, Style::Sparse].iter().enumerate() {
+        let mut r = Rng(100 + si as u64);
+        let xh = activations(&mut r, rows, d.hidden, 1.5);
+        let (pick, wts) = make_picks(&mut r, style, rows, d.experts, d.topk);
+        let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+        for &o in &ORDERS {
+            let whole = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+            assert!(whole.out.iter().all(|v| v.is_finite()) && whole.out.iter().any(|v| *v != 0.0), "{style:?}: degenerate");
+            s.poison(0xa5, &st).unwrap();
+            let again = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+            assert_same(&format!("{style:?} {o:?} run to run, poisoned scratch"), &again, &whole, &d, &pick);
+            for chunk in [1usize, 17, 129, 333] {
+                if chunk == 1 && !matches!(style, Style::Uniform) {
+                    continue; // 700 one-row calls: once is enough
+                }
+                let got = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, chunk, Some(o));
+                assert_same(&format!("{style:?} {o:?} calls of {chunk}"), &got, &whole, &d, &pick);
+            }
+            // a permutation of the rows: every row and pair keeps its bits
+            let mut perm: Vec<usize> = (0..rows).collect();
+            for j in (1..rows).rev() {
+                perm.swap(j, below(&mut r, j + 1));
+            }
+            let px: Vec<u16> = perm.iter().flat_map(|&q| xh[q * d.hidden..(q + 1) * d.hidden].to_vec()).collect();
+            let pp: Vec<i32> = perm.iter().flat_map(|&q| pick[q * d.topk..(q + 1) * d.topk].to_vec()).collect();
+            let pw: Vec<u16> = perm.iter().flat_map(|&q| wts[q * d.topk..(q + 1) * d.topk].to_vec()).collect();
+            let ps: Vec<f32> = perm.iter().flat_map(|&q| shared[q * d.hidden..(q + 1) * d.hidden].to_vec()).collect();
+            let got = run(ex, &st, &mut s, &px, &pp, &pw, &ps, rows, rows, Some(o));
+            for (j, &q) in perm.iter().enumerate() {
+                let (a, b) = (&got.out[j * d.hidden..(j + 1) * d.hidden], &whole.out[q * d.hidden..(q + 1) * d.hidden]);
+                assert!(
+                    a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "{style:?} {o:?}: row {q} at position {j} of a permutation"
+                );
+            }
+            // every block shape (which warp computes which output) gives the default's bits
+            for (gu, dn) in [(1, 1), (2, 2), (3, 1)] {
+                glm_p2_moe::set_shapes(gu, dn);
+                let got = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+                glm_p2_moe::set_shapes(0, 0);
+                assert_same(&format!("{style:?} {o:?} block shapes gate/up {gu} down {dn}"), &got, &whole, &d, &pick);
+            }
+            eprintln!(
+                "{style:?} {}: bit-identical run to run (poisoned scratch), in calls of 1 / 17 / 129 / 333, permuted, every block shape",
+                o.id()
+            );
+        }
+        // P2 moved the bits (it ran): its y differs from P1's somewhere
+        let p1 = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, None);
+        let p2 = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(glm_p2_moe::DEFAULT_ORDER));
+        assert!(p1.out.iter().zip(&p2.out).any(|(a, b)| a.to_bits() != b.to_bits()), "{style:?}: P2 gave P1's bits");
+    }
+}
+
+#[test]
+fn the_plan_is_p1s_plan() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    // small experts: the plan does not read the weights
+    let d = MoeDims { hidden: 128, inter: 128, experts: 288, topk: 8, scale: 2.5, limit: 10.0 };
+    let lay = synth_layer(d, 2, 2, 11, false);
+    let ex = &lay.ex;
+    let mut s = PrefillScratch::new(&d, 4096).unwrap();
+    let mut checked = 0;
+    for (si, &style) in [Style::Uniform, Style::Skewed, Style::Hot, Style::Holes, Style::Sparse].iter().enumerate() {
+        for rows in [1usize, 17, 255, 256, 257, 700, 4096] {
+            let mut r = Rng(300 + si as u64 * 100 + rows as u64);
+            let (pick, wts) = make_picks(&mut r, style, rows, d.experts, d.topk);
+            let xh = activations(&mut r, rows, d.hidden, 1.0);
+            s.set_picks(&pick, &wts).unwrap();
+            s.poison(0x5a, &st).unwrap();
+            s.set_picks(&pick, &wts).unwrap();
+            let mut o = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+            ex.run_prefill(&up(&xh), Dtype::F16, rows, None, &mut o, &mut s, &st).unwrap();
+            let (sp1, it1, n1) = glm_p2_moe::plan_view(&s, &st).unwrap();
+            s.poison(0xa5, &st).unwrap();
+            s.set_picks(&pick, &wts).unwrap();
+            glm_p2_moe::plan_only(&mut s, rows, &st).unwrap();
+            let (sp2, it2, n2) = glm_p2_moe::plan_view(&s, &st).unwrap();
+            assert_eq!(n1[..4], n2[..4], "{style:?} rows {rows}: the item counts and sorted rows");
+            let sorted = n1[3] as usize;
+            assert_eq!(sp1[..sorted], sp2[..sorted], "{style:?} rows {rows}: the sorted pairs");
+            let cap = it1.len() / 12;
+            for c in 0..3 {
+                let a = &it1[c * cap * 4..(c * cap + n1[c] as usize) * 4];
+                let b = &it2[c * cap * 4..(c * cap + n1[c] as usize) * 4];
+                assert_eq!(a, b, "{style:?} rows {rows}: the items of class {c}");
+            }
+            checked += 1;
+        }
+    }
+    eprintln!("the P2 plan equals P1's plan (sorted pairs, items, counts) on {checked} cases (5 routing styles x 7 row counts, 288 experts)");
+}
+
+#[test]
+fn the_two_group_combine_is_the_tp_split() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(288);
+    let lay = synth_layer(d, 2, 2, 5, false);
+    let ex = &lay.ex;
+    let rows = 300;
+    let mut s = PrefillScratch::new(&d, rows).unwrap();
+    let mut r = Rng(55);
+    let xh = activations(&mut r, rows, d.hidden, 1.5);
+    let (pick, wts) = make_picks(&mut r, Style::Holes, rows, d.experts, d.topk);
+    let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+    let whole = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(glm_p2_moe::DEFAULT_ORDER));
+    // the TP=2 split of the same pairs: rank g's own group, the exchange (a copy), the parts' sum with the shared expert last
+    let sh = up(&shared);
+    let mut parts = [DevBuf::zeroed(rows * d.hidden * 4).unwrap(), DevBuf::zeroed(rows * d.hidden * 4).unwrap()];
+    for (g, p) in parts.iter_mut().enumerate() {
+        glm_p2_moe::combine(CombineMode::Own(g), &s.y_pairs, &s.pick, &s.wts, None, None, p, rows, ex, &st).unwrap();
+    }
+    let mut out = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+    glm_p2_moe::combine(
+        CombineMode::Parts,
+        &s.y_pairs,
+        &s.pick,
+        &s.wts,
+        Some(&sh),
+        Some((&parts[0], &parts[1])),
+        &mut out,
+        rows,
+        ex,
+        &st,
+    )
+    .unwrap();
+    st.sync().unwrap();
+    let split = out.to_vec::<f32>().unwrap();
+    assert!(split.iter().zip(&whole.out).all(|(a, b)| a.to_bits() == b.to_bits()), "the TP split of the combine moved a bit");
+    // the host's fmaf chains of the two groups, then (p0 + p1) + shared: the contract's order
+    let gs = glm_p2_moe::group_split(d.experts);
+    assert_eq!(gs, 144);
+    let mut host = vec![0f32; rows * d.hidden];
+    for row in 0..rows {
+        for j in 0..d.hidden {
+            let (mut p0, mut p1) = (0f32, 0f32);
+            for k in 0..d.topk {
+                let p = row * d.topk + k;
+                if !valid(pick[p], &d) {
+                    continue;
+                }
+                let w = f16_to_f64(wts[p]) as f32;
+                let y = whole.y[p * d.hidden + j];
+                if (pick[p] as usize) < gs {
+                    p0 = w.mul_add(y, p0);
+                } else {
+                    p1 = w.mul_add(y, p1);
+                }
+            }
+            host[row * d.hidden + j] = (p0 + p1) + shared[row * d.hidden + j];
+        }
+    }
+    let bad = host.iter().zip(&whole.out).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    assert_eq!(bad, 0, "{bad} values of the P2 combine differ from the host's two-group chains");
+    eprintln!("the two-group combine: Own(0) + Own(1) -> Parts == Both == the host's chains, {rows} rows (a quarter of the slots unrouted)");
+}
+
+/// A layer of `d.experts` experts as subbanks, one per id set of `parts` (which together cover every expert once): each bank from the
+/// groups of its own experts in `src` (gate, up, down of a whole layer: expert `e` of `src[i]` is global expert `e`).
+fn subbanks_of(d: MoeDims, parts: &[(Vec<u32>, &[Vec<LoadedGroup>; 3])]) -> MoeSubbanks {
+    let mut banks = Vec::new();
+    for (ids, g) in parts {
+        let pick = |v: &[LoadedGroup]| -> Vec<LoadedGroup> { ids.iter().map(|&e| v[e as usize].clone()).collect() };
+        let o = ExpertOwnership::from_ids(d.experts, ids.clone()).unwrap();
+        banks.push(MoeExperts::from_groups_owned(&pick(&g[0]), &pick(&g[1]), &pick(&g[2]), d, o).unwrap());
+    }
+    MoeSubbanks::new(d, ExpertOwnership::all(d.experts), banks).unwrap()
+}
+
+/// [`run`] for a layer of subbanks (always P2).
+fn run_sub(
+    sb: &MoeSubbanks,
+    st: &Stream,
+    s: &mut PrefillScratch,
+    os: &mut OwnScratch,
+    xh: &[u16],
+    pick: &[i32],
+    wts: &[u16],
+    shared: &[f32],
+    rows: usize,
+    chunk: usize,
+) -> Run {
+    let d = sb.dims;
+    let (mut out, mut y) = (Vec::new(), Vec::new());
+    let mut at = 0;
+    while at < rows {
+        let n = chunk.min(rows - at);
+        s.set_picks(&pick[at * d.topk..(at + n) * d.topk], &wts[at * d.topk..(at + n) * d.topk]).unwrap();
+        let x = up(&xh[at * d.hidden..(at + n) * d.hidden]);
+        let sh = up(&shared[at * d.hidden..(at + n) * d.hidden]);
+        let mut o = DevBuf::zeroed(n * d.hidden * 4).unwrap();
+        glm_p2_moe::run_subbanks(sb, &x, Dtype::F16, n, Some(&sh), &mut o, s, os, st).unwrap();
+        st.sync().unwrap();
+        out.extend(o.to_vec::<f32>().unwrap());
+        let mut yy = vec![0f32; n * d.topk * d.hidden];
+        s.y_pairs.download_range(0, &mut yy).unwrap();
+        y.extend(yy);
+        at += n;
+    }
+    Run { out, y }
+}
+
+/// The partitions of the 288 experts the subbank tests use: scattered thirds, a skewed 1 + 287, eight interleaved, and the cut of the
+/// combine's two groups (143 / 144) with a third bank of the experts around it.
+fn partitions(e: usize) -> Vec<(&'static str, Vec<Vec<u32>>)> {
+    let by = |n: usize, f: &dyn Fn(u32) -> usize| -> Vec<Vec<u32>> {
+        let mut v = vec![Vec::new(); n];
+        for g in 0..e as u32 {
+            v[f(g)].push(g);
+        }
+        v.into_iter().filter(|x| !x.is_empty()).collect()
+    };
+    vec![
+        ("scattered thirds", by(3, &|g| (g as usize * 7 + g as usize / 5) % 3)),
+        ("1 + 287", by(2, &|g| (g == 200) as usize)),
+        ("eight interleaved", by(8, &|g| g as usize % 8)),
+        ("the 143/144 cut", by(3, &|g| if (140..148).contains(&g) { 2 } else { (g as usize >= 144) as usize })),
+    ]
+}
+
+#[test]
+fn p2_per_subbank_equals_p2_single_bank() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(288);
+    let lay = synth_layer(d, 2, 2, 21, true);
+    let groups = lay.groups.as_ref().unwrap();
+    let max = 300;
+    let mut s = PrefillScratch::new(&d, max).unwrap();
+    let mut os = OwnScratch::new(&d, max).unwrap();
+    for (name, parts) in partitions(d.experts) {
+        let sb = subbanks_of(d, &parts.iter().map(|ids| (ids.clone(), groups)).collect::<Vec<_>>());
+        assert_eq!(sb.banks().len(), parts.len());
+        let mut cases = 0;
+        for (si, &style) in [Style::Uniform, Style::Holes, Style::Skewed, Style::Sparse].iter().enumerate() {
+            for rows in [1usize, 16, 129, 300] {
+                let mut r = Rng(900 + 17 * si as u64 + rows as u64);
+                let xh = activations(&mut r, rows, d.hidden, 1.5);
+                let (pick, wts) = make_picks(&mut r, style, rows, d.experts, d.topk);
+                let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+                let want = run(&lay.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(glm_p2_moe::DEFAULT_ORDER));
+                s.poison(0xa5, &st).unwrap();
+                let r0 = glm_p2_moe::runs();
+                let got = run_sub(&sb, &st, &mut s, &mut os, &xh, &pick, &wts, &shared, rows, rows);
+                // the audit counts one P2 expert block a call, not one a subbank
+                assert_eq!(glm_p2_moe::runs() - r0, 1, "{name}: P2 expert blocks counted for one layer call");
+                assert_same(&format!("{name} {style:?} {rows} rows, one call"), &got, &want, &d, &pick);
+                cases += 1;
+                // the same rows in calls of other widths
+                for chunk in [1usize, 16, 129] {
+                    if chunk >= rows || (chunk == 1 && rows > 16) {
+                        continue;
+                    }
+                    let got = run_sub(&sb, &st, &mut s, &mut os, &xh, &pick, &wts, &shared, rows, chunk);
+                    assert_same(&format!("{name} {style:?} {rows} rows in calls of {chunk}"), &got, &want, &d, &pick);
+                    cases += 1;
+                }
+            }
+        }
+        eprintln!(
+            "{name} ({} subbanks): P2 per subbank == P2 single bank, bit for bit ({cases} cases: 4 routing styles x 1/16/129/300 rows x call widths)",
+            parts.len()
+        );
+    }
+}
+
+/// Subbanks of DIFFERENT widths (gate/up 2, 3 and 4 bits; down 3, 2 and 4): every valid pair's y is the y of a uniform bank of its
+/// expert's widths (the three uniform layers run whole, the pair taken from the one that holds its expert), and the row's out is the one
+/// combine over those pairs. Includes unrouted picks (-1, 289).
+#[test]
+fn p2_mixed_width_subbanks_equal_the_uniform_banks_they_are_made_of() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(288);
+    let widths = [(2usize, 3usize), (3, 2), (4, 4)];
+    let lays: Vec<Layer> = widths.iter().enumerate().map(|(i, &(g, dn))| synth_layer(d, g, dn, 31 + i as u64, true)).collect();
+    let of = |e: usize| (e * 7 + e / 5) % 3;
+    let mut parts: Vec<Vec<u32>> = vec![Vec::new(); 3];
+    for e in 0..d.experts {
+        parts[of(e)].push(e as u32);
+    }
+    let sb = subbanks_of(d, &(0..3).map(|i| (parts[i].clone(), lays[i].groups.as_ref().unwrap())).collect::<Vec<_>>());
+    assert_eq!(sb.banks().len(), 3);
+    let keys: Vec<_> = sb.banks().iter().map(|b| b.subbank_key()).collect();
+    assert!(keys.windows(2).all(|w| w[0] != w[1]), "three different widths: {keys:?}");
+    let max = 300;
+    let mut s = PrefillScratch::new(&d, max).unwrap();
+    let mut os = OwnScratch::new(&d, max).unwrap();
+    for (si, &style) in [Style::Uniform, Style::Holes, Style::Skewed, Style::Sparse].iter().enumerate() {
+        for rows in [1usize, 16, 129, 300] {
+            let mut r = Rng(1500 + 17 * si as u64 + rows as u64);
+            let xh = activations(&mut r, rows, d.hidden, 1.5);
+            let (pick, wts) = make_picks(&mut r, style, rows, d.experts, d.topk);
+            let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+            let uniform: Vec<Run> = lays
+                .iter()
+                .map(|l| run(&l.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(glm_p2_moe::DEFAULT_ORDER)))
+                .collect();
+            // the composite pair buffer: each valid pair from the uniform layer that holds its expert; the combine over it
+            let mut y = vec![f32::NAN; rows * d.topk * d.hidden];
+            for (p, &e) in pick.iter().enumerate().filter(|(_, &e)| valid(e, &d)) {
+                let rg = p * d.hidden..(p + 1) * d.hidden;
+                y[rg.clone()].copy_from_slice(&uniform[of(e as usize)].y[rg]);
+            }
+            let mut o = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+            glm_p2_moe::combine_dims(
+                CombineMode::Both,
+                &up(&y),
+                &up(&pick),
+                &up(&wts),
+                Some(&up(&shared)),
+                None,
+                &mut o,
+                rows,
+                &d,
+                &st,
+            )
+            .unwrap();
+            st.sync().unwrap();
+            let want = Run { out: o.to_vec::<f32>().unwrap(), y };
+            s.poison(0x5a, &st).unwrap();
+            let got = run_sub(&sb, &st, &mut s, &mut os, &xh, &pick, &wts, &shared, rows, rows);
+            assert_same(&format!("mixed widths {style:?} {rows} rows"), &got, &want, &d, &pick);
+            for chunk in [16usize, 129] {
+                if chunk < rows {
+                    let got = run_sub(&sb, &st, &mut s, &mut os, &xh, &pick, &wts, &shared, rows, chunk);
+                    assert_same(&format!("mixed widths {style:?} {rows} rows in calls of {chunk}"), &got, &want, &d, &pick);
+                }
+            }
+        }
+    }
+    eprintln!("mixed-width subbanks (gate/up 2/3/4 bits, down 3/2/4): every pair is the uniform bank's, the out is the one combine, bit for bit");
+}
+
+#[test]
+fn a_layer_of_subbanks_the_p2_gemms_do_not_take_is_refused_by_name() {
+    gpu!();
+    let d = MoeDims { hidden: 128, inter: 128, experts: 16, topk: 8, scale: 2.5, limit: 10.0 };
+    let mk = |bits: usize, seed: u64| synth_layer(d, bits, bits, seed, true);
+    // 6-bit experts: no P2 kernel; the supported subbanks of the same layer are
+    let (a, b) = (mk(2, 1), mk(6, 2));
+    fn parts(l: &Layer, ids: Vec<u32>) -> (Vec<u32>, &[Vec<LoadedGroup>; 3]) {
+        (ids, l.groups.as_ref().unwrap())
+    }
+    let sb = subbanks_of(d, &[parts(&a, (0..8).collect()), parts(&b, (8..16).collect())]);
+    let why = glm_p2_moe::supported_subbanks(&sb).unwrap_err();
+    assert!(why.contains("subbank 1") && why.contains("6/6/6"), "{why}");
+    let st = Stream::new().unwrap();
+    let mut s = PrefillScratch::new(&d, 16).unwrap();
+    let mut os = OwnScratch::new(&d, 16).unwrap();
+    let x = DevBuf::zeroed(16 * d.hidden * 2).unwrap();
+    let mut o = DevBuf::zeroed(16 * d.hidden * 4).unwrap();
+    assert!(glm_p2_moe::run_subbanks(&sb, &x, Dtype::F16, 16, None, &mut o, &mut s, &mut os, &st).is_err());
+    // a rank's share (not every expert) is the tensor-parallel path's, not this one
+    let c = mk(2, 3);
+    let own = ExpertOwnership::from_ids(16, (0..8).collect()).unwrap();
+    let g = c.groups.as_ref().unwrap();
+    let ids: Vec<usize> = (0..8).collect();
+    let pk = |v: &Vec<LoadedGroup>| -> Vec<LoadedGroup> { ids.iter().map(|&e| v[e].clone()).collect() };
+    let half = MoeSubbanks::new(
+        d,
+        own.clone(),
+        vec![MoeExperts::from_groups_owned(&pk(&g[0]), &pk(&g[1]), &pk(&g[2]), d, own).unwrap()],
+    )
+    .unwrap();
+    assert!(glm_p2_moe::supported_subbanks(&half).is_ok());
+    assert!(glm_p2_moe::run_subbanks(&half, &x, Dtype::F16, 16, None, &mut o, &mut s, &mut os, &st).is_err());
+    eprintln!("refused by name: {why}");
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// One timed call of the experts (`path`: None P1's large-row path, Some(order) P2), after a 256 MiB memset (cold L2); with `stages`, a
+/// sync after each P2 stage and its host time recorded by name.
+fn timed(
+    ex: &MoeExperts,
+    x: &DevBuf,
+    sh: &DevBuf,
+    out: &mut DevBuf,
+    s: &mut PrefillScratch,
+    rows: usize,
+    path: Option<Order>,
+    flush: &mut DevBuf,
+    it: usize,
+    st: &Stream,
+    stages: Option<&mut std::collections::BTreeMap<&'static str, Vec<f64>>>,
+) -> f64 {
+    flush.memset_async(it as u8, st).unwrap();
+    st.sync().unwrap();
+    let t = std::time::Instant::now();
+    match path {
+        None => ex.run_prefill(x, Dtype::F16, rows, Some(sh), out, s, st).unwrap(),
+        Some(ord) => match stages {
+            None => glm_p2_moe::run_with(ex, x, Dtype::F16, rows, Some(sh), out, s, ord, st, &mut |_| Ok(())).unwrap(),
+            Some(per) => {
+                let mut last = std::time::Instant::now();
+                glm_p2_moe::run_with(ex, x, Dtype::F16, rows, Some(sh), out, s, ord, st, &mut |name| {
+                    st.sync()?;
+                    let now = std::time::Instant::now();
+                    per.entry(name).or_default().push(now.duration_since(last).as_secs_f64() * 1e3);
+                    last = now;
+                    Ok(())
+                })
+                .unwrap()
+            }
+        },
+    }
+    st.sync().unwrap();
+    t.elapsed().as_secs_f64() * 1e3
+}
+
+/// ms a layer, P1's large-row path against P2 (both orders), 288 experts, uniform routing (REXL3_P2M_BITS, REXL3_P2M_ROWS override the
+/// widths and row counts), median of 5 after a warm-up; the P2 stages from a separate staged run.
+#[test]
+#[ignore]
+fn bench_p2_experts_against_p1() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let mut flush = DevBuf::alloc(256 << 20).unwrap();
+    let widths: Vec<usize> = match std::env::var("REXL3_P2M_BITS") {
+        Ok(v) => v.split(',').map(|b| b.parse().unwrap()).collect(),
+        Err(_) => vec![2, 3],
+    };
+    let row_list: Vec<usize> = match std::env::var("REXL3_P2M_ROWS") {
+        Ok(v) => v.split(',').map(|b| b.parse().unwrap()).collect(),
+        Err(_) => vec![512, 1024, 2048, 4096],
+    };
+    let d = glm_dims(288);
+    for &bits in &widths {
+        let lay = synth_layer(d, bits, bits, 9 + bits as u64, false);
+        let ex = &lay.ex;
+        let mut s = PrefillScratch::new(&d, *row_list.iter().max().unwrap()).unwrap();
+        for &rows in &row_list {
+            let mut r = Rng(rows as u64);
+            let xh = activations(&mut r, rows, d.hidden, 1.5);
+            let (pick, wts) = make_picks(&mut r, Style::Uniform, rows, d.experts, d.topk);
+            let x = up(&xh);
+            let sh = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+            let mut out = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+            s.set_picks(&pick, &wts).unwrap();
+            let flop = 2.0 * 3.0 * (d.hidden * d.inter) as f64 * (rows * d.topk) as f64;
+            let med = |path: Option<Order>, out: &mut DevBuf, s: &mut PrefillScratch, flush: &mut DevBuf| -> f64 {
+                median((0..6).map(|it| timed(ex, &x, &sh, out, s, rows, path, flush, it, &st, None)).skip(1).collect())
+            };
+            let t1 = med(None, &mut out, &mut s, &mut flush);
+            let mut line = format!("{bits}-bit rows {rows:4}: P1 {t1:7.2} ms {:5.1} TF", flop / t1 / 1e9);
+            let shapes: Vec<(i32, i32)> = match std::env::var("REXL3_P2M_SHAPES") {
+                Ok(v) => v
+                    .split(',')
+                    .map(|p| {
+                        let (a, b) = p.split_once('/').unwrap();
+                        (a.parse().unwrap(), b.parse().unwrap())
+                    })
+                    .collect(),
+                Err(_) => vec![(0, 0)],
+            };
+            for (&ord, &(gu, dn)) in ORDERS.iter().flat_map(|o| shapes.iter().map(move |sh| (o, sh))) {
+                glm_p2_moe::set_shapes(gu, dn);
+                let tp = med(Some(ord), &mut out, &mut s, &mut flush);
+                let mut per = std::collections::BTreeMap::new();
+                for it in 0..4 {
+                    timed(ex, &x, &sh, &mut out, &mut s, rows, Some(ord), &mut flush, it, &st, Some(&mut per));
+                }
+                let st_txt: Vec<String> = per.into_iter().map(|(k, v)| format!("{k} {:.2}", median(v))).collect();
+                line += &format!(
+                    " | P2 {} shape {gu}/{dn} {tp:7.2} ms {:5.1} TF x{:.2} [{}]",
+                    if ord == Order::Chain { "chain" } else { "fold" },
+                    flop / tp / 1e9,
+                    t1 / tp,
+                    st_txt.join(", ")
+                );
+            }
+            glm_p2_moe::set_shapes(0, 0);
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// The golden of the P2 experts (`testdata/gpu/golden_glm_p2_moe.txt`, scripts/gpu_gate.sh): hashes of y and out in both K orders on
+/// synthetic layers at the GLM widths and the packs' bit widths, at row counts that are and are not multiples of a tile; committed so
+/// that a change that moves a P2 expert bit shows up in the gate (and `glm_p2_moe::ARITH_ID` must change with it).
+#[test]
+#[ignore]
+fn golden_glm_p2_moe_hashes() {
+    gpu!();
+    let path = std::env::var("REXL3_GOLDEN_OUT").expect("REXL3_GOLDEN_OUT");
+    let st = Stream::new().unwrap();
+    let hash = |v: &[f32]| gb_exl3::fnv1a(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
+    let mut lines = vec![format!("arith {} default {:?}", glm_p2_moe::ARITH_ID, glm_p2_moe::DEFAULT_ORDER)];
+    for (li, &(bg, bd)) in [(2usize, 2usize), (3, 3), (4, 4), (5, 4)].iter().enumerate() {
+        let d = glm_dims(48);
+        let lay = synth_layer(d, bg, bd, 70 + li as u64, false);
+        let ex = &lay.ex;
+        for rows in [1usize, 37, 300] {
+            let mut r = Rng(800 + li as u64 * 10 + rows as u64);
+            let xh = activations(&mut r, rows, d.hidden, 1.5);
+            let (pick, wts) = make_picks(&mut r, Style::Holes, rows, d.experts, d.topk);
+            let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+            let mut s = PrefillScratch::new(&d, rows).unwrap();
+            for &o in &ORDERS {
+                let got = run(ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+                let yv: Vec<f32> = pick
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &e)| valid(e, &d))
+                    .flat_map(|(p, _)| got.y[p * d.hidden..(p + 1) * d.hidden].to_vec())
+                    .collect();
+                lines.push(format!(
+                    "p2m {} {bg}/{bd}-bit E=48 rows={rows} y {:016x} out {:016x}",
+                    o.id(),
+                    hash(&yv),
+                    hash(&got.out)
+                ));
+            }
+        }
+    }
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    eprintln!("wrote {} golden lines to {path}", lines.len());
+}

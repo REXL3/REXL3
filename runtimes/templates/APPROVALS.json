@@ -1,5 +1,11 @@
 {
   "approvals": {
+    "deepseek-v4.1/deepseek-v4.1-flash-1017/v1": {
+      "approval_sha256": "2485106e16499278c95c49c846992018e1c5eb227b738ae0a2e37fb8cf649d73",
+      "runtime_id": "dsv41-flash-1017-sage-1.55",
+      "source_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
+      "source_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8"
+    },
     "glm-5.3/glm-5.3-flash/v1": {
       "approval_sha256": "7d1cca67cc1d39871eabc9c786530dda50719c96339a2ee9d1ad3dcafc39492f",
       "runtime_id": "glm53-flash-2.25bpw-sm121",

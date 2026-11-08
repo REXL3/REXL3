@@ -205,6 +205,41 @@ class CorrespondingSourceSealTest(unittest.TestCase):
         identity = source_identity.validate_bound_archive(self.f.engine_source_asset, commit=commit, tree=tree, asset=asset)
         self.assertEqual(identity['projection']['external_test_dependencies'], [review])
 
+    def test_the_root_check_config_and_the_switch_registry_ship_with_the_engine_source(self):
+        # REXL3/REXL3#84: cargo fmt --check on the exported source reads rustfmt.toml, and two engine tests read
+        # tools/switch_registry.json; both ship in the archive when the commit has them, and the consumer accepts it.
+        repo = self.f.repo
+        write(repo, 'rustfmt.toml', b'max_width = 130\n')
+        write(repo, 'tools/switch_registry.json', b'{"schema": "synthetic"}\n')
+        policy = e.loads((repo / exporter.INPUTS).read_bytes())
+        policy['files'] = sorted(policy['files'] + ['tools/switch_registry.json'])
+        (repo / exporter.INPUTS).write_bytes(exporter.canonical(policy))
+        self.f.git('add', '.')
+        self.f.git('commit', '-qm', 'synthetic root check config and switch registry')
+        commit, tree = self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+        source = exporter.inspect_source(repo, commit)
+        self.assertEqual(source['blockers'], [])
+        self.f.engine_source_asset.write_bytes(exporter.archive_bytes(source))
+        shipped = members(self.f.engine_source_asset)
+        self.assertEqual(shipped['rustfmt.toml'][1], b'max_width = 130\n')
+        self.assertIn('tools/switch_registry.json', shipped)
+        asset = e.asset_record(self.f.engine_source_asset, e.inspect_archive(self.f.engine_source_asset))
+        source_identity.validate_bound_archive(self.f.engine_source_asset, commit=commit, tree=tree, asset=asset)
+        # rustfmt.toml is optional and adds no projection metadata: the archive of a commit without it (the fixture's
+        # original commit) still validates byte for byte.
+        self.assertNotIn('rustfmt.toml', self.original)
+        # Before the fix the exporter refused the listed registry and dropped rustfmt.toml.
+        with patch.object(exporter, 'EXTRA_INPUTS', ('tools/dashboard_check.py', 'dashboard/panels.json')):
+            with self.assertRaisesRegex(exporter.SourceError, 'input_outside_projection'):
+                exporter.inspect_source(repo, commit)
+        with patch.object(exporter, 'CHECK_CONFIG', ()):
+            policy['files'].remove('tools/switch_registry.json')
+            (repo / exporter.INPUTS).write_bytes(exporter.canonical(policy))
+            self.f.git('commit', '-qam', 'synthetic registry unlisted')
+            old = exporter.archive_bytes(exporter.inspect_source(repo, self.f.git('rev-parse', 'HEAD')))
+            self.f.engine_source_asset.write_bytes(old)
+            self.assertNotIn('rustfmt.toml', members(self.f.engine_source_asset))
+
     def test_committed_instruction_forgery_is_not_a_trusted_template(self):
         (self.f.repo / exporter.TEMPLATE).write_bytes(b'SYNTHETIC untrusted build instructions\n')
         self.f.git('add', '.')

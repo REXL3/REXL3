@@ -194,6 +194,17 @@ class EngineByReference(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'does not name the native engine version and commit'):
                 self.seal(engine_release_tag=tag)
 
+    def test_dev_engine_tags_are_valid_tags_and_nothing_looser_is(self):
+        # A development engine version ("0.1.1-dev") names its release 'engine-v0.1.1-dev-<commit8>'.
+        for tag in ('engine-v0.1.1-dev-2067531c', 'engine-v0.1.1-2067531c', 'engine-v10.20.30-dev-00000000'):
+            with self.subTest(tag=tag):
+                self.assertTrue(e.ENGINE_TAG.fullmatch(tag))
+        for tag in ('engine-v0.1.1-dev', 'engine-v0.1.1-dev-', 'engine-v0.1.1-dev-2067531', 'engine-v0.1.1-dev-2067531C',
+                    'engine-v0.1.1-dev-dev-2067531c', 'engine-v0.1.1-rc1-2067531c', 'engine-v0.1.1-devel-2067531c',
+                    'engine-v0.1.1-dev-2067531c-qwen', 'engine-v0.1.1-dev-2067531c\n', 'Engine-v0.1.1-dev-2067531c'):
+            with self.subTest(tag=tag):
+                self.assertIsNone(e.ENGINE_TAG.fullmatch(tag))
+
     def test_approval_mutations_after_the_seal_are_refused(self):
         def edit(path, value):
             return lambda engine: engine['bin/rexl3-serve'].__setitem__(path, value)

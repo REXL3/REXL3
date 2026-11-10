@@ -44,6 +44,55 @@ STABLE_IDENTITY_KEYS = ('model_lock_sha256', 'runtime_id', 'profile', 'pack',
 # Gates that a T2 (gate-scoped) re-run must always execute on the new build; they
 # can never be carried forward (owner decision D40, review N2).
 RERUN_ONLY_GATES = ('exactness', 'prefix_cache')
+# Reviewed runtime-id aliases: {(target runtime_id, profile choice): source runtime_id}, mirrored from dev
+# tools/release_evidence.py. A carried gate's raw evidence (and its source approval's registry entry) that names the
+# source runtime_id is the target choice itself under its earlier id. The one pair is the tp1/tp2 entry split
+# (REXL3/REXL3-dev#239): glm53-flash-tp2-1m moved from glm53-flash-2.25bpw-sm121 to its own entry with the same choice,
+# pack, model lock, cluster config and argv. Every other identity key must still match exactly.
+#
+# The SAGE naming rename (REXL3/REXL3-dev#333) gave both GLM-5.3-Flash 2.25 entries the convention's runtime ids
+# (glm53-flash-sage-2.25, glm53-flash-tp2-sage-2.25); both choices were sealed in v0.1.0 under
+# glm53-flash-2.25bpw-sm121, so both map there. The tp2 entry's interim id stays listed.
+RUNTIME_ID_ALIASES = {
+    ('glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-tp2-1m'): 'glm53-flash-2.25bpw-sm121',
+    ('glm53-flash-sage-2.25', 'glm53-flash-single'): 'glm53-flash-2.25bpw-sm121',
+    ('glm53-flash-tp2-sage-2.25', 'glm53-flash-tp2-1m'): 'glm53-flash-2.25bpw-sm121',
+}
+# Reviewed pack-repo renames: {current repo: earlier repo}, mirrored from dev. A Hugging Face repo move keeps the
+# revision and every file, so a carried gate's lock may name the earlier repo. The effective-model-lock comparison
+# (rule A) maps the target lock's repo back through this table and then requires the pack records to be identical:
+# revision, fingerprint, licence and every file's sha256 and size. Nothing else is aliased.
+PACK_REPO_ALIASES = {
+    'r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw': 'r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121',
+}
+
+
+def unalias_pack_repos(lock):
+    """A copy of a parsed model.lock.json whose pack records name their earlier repo (PACK_REPO_ALIASES)."""
+    if not isinstance(lock, dict) or not isinstance(lock.get('packs'), dict):
+        return lock
+    packs = {}
+    for role, record in lock['packs'].items():
+        if isinstance(record, dict) and record.get('repo') in PACK_REPO_ALIASES:
+            record = dict(record, repo=PACK_REPO_ALIASES[record['repo']])
+        packs[role] = record
+    return dict(lock, packs=packs)
+
+
+def source_candidates(entries, runtime_id, profile, spec):
+    """Registry entries that may be a carried gate's source approval: the target's runtime_id (or its listed alias for
+    this profile choice) at the provenance's source commit and tree."""
+    return [entry for entry in entries.values()
+            if isinstance(entry, dict)
+            and same_runtime_id(entry.get('runtime_id'), dict(runtime_id=runtime_id, profile=profile))
+            and entry.get('source_commit') == spec['source_engine_commit']
+            and entry.get('source_tree') == spec['source_engine_tree']]
+
+
+def same_runtime_id(source_runtime_id, expected):
+    """The source's runtime_id is the target's, or its listed alias for this exact profile choice."""
+    return (source_runtime_id == expected['runtime_id']
+            or RUNTIME_ID_ALIASES.get((expected['runtime_id'], expected['profile'])) == source_runtime_id)
 # Effective model lock (D40 rule A): a carried gate binds only the lock pack records
 # its choice fetches (the choice's pack role, plus ``draft`` when its argv drafts),
 # not the whole model.lock.json file. A lock that only gains a role another choice
@@ -73,7 +122,7 @@ MAX_FILES, MAX_BYTES, MAX_FILE_BYTES = 10000, 8 * 1024**3, 2 * 1024**3
 MAX_JSON_BYTES = 16 * 1024**2
 # Native executables a runtime may take from an engine release instead of carrying them in its bundle.
 ENGINE_PATHS = ('bin/rexl3-serve', 'bin/rexl3-cluster')
-ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\Z')
+ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+(-dev)?-[0-9a-f]{8}\Z')
 
 
 def require(condition, message):
@@ -259,8 +308,8 @@ def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files):
     cross = 'source_profile' in source
     lock_changed = raw['model_lock_sha256'] != expected['model_lock_sha256']
     if not cross:
-        require(all(raw[k] == expected[k] for k in STABLE_IDENTITY_KEYS if k != 'model_lock_sha256'),
-                'raw evidence identity drift')
+        require(all(raw[k] == expected[k] for k in STABLE_IDENTITY_KEYS if k not in ('model_lock_sha256', 'runtime_id'))
+                and same_runtime_id(raw['runtime_id'], expected), 'raw evidence identity drift')
         # profile_sha256 is checked liberally for a carried gate: an exact match, or
         # an effective-profile digest match (splitting a profile file without changing
         # the choice itself keeps the earlier Q200 receipt valid).
@@ -275,7 +324,8 @@ def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files):
         roles = choice_lock_roles(choice)
         require(roles[0] == expected['pack'], 'target choice pack role differs from the receipt identity')
         source_lock = _source_lock(root, source, raw, target_lock, expected)
-        require(lock_digest(source_lock, roles) == lock_digest(target_lock, roles),
+        require(lock_digest(source_lock, roles) in (lock_digest(target_lock, roles),
+                                                    lock_digest(unalias_pack_repos(target_lock), roles)),
                 'effective model lock differs: a pack record this choice fetches (%s) changed' % ', '.join(roles))
         return
     # Rule B1: a quality/context gate carried from another choice of the same entry.
@@ -1407,11 +1457,7 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
             for gate, spec in carried.items():
                 require(spec['source_engine_commit'] != expected['engine_commit'],
                         'carried gate source must name an earlier engine build than the target: ' + gate)
-                candidates = [entry for entry in entries.values()
-                              if isinstance(entry, dict)
-                              and entry.get('runtime_id') == doc['runtime_id']
-                              and entry.get('source_commit') == spec['source_engine_commit']
-                              and entry.get('source_tree') == spec['source_engine_tree']]
+                candidates = source_candidates(entries, doc['runtime_id'], expected['profile'], spec)
                 require(candidates,
                         'carried gate source approval not pinned in the trusted registry: ' + gate)
                 source_profile = spec.get('source_profile', expected['profile'])

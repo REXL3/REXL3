@@ -34,6 +34,14 @@
     },
     "qwen3.8/qwen3.8-flash-next/v2": {
       "approval_sha256": "fdbd312cbf6d7345bbb61c9c803d11771933511ed332b3218e1630ac50b7ab2e",
+      "binary_sha256": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318",
+      "profiles": {
+        "qwen38-flash-next-single-262k": {
+          "receipt": {
+            "sha256": "1d157da6f643a376d3b3338aa91c54a9d23aa71210c242ad0b0420f39fe2ee1d"
+          }
+        }
+      },
       "runtime_id": "qwen38-flash-next-exl3-3.05",
       "source_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
       "source_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8"

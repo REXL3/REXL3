@@ -73,7 +73,7 @@ MAX_FILES, MAX_BYTES, MAX_FILE_BYTES = 10000, 8 * 1024**3, 2 * 1024**3
 MAX_JSON_BYTES = 16 * 1024**2
 # Native executables a runtime may take from an engine release instead of carrying them in its bundle.
 ENGINE_PATHS = ('bin/rexl3-serve', 'bin/rexl3-cluster')
-ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\Z')
+ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+(-dev)?-[0-9a-f]{8}\Z')
 
 
 def require(condition, message):

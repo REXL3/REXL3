@@ -186,7 +186,8 @@ class EngineByReference(unittest.TestCase):
 
     def test_release_tag_names_the_engine_not_a_model_and_matches_the_native_identity(self):
         for tag in ('qwen38-27b-dflash2-exl3-4.00', 'engine-v0.1.2', 'engine-v0.1.2-4208D848', 'engine-v0.1.2-4208d84',
-                    'engine-v0.1.2-4208d848-qwen', 'prod/synthetic-demo/v1', 'Engine-v0.1.2-4208d848', ''):
+                    'engine-v0.1.2-4208d848-qwen', 'prod/synthetic-demo/v1', 'Engine-v0.1.2-4208d848',
+                    'engine-v0.1.1-dev-2067531c', 'engine-v10.20.30-dev-00000000', ''):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'invalid engine release tag'):
                 self.seal(engine_release_tag=tag)
         # well formed, but not this engine's version/commit
@@ -194,16 +195,25 @@ class EngineByReference(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'does not name the native engine version and commit'):
                 self.seal(engine_release_tag=tag)
 
-    def test_dev_engine_tags_are_valid_tags_and_nothing_looser_is(self):
-        # A development engine version ("0.1.1-dev") names its release 'engine-v0.1.1-dev-<commit8>'.
-        for tag in ('engine-v0.1.1-dev-2067531c', 'engine-v0.1.1-2067531c', 'engine-v10.20.30-dev-00000000'):
+    def test_stable_engine_tags_are_valid_tags_and_nothing_looser_is(self):
+        for tag in ('engine-v0.1.1-2067531c', 'engine-v10.20.30-00000000'):
             with self.subTest(tag=tag):
                 self.assertTrue(e.ENGINE_TAG.fullmatch(tag))
-        for tag in ('engine-v0.1.1-dev', 'engine-v0.1.1-dev-', 'engine-v0.1.1-dev-2067531', 'engine-v0.1.1-dev-2067531C',
+        for tag in ('engine-v0.1.1-dev', 'engine-v0.1.1-dev-', 'engine-v0.1.1-dev-2067531',
+                    'engine-v0.1.1-dev-2067531c', 'engine-v0.1.1-dev-2067531C', 'engine-v10.20.30-dev-00000000',
                     'engine-v0.1.1-dev-dev-2067531c', 'engine-v0.1.1-rc1-2067531c', 'engine-v0.1.1-devel-2067531c',
                     'engine-v0.1.1-dev-2067531c-qwen', 'engine-v0.1.1-dev-2067531c\n', 'Engine-v0.1.1-dev-2067531c'):
             with self.subTest(tag=tag):
                 self.assertIsNone(e.ENGINE_TAG.fullmatch(tag))
+
+    def test_prerelease_native_version_is_refused_for_an_engine_release(self):
+        release = copy.deepcopy(self.f.release)
+        release['version'] = release['native_version_fields']['version'] = '0.1.1-dev'
+        stripped = {k: v for k, v in self.f.bundle.items() if not k.startswith('bin/')}
+        stripped['release.lock.json'] = encoded(release)
+        self.f.tar(self.stripped, stripped)
+        with self.assertRaisesRegex(ValueError, 'pre-release native engine version refused'):
+            self.seal()
 
     def test_approval_mutations_after_the_seal_are_refused(self):
         def edit(path, value):

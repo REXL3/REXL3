@@ -135,7 +135,7 @@ MAX_FILES, MAX_BYTES, MAX_FILE_BYTES = 10000, 8 * 1024**3, 2 * 1024**3
 MAX_JSON_BYTES = 16 * 1024**2
 # Native executables a runtime may take from an engine release instead of carrying them in its bundle.
 ENGINE_PATHS = ('bin/rexl3-serve', 'bin/rexl3-cluster')
-ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+(-dev)?-[0-9a-f]{8}\Z')
+ENGINE_TAG = re.compile(r'engine-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\Z')
 
 
 def require(condition, message):
@@ -1407,6 +1407,7 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
                             'native ELF/platform/mode mismatch')
     else:
         # The tag names the engine, never a model: engine version and the first eight hex digits of its commit.
+        require('-' not in native['version'], 'pre-release native engine version refused for engine release')
         require({item['release_tag'] for item in engine_binaries.values()} == {'engine-v%s-%s' % (native['version'], commit[:8])},
                 'engine release tag does not name the native engine version and commit')
         engine_binary_files(engine_binaries, engine_dir, platform['machine'])

@@ -103,6 +103,20 @@
       "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
       "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"
     },
+    "nemotron-3.5/nemotron-3.5-super-vl/v2": {
+      "approval_sha256": "bdc5d82c9ca25c447edf428dd6c216312f8f9df740474213f568625dfaf310a3",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "nemotron35-super-vl-single-1m": {
+          "receipt": {
+            "sha256": "c9bc1e7dce5583b8b44b9e0c2277b21fcdfebf1969a98400c011ae3959370095"
+          }
+        }
+      },
+      "runtime_id": "nemotron35-super-vl-sage-3.85",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
     "qwen3.8/qwen3.8-27b/v3": {
       "approval_sha256": "d26800e692a5ac147a774da8505cd36b77a555cfb79414b2329ca923c38441de",
       "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",

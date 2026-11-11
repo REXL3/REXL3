@@ -1,0 +1,20 @@
+{
+  "architectures": [
+    "MiniCPMV4_7ForConditionalGeneration"
+  ],
+  "display_name": "MiniCPM-V-4.7-35B-A3B",
+  "engine_family": "minicpmv4_7",
+  "family": "minicpm-v-4.7",
+  "model": "minicpm-v-4.7-35b-a3b",
+  "pack": {
+    "bits": "6.08",
+    "draft": "dspark",
+    "draft_repo": "r0b0tlab/MiniCPM-V-4.7-35B-A3B-DSpark-EXL3-6.00bpw",
+    "draft_revision": "e1ea1a3045277ea69a108b4d477983affae0f3c1",
+    "format": "exl3",
+    "target_repo": "r0b0tlab/MiniCPM-V-4.7-35B-A3B-EXL3-6.08bpw-REXL3-SAGE",
+    "target_revision": "25b7aa3361dd8e319c7503ebc002947ceb1fd290"
+  },
+  "runtime_id": "minicpmv47-35b-a3b-rexl3-sage-6.08",
+  "schema": "rexl3.prod-model.v1"
+}

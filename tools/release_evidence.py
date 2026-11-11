@@ -52,7 +52,9 @@ RERUN_ONLY_GATES = ('exactness', 'prefix_cache')
 #
 # The SAGE naming rename (REXL3/REXL3-dev#333) gave both GLM-5.3-Flash 2.25 entries the convention's runtime ids
 # (glm53-flash-sage-2.25, glm53-flash-tp2-sage-2.25); both choices were sealed in v0.1.0 under
-# glm53-flash-2.25bpw-sm121, so both map there. The tp2 entry's interim id stays listed.
+# glm53-flash-2.25bpw-sm121, so both map there. The tp2 entry's interim id stays listed. A bit-identity record
+# (rexl3.bit-identity.v1) takes its runtime_id from the source (earlier) receipt, so the same pairs let a record of the
+# sealed build name the earlier id (validate_bit_identity; REXL3/REXL3-dev#343).
 RUNTIME_ID_ALIASES = {
     ('glm53-flash-tp2-2.25bpw-sm121', 'glm53-flash-tp2-1m'): 'glm53-flash-2.25bpw-sm121',
     ('glm53-flash-sage-2.25', 'glm53-flash-single'): 'glm53-flash-2.25bpw-sm121',
@@ -108,7 +110,8 @@ FULL_WINDOW_MARGIN = 512
 CARRIED_SOURCE_KEYS = frozenset({'source_engine_commit', 'source_engine_tree', 'source_binary_sha256',
                                  'source_receipt_sha256', 'rerun_gates'})
 CARRIED_SOURCE_OPTIONAL = frozenset({'source_model_lock', 'source_profile', 'source_runtime_id',
-                                     'source_identity_receipt', 'source_bundle', 'source_bit_identity'})
+                                     'source_identity_receipt', 'source_bundle', 'source_bit_identity',
+                                     'source_effective_profile'})
 CROSS_CHOICE_KEYS = frozenset({'source_profile', 'source_runtime_id', 'source_identity_receipt'})
 # Unsealed source bundle (D88): a complete, all_pass qualification bundle of an earlier build may be a carry
 # source without a seal, only together with a bit-identity record proving that the target build answers that
@@ -320,7 +323,7 @@ def _source_lock(root, source, raw, target_lock, expected):
     return load_json(path)
 
 
-def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files):
+def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files, target_observation=None):
     """D40 identity rules for one carried gate's raw evidence summary (see validate_gate_evidence)."""
     require(raw.get('gate') == gate, 'raw evidence identity drift')
     require(raw.get('engine_commit') == source['source_engine_commit']
@@ -335,9 +338,12 @@ def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files):
         # profile_sha256 is checked liberally for a carried gate: an exact match, or
         # an effective-profile digest match (splitting a profile file without changing
         # the choice itself keeps the earlier Q200 receipt valid).
-        if raw.get('profile_sha256') != expected['profile_sha256']:
-            require(raw.get('effective_profile_digest') == expected['effective_profile_digest'],
-                    'raw evidence profile drift')
+        if (raw.get('profile_sha256') != expected['profile_sha256']
+                and raw.get('effective_profile_digest') != expected['effective_profile_digest']):
+            # The recorded digest hashes the launch argv/env with their absolute paths, so the same choice launched
+            # from another folder differs there. Fall back to the path-normalised form, recomputed from both
+            # observations against the target choice (path_normalised_profile_digest).
+            _require_same_path_normalised_profile(root, source, raw, expected, runtime_files, target_observation)
         if not lock_changed:
             return
         # Rule A: the whole-file hash differs; the records this choice fetches must not.
@@ -384,6 +390,82 @@ def _validate_carried_raw(gate, raw, *, root, expected, source, runtime_files):
     except ValueError as error:
         raise ValueError('cross-choice carry: the source choice effective profile in the target bundle differs '
                          'from the source receipt (%s)' % error) from None
+
+
+def _require_same_path_normalised_profile(root, source, raw, expected, runtime_files, target_observation):
+    """A same-choice carried gate whose profile file and recorded effective digest both differ (see the caller).
+
+    Accepted only when the provenance pins the source receipt's identity observation (``source_effective_profile``),
+    that observation is the one the raw evidence recorded (every identity key, its resolved configuration hashing to
+    the raw ``effective_profile_digest``), and the source and target observations are both launches of the TARGET
+    profile choice with equal ``path_normalised_profile_digest``: every flag, value, environment entry, context,
+    capability and rank equal, only the absolute locations of the path substitutions and the executable differing.
+    """
+    ref = source.get('source_effective_profile')
+    require(isinstance(ref, dict), 'raw evidence profile drift (the effective profile digest differs and the provenance '
+            'pins no source_effective_profile observation for the path-normalised comparison)')
+    require(runtime_files is not None and target_observation is not None,
+            'raw evidence profile drift (the path-normalised comparison needs the target bundle and observation)')
+    _, _, choice = runtime_documents(runtime_files, expected)
+    path = safe_file(root, relative_path(ref['path']))
+    require(sha256_file(path) == full_hash(ref['sha256']), 'source effective profile observation hash drift')
+    observation = load_json(path)
+    require(isinstance(observation, dict) and all(observation.get(k) == raw[k] for k in IDENTITY_KEYS),
+            'the source effective profile observation does not describe the raw evidence')
+    _validate_observation(observation, {k: raw[k] for k in IDENTITY_KEYS})
+    _validate_observation(target_observation, expected)
+    require(path_normalised_profile_digest(observation, choice) == path_normalised_profile_digest(target_observation, choice),
+            'raw evidence profile drift (the path-normalised effective profile differs)')
+
+
+# Path-normalised effective profile (a digest recomputed from observations, never stored in an identity). The recorded
+# effective_profile_digest (sha256 of the canonical resolved_config) keeps its meaning for every sealed receipt.
+PATH_NORMALISED_SCHEMA = 'rexl3.effective-profile.path-normalised.v1'
+SERVE_EXECUTABLE = '@SERVE_EXECUTABLE@'
+BOOTSTRAP_PATH_VALUE = '@SITE_PATH@'
+
+
+def _path_normalised_value(want, got):
+    """``got`` (an admitted instance of the profile word ``want``) with each PATH_TOKENS substitution put back."""
+    pieces = TOKEN.split(want)
+    match = re.fullmatch(''.join('(.+?)' if i % 2 else re.escape(piece) for i, piece in enumerate(pieces)), got)
+    require(match is not None, 'observed value differs from immutable profile')
+    values = iter(match.groups())
+    out = []
+    for i, piece in enumerate(pieces):
+        if i % 2 == 0:
+            out.append(piece)
+        else:
+            value = next(values)
+            out.append(piece if piece in PATH_TOKENS else value)
+    return ''.join(out)
+
+
+def path_normalised_profile_digest(observation, choice):
+    """``sha256:`` digest of an observation's resolved launch with its absolute folder locations taken out.
+
+    The observation must first be an admitted launch of ``choice`` (``_validate_observed_profile``). Each rank's
+    argv[0] (the executable, whose bytes ``binary_sha256`` pins per rank) becomes ``@SERVE_EXECUTABLE@``; every argv
+    or environment word with a path substitution (``PATH_TOKENS``: model, draft, bundle and state directories) has
+    the token put back; bootstrap path variables (``BOOTSTRAP_PATHS``: HOME, PWD, TMPDIR, _) become ``@SITE_PATH@``.
+    Everything else stays as observed: every flag and literal value, hosts and ports, the other environment, the
+    context, the capabilities and the rank layout. What a path names is bound elsewhere: the model and draft packs by
+    the model lock, the bundle files by the release lock, the executable by its sha256.
+    """
+    _validate_observed_profile(observation, choice)
+    expected = _profile_rank_argv(choice)
+    environment = choice['env']
+    ranks = []
+    for rank in sorted(observation['ranks'], key=lambda r: r['rank']):
+        argv = [SERVE_EXECUTABLE] + [_path_normalised_value(want, got)
+                                     for want, got in zip(expected[rank['rank']], rank['argv'][1:])]
+        env = {key: (_path_normalised_value(environment[key], value) if key in environment
+                     else BOOTSTRAP_PATH_VALUE if key in BOOTSTRAP_PATHS else value)
+               for key, value in rank['env'].items()}
+        ranks.append({'rank': rank['rank'], 'argv': argv, 'env': env})
+    resolved = observation['resolved_config']
+    return canonical_digest({'schema': PATH_NORMALISED_SCHEMA, 'max_context': resolved['max_context'],
+                             'capabilities': resolved['capabilities'], 'ranks': ranks})
 
 
 def identity_matches(doc, expected):
@@ -609,7 +691,7 @@ def _validate_observed_profile(observation, choice):
 
 
 def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incomplete=False,
-                           carried_source=None, runtime_files=None, cases_out=None):
+                           carried_source=None, runtime_files=None, cases_out=None, target_observation=None):
     """One measured-case contract for both imports and final sealing.
 
     Incomplete imports may retain failed executed cases and unexecuted skips;
@@ -675,7 +757,7 @@ def validate_gate_evidence(gate, result, *, evidence_root, expected, allow_incom
                 validate_identity(raw)
                 if carried_source is not None:
                     _validate_carried_raw(gate, raw, root=root, expected=expected, source=carried_source,
-                                          runtime_files=runtime_files)
+                                          runtime_files=runtime_files, target_observation=target_observation)
                 else:
                     require(raw.get('gate') == gate and all(raw.get(k) == expected[k] for k in IDENTITY_KEYS),
                             'raw evidence identity drift')
@@ -721,8 +803,10 @@ def validate_carried_gate_source(source):
     {path, sha256} (rule A: a copy of the source receipt's model.lock.json beneath
     the evidence root), and, all three together, ``source_profile``,
     ``source_runtime_id`` and ``source_identity_receipt`` {path, sha256} (rule B1:
-    the source choice and its identity observation). Without them an entry is
-    validated exactly as before.
+    the source choice and its identity observation), and ``source_effective_profile``
+    {path, sha256} (a same-choice carry whose profile file and recorded effective
+    digest both differ: the source receipt's identity observation, compared
+    path-normalised). Without them an entry is validated exactly as before.
     """
     require(isinstance(source, dict) and CARRIED_SOURCE_KEYS <= set(source)
             and set(source) <= CARRIED_SOURCE_KEYS | CARRIED_SOURCE_OPTIONAL, 'invalid carried-gate provenance')
@@ -732,7 +816,7 @@ def validate_carried_gate_source(source):
     rerun = source['rerun_gates']
     require(isinstance(rerun, list) and all(isinstance(g, str) and g in GATES for g in rerun),
             'invalid rerun_gates in carried-gate provenance')
-    for key in ('source_model_lock', 'source_identity_receipt'):
+    for key in ('source_model_lock', 'source_identity_receipt', 'source_effective_profile'):
         if key in source:
             ref = source[key]
             require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'invalid %s in carried-gate provenance' % key)
@@ -751,6 +835,8 @@ def validate_carried_gate_source(source):
     require(not cross or cross == CROSS_CHOICE_KEYS,
             'cross-choice provenance needs source_profile, source_runtime_id and source_identity_receipt together')
     require(not (bundle and cross), 'a cross-choice carry from an unsealed source bundle is not supported')
+    require(not (cross and 'source_effective_profile' in source),
+            'source_effective_profile is for a same-choice carry (a cross-choice carry pins source_identity_receipt)')
     if cross:
         for key in ('source_profile', 'source_runtime_id'):
             require(isinstance(source[key], str) and ID.fullmatch(source[key]), 'invalid %s in carried-gate provenance' % key)
@@ -764,7 +850,8 @@ def carried_source_files(carried, root=None):
     """
     paths = set()
     for source in (carried or {}).values():
-        for key in ('source_model_lock', 'source_identity_receipt', 'source_bit_identity', 'source_bundle'):
+        for key in ('source_model_lock', 'source_identity_receipt', 'source_effective_profile', 'source_bit_identity',
+                    'source_bundle'):
             if isinstance(source, dict) and isinstance(source.get(key), dict):
                 paths.add(relative_path(source[key]['path']))
         if root is not None and isinstance(source, dict) and isinstance(source.get('source_bundle'), dict):
@@ -949,7 +1036,7 @@ def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
     for gate, result in gates.items():
         source = carried.get(gate) if carried is not None else None
         validate_gate_evidence(gate, result, evidence_root=root, expected=expected,
-                               carried_source=source, runtime_files=runtime_files,
+                               carried_source=source, runtime_files=runtime_files, target_observation=observed,
                                cases_out=exactness_cases if gate == 'exactness' else
                                capability_cases if gate == 'capability' else None)
         require(all(root / relative_path(ref['path']) != path for ref in result['evidence']), 'duplicate/self evidence')
@@ -987,13 +1074,14 @@ def validate_bit_identity(record, *, source, expected):
     """A bit-identity record (``rexl3.bit-identity.v1``) for one carried source bundle.
 
     It names the source bundle (``source_receipt_sha256``), both builds (binary sha256, engine commit and the
-    served ``system_fingerprint``, whose commit prefix must agree), the profile choice and window, and per case the
+    served ``system_fingerprint``, whose commit prefix must agree), the profile choice (under the target's runtime_id
+    or the earlier id ``RUNTIME_ID_ALIASES`` lists for it) and window, and per case the
     request digest and both builds' output digests. Every case must be token-identical, and at least one must be a
     full-window request: prompt within ``BIT_FULL_WINDOW_HEADROOM`` tokens of the window with room for its reply.
     """
     require(isinstance(record, dict) and set(record) == BIT_IDENTITY_KEYS and record['schema'] == BIT_IDENTITY_SCHEMA,
             'bit identity record schema required')
-    require(record['runtime_id'] == expected['runtime_id'] and record['profile'] == expected['profile'],
+    require(same_runtime_id(record['runtime_id'], expected) and record['profile'] == expected['profile'],
             'bit identity record names another runtime or profile')
     require(type(record['window']) is int and record['window'] == expected['effective_max_context'],
             'bit identity record window differs from the target context')

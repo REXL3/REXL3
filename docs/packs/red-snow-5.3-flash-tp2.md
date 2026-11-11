@@ -19,9 +19,9 @@ Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-t
 
 | Profile | Topology | Context window | Slots | Port | Binds | Ready within |
 | --- | --- | --- | --- | --- | --- | --- |
-| `redsnow-tp2-512k` (default, and the only profile) | two nodes, tensor parallel (2 ranks) | 524,288 tokens | 1 | 8952 | `127.0.0.1` on the first node | at most 900 s (`readiness_timeout_s`, a ceiling) after model verification |
+| `redsnow-tp2-512k` (default, and the only profile) | two nodes, tensor parallel (2 ranks) | 524,288 tokens | 1 | 8952 | the leader's `address` from the site file (the profile's `127.0.0.1` default is not used for two nodes; `docs/SETUP.md`) | at most 900 s (`readiness_timeout_s`, a ceiling) after model verification |
 
-Source: `profile.json`. Arguments of the profile: `--slots 1`, `--max-model-len 524288`, `--kv-tokens 524288`, `--spec auto`, `--prefix-cache pool`, `--prefill-chunk 2048`, `--max-image-tokens 4096`. The pack advertises 1,048,576 tokens; at that window rank 0 cannot also hold the vision tower above its memory floor on this engine, so the profile ships at 524,288 (`KNOWN_ISSUES.md`, "Known issues"). The profile needs two GB10s joined by a RoCE link and a site file (user guide section 4.6): the sealed `config/cluster.tp2-512k.json` carries example network values the site must replace (nodes, fabric interface, HCAs and TP port). Rank 0 serves HTTP and holds the vision tower. Each node needs huge pages off and at least 114 GiB of idle `MemAvailable` before the group starts; the launcher's pre-flight enforces it (`KNOWN_ISSUES.md`, "Memory").
+Source: `profile.json`. Arguments of the profile: `--slots 1`, `--max-model-len 524288`, `--kv-tokens 524288`, `--spec auto`, `--prefix-cache pool`, `--prefill-chunk 2048`, `--max-image-tokens 4096`. The pack advertises 1,048,576 tokens; at that window rank 0 cannot also hold the vision tower above its memory floor on this engine, so the profile ships at 524,288 (`KNOWN_ISSUES.md`, "Known issues"). The profile needs two GB10s joined by a RoCE link and a site file (user guide section 4.6): the sealed `config/cluster.tp2-512k.json` carries example network values the site must replace (nodes, fabric interface, HCAs and TP port; `http_port` is also a site field). Rank 0 serves HTTP and holds the vision tower. Each node needs huge pages off and at least 114 GiB of idle `MemAvailable` before the group starts; the launcher's pre-flight enforces it (`KNOWN_ISSUES.md`, "Memory").
 
 Only this two-node unit is in production. The sealed `KNOWN_ISSUES.md` mentions a single-node entry of a different pack; that entry is not part of this tree.
 
@@ -45,10 +45,10 @@ The pack's card and its `generation_config.json` give temperature 0.7 and top_p 
 
 ## 5. Behaviour to expect
 
-- **With thinking off, the model may answer a tool request from memory instead of calling the tool.** This shows in the tool-calling suite (BFCL hard20 8 of 20 with thinking off, section 6). A replay of three such cases with thinking on (`enable_thinking: true`) called the right tool in each. If your client depends on tool calls, turn thinking on. The replay is not part of the sealed evidence.
+- **With thinking off, the model may answer a tool request from memory instead of calling the tool.** A replay of three such cases with thinking on (`enable_thinking: true`) called the right tool in each; quality with thinking on is not otherwise measured (section 7).
 - **Some replies after a tool call start with reasoning text that ends in a closing think tag (`</think>`).** A client that shows the reply as it arrives will show that text before the answer.
 - A request that names no reasoning setting does not think; send `enable_thinking: true` in `chat_template_kwargs` for reasoning (`KNOWN_ISSUES.md`, "Reasoning and sampling").
-- One slot. A cold full-window prompt takes about 515 s to prefill (section 6), and a request sent meanwhile waits behind it.
+- One slot. A cold full-window prompt takes about 513 s to prefill (section 6), and a request sent meanwhile waits behind it.
 - A cache entry lives in the KV pool's idle pages: a full-window prompt that differs from the cached one evicts it before its prefill, while a follow-up turn that shares the cached prefix keeps it (`KNOWN_ISSUES.md`, "Known issues").
 - The pack's chat template injects its own system prompt (about 176 tokens or more) into every prompt, so a short request may report a few cached tokens once another request has been served (`KNOWN_ISSUES.md`).
 - The pack card says the vision components are packaged but not quality-tested by the publisher; the qualification here checks colour images and an image-plus-text request only (section 6).
@@ -82,7 +82,7 @@ Other gates (`v011/composed/summary.json`, every gate PASS in one composed pass)
 | Lifecycle | 10 of 10 (boot, serve, stop and leak checks on both ranks, then a restart in new processes with the same reply; boot to ready took 32.6 s and 31.2 s) | `v011/lifecycle/lifecycle-cases.json` |
 | Capability, boundary | 5 of 5 each | `v011/composed/summary.json` |
 | Vision | 3 of 3 (solid-colour images answered correctly; text after an image answered correctly) | `v011/composed/summary.json` |
-| Exactness | 68 of 68 cases (27 drafted equals serial, 6 chunked prefill equals whole prefill including a 523,264-token case, 33 reply captures, 2 prefix cache) | `v011/exactness/exactness-cases.json` |
+| Exactness | 68 of 68 cases (27 drafted equals serial, 6 chunked prefill equals whole prefill, the longest a 522,912-token prompt, 33 reply captures, 2 prefix cache) | `v011/exactness/exactness-cases.json` |
 | Prefix cache | gate passes; a shared prefix is served from the cache and the reply is identical (86 checks, 0 failures) | `v011/exactness/prefix-cache/check_prefix_cache.log` |
 | Performance, performance smoke | 4 of 4, 3 of 3 | `v011/performance/performance-cases.json` |
 | Context (carried) | 12 of 12 (needles at 10%, 50%, 90% and 33/66/90% depth in windows of 131,072, 262,144 and 524,288 tokens) | `tp2/qualification/summary.json` |

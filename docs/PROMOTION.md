@@ -89,7 +89,9 @@ python3 tools/promote_runtime.py \
 `--download` validates release and asset ids, sizes, the tag commit, every byte and all evidence and
 caches the verified files in `<assets-dir>/<family>/<model>/v<N>/` (with the engine release's executables in
 its `engine/`), the directory the promotion then reads. The tool then writes `MODEL.json` (or validates an existing one against the
-derived metadata; a mismatch is a hard refusal, never an overwrite), extracts the tree, writes
+derived metadata; a mismatch is a hard refusal, never an overwrite, except a reviewed runtime rename:
+MODEL.json moves to the runtime's current id, and a reviewed pack-repo rename, only when nothing else changes and
+every sealed tree in the folder still matches it), extracts the tree, writes
 `LATEST`, verifies against the base registry, commits branch `model/<model>` and opens a PR titled
 `FEAT: Promoted <model> v<N>`. `--dry-run` verifies and prints without writing.
 

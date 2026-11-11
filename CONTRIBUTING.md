@@ -118,7 +118,11 @@ tags from `runtime_id` (MODEL.json and the sealed approval must agree), never fr
   in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
   unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
   model math/weights/sampling changes or a new model require the full nine-gate chain plus `Q200`
-  (T3).
+  (T3). A carried gate whose profile file and recorded effective profile digest both differ is
+  accepted only when its provenance pins the source receipt's identity observation
+  (`source_effective_profile`) and both launches, of the target choice, are equal once their
+  absolute folder locations are taken out (`path_normalised_profile_digest`); any other launch
+  difference is refused.
 - Single-node (`tp1`) and two-node (`tp2`) profiles are independent runtime units (section 2): each
   is packaged, sealed and promoted separately, so a `tp1` model's release never waits on its `tp2`
   sibling. Each unit seals its own qualification receipts on its own runtime id and topology; a

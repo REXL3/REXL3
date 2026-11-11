@@ -1,6 +1,6 @@
 # Pack sheet: `minicpmv47-35b-a3b-rexl3-sage-6.08`
 
-Checked against model version `v1` (sealed approval `approve-minicpmv47-35b-a3b-rexl3-sage-6.08-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `minicpmv47-35b-a3b-rexl3-sage-6.08-1.tar.gz`). This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-minicpmv47-35b-a3b-rexl3-sage-6.08-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `minicpmv47-35b-a3b-rexl3-sage-6.08-1.tar.gz`), brought in by #126. This version is not yet part of a product release; the release tag is set when a release manifest names it.
 
 ## 1. Identity
 

@@ -1,0 +1,106 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "109062e6d08b7894363ba0eda401a845a9b84f61",
+    "path": "docs/examples/cluster.dsv41-sage-tp2-1m.json",
+    "sha256": "1a95b957619a0f80b21a66ad3c581c46ce3be410a2d8876a91c70f2098c6ca3a"
+  },
+  "target_repo": "vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+  "default_profile": "dsv41-tp2-1m",
+  "profiles": {
+    "dsv41-tp2-1m": {
+      "kind": "cluster",
+      "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+      "site_fields": [
+        "nodes",
+        "http_port",
+        "tp_port",
+        "fabric_interface",
+        "hca"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "1048576",
+        "--kv-dtype",
+        "q4",
+        "--no-video",
+        "--no-vision",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--served-model-name",
+        "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--tp-ranks",
+        "2",
+        "--tp-rank",
+        "0",
+        "--tp-peer",
+        "@NODES@:@TP_PORT@",
+        "--tp-connect-timeout",
+        "300",
+        "--tp-ready-timeout",
+        "900",
+        "--tp-peer-timeout",
+        "60",
+        "--shutdown-grace",
+        "5"
+      ],
+      "env": {
+        "REXL3_DSV41_KV": "q4",
+        "REXL3_DSV41_FAST_MOE": "1",
+        "REXL3_DSV41_SPEC_LEARN": "1",
+        "REXL3_DSV41_MOE_TOPP": "1.0",
+        "NCCL_MAX_NCHANNELS": "4",
+        "NCCL_SOCKET_IFNAME": "@FABRIC_INTERFACE@",
+        "NCCL_IB_HCA": "=@HCA@"
+      },
+      "files": {
+        "config/cluster.tp2-1m.json": "6c66e18eec26ac4d22ce1a61816982e3512c42d23f561b69387cea3f46dbc51d"
+      },
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8940,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 256
+      },
+      "cluster_adapter": "attested-v1",
+      "cluster_file": "config/cluster.tp2-1m.json",
+      "group": "tp2"
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

@@ -1,6 +1,6 @@
 # Pack sheet: `dsv41-flash-1017-sage-rexl3-1.55`
 
-Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sage-rexl3-1.55-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `dsv41-flash-1017-sage-rexl3-1.55-1.tar.gz`). This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sage-rexl3-1.55-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `dsv41-flash-1017-sage-rexl3-1.55-1.tar.gz`), brought in by #130. This version is not yet part of a product release; the release tag is set when a release manifest names it.
 
 ## 1. Identity
 

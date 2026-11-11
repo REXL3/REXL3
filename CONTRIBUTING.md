@@ -83,6 +83,11 @@ profiles; the split applies to models added after v0.1.0 and to subsequent GLM v
   in each vision-off profile's sealed qualification receipt; production accepts it in place of a
   does-not-fit proof.
 
+Template allow-list (`runtimes/templates/APPROVED.json`, schema `rexl3.approved-templates.v1`):
+`templates` maps a template version (e.g. `v1`) to one approved digest string or to a non-empty list
+of approved digest strings. An approval whose version is not listed, or whose digest is not among
+that version's digests, is refused (`template not approved`).
+
 Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
 keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`, plus the sealed
 approval's bundle binary digest `binary_sha256` and each profile's sealed receipt digest under

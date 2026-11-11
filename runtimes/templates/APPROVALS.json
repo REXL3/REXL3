@@ -47,6 +47,20 @@
       "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
       "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
     },
+    "minicpm-v-4.7/minicpm-v-4.7-35b-a3b/v1": {
+      "approval_sha256": "6c5726edbc5cd6b3debef627758aa68fbf3c177d3d70e338d9afad3c6ac0c1a5",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "minicpmv47-single-262k": {
+          "receipt": {
+            "sha256": "325f7af17fbe88e3daf386887e2f837de911cabe9cfff98c4c1d5767c96f2a8d"
+          }
+        }
+      },
+      "runtime_id": "minicpmv47-35b-a3b-rexl3-sage-6.08",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
     "nemotron-3.5/nemotron-3.5-super-vl/v1": {
       "approval_sha256": "bb6a5a00929fd05185f74c91d9d4aca6f955e94c43827413eb0d66b89abd4548",
       "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",

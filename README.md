@@ -183,7 +183,9 @@ runtimes/
 `APPROVALS.json` keys are `<family>/<model>/v<N>`; each entry pins the approval hash, the source
 commit and tree, and the runtime id. The verifier (`verify`, section "Checks and CI" below) requires
 every tree under `runtimes/` to match a registry entry exactly — file inventory, hashes, sizes and
-modes — and refuses a template digest that is not in `APPROVED.json`.
+modes — and refuses a template digest that is not in `APPROVED.json`. `APPROVED.json` maps each
+template version to one approved digest or to a list of approved digests (trees sealed against an
+earlier digest of a version keep verifying); an unlisted version or digest is refused.
 
 ## Run your own model or recipe (advanced)
 

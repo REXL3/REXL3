@@ -128,6 +128,15 @@ BIT_FULL_WINDOW_HEADROOM = 1280
 # tracking). Speculation and prefix-cache exceptions are never granted.
 VISION_EXCEPTION_KEYS = ('granted_by', 'granted', 'expires', 'reason')
 VISION_EXCEPTION_GRANTERS = ('am423', 'vcruz305')
+# The owner-exception record a release carries when its thinking row ran in the
+# excepted form (requirements `thinking.mode` "exception"): the same record fields
+# and grantors as vision. It covers exactly one capability case, the excepted
+# thinking row, and only the thinking-off reply inside it; every other capability
+# case, and every other check of that row, must still pass.
+THINKING_EXCEPTION_KEYS = VISION_EXCEPTION_KEYS
+THINKING_EXCEPTION_GRANTERS = VISION_EXCEPTION_GRANTERS
+THINKING_CASE = 'capability/thinking'
+THINKING_EXCEPTED_CASE = 'capability/thinking_excepted'
 HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
@@ -832,6 +841,56 @@ def validate_vision_exception(record, *, today=None):
     require(expires >= (today or datetime.date.today()), 'vision exception expired on %s' % record['expires'])
 
 
+def validate_thinking_exception(record, *, today=None):
+    """Require a complete, unexpired owner thinking-exception record (same rules as the vision record)."""
+    require(isinstance(record, dict) and set(record) == set(THINKING_EXCEPTION_KEYS),
+            'thinking exception must carry granted_by, granted, expires and reason')
+    require(record['granted_by'] in THINKING_EXCEPTION_GRANTERS,
+            'thinking exception granted_by must be am423 or vcruz305')
+    require(isinstance(record['reason'], str) and record['reason'].strip(), 'thinking exception needs a reason')
+    try:
+        expires = datetime.date.fromisoformat(str(record['expires']))
+        datetime.date.fromisoformat(str(record['granted']))
+    except (TypeError, ValueError):
+        require(False, 'thinking exception dates must be YYYY-MM-DD')
+        raise AssertionError('unreachable') from None
+    require(expires >= (today or datetime.date.today()), 'thinking exception expired on %s' % record['expires'])
+
+
+def require_thinking_exception_binding(doc, capability_cases, root, expected, *, today=None):
+    """Bind the receipt's thinking exception record to the capability gate's cases, both ways.
+
+    The excepted thinking case may appear only with a valid, unexpired record, and a record only with that
+    case; the strict thinking case never appears beside it. The excepted case's detail must be referenced
+    gate evidence, must carry the same record, and must state the strict verdict it measured (PASS or
+    FAIL, with the failure text when FAIL), so a sealed receipt always shows what the exception covered.
+    """
+    names = {c.get('name') for c in capability_cases}
+    record = doc.get('thinking_exception')
+    if record is None:
+        require(THINKING_EXCEPTED_CASE not in names,
+                'an excepted thinking case requires a documented owner thinking exception record')
+        return
+    validate_thinking_exception(record, today=today)
+    require(expected['capabilities'].get('reasoning') is True, 'a thinking exception needs capabilities.reasoning')
+    require(THINKING_EXCEPTED_CASE in names, 'a thinking exception record needs the excepted thinking case')
+    require(THINKING_CASE not in names, 'the strict and the excepted thinking cases cannot both be present')
+    case = next(c for c in capability_cases if c.get('name') == THINKING_EXCEPTED_CASE)
+    ref = case.get('result')
+    require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'excepted thinking detail reference required')
+    refs = doc['gates']['capability']['evidence']
+    require(ref in refs, 'excepted thinking detail must be referenced gate evidence')
+    detail = load_json(safe_file(root, relative_path(ref['path'])))
+    facts = detail.get('details') if isinstance(detail, dict) else None
+    require(isinstance(facts, dict) and detail.get('error') is None, 'excepted thinking detail records a failure')
+    require(facts.get('exception') == record, 'excepted thinking detail and receipt carry different exception records')
+    strict = facts.get('strict')
+    require(isinstance(strict, dict) and strict.get('verdict') in ('PASS', 'FAIL'),
+            'excepted thinking detail must record the strict verdict')
+    require(strict['verdict'] == 'PASS' or (isinstance(strict.get('failure'), str) and strict['failure'].strip()),
+            'a strict FAIL must record its failure')
+
+
 def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
     """Validate typed PASS counts, every referenced byte, identity and raw case summaries.
 
@@ -871,6 +930,7 @@ def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
         # also for a vision-ON release under an exception (the qualifier emits a record only for those): an expired or
         # malformed record must not seal, whatever the capability
         validate_vision_exception(doc['vision_exception'])
+    # A thinking exception record (doc['thinking_exception']) is checked against the capability cases below.
     ref = doc.get('identity_receipt')
     require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'identity receipt required; naked digest refused')
     observation = safe_file(root, ref['path'])
@@ -885,14 +945,16 @@ def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
     carried = doc.get('carried_gates')
     if carried is not None:
         validate_carried_gates(carried, gates, rerun=doc.get('rerun_gates'))
-    exactness_cases = []
+    exactness_cases, capability_cases = [], []
     for gate, result in gates.items():
         source = carried.get(gate) if carried is not None else None
         validate_gate_evidence(gate, result, evidence_root=root, expected=expected,
                                carried_source=source, runtime_files=runtime_files,
-                               cases_out=exactness_cases if gate == 'exactness' else None)
+                               cases_out=exactness_cases if gate == 'exactness' else
+                               capability_cases if gate == 'capability' else None)
         require(all(root / relative_path(ref['path']) != path for ref in result['evidence']), 'duplicate/self evidence')
     require_cross_choice_exactness(carried, gates, exactness_cases, expected)
+    require_thinking_exception_binding(doc, capability_cases, root, expected)
     bundles = {}
     for gate, source in (carried or {}).items():
         if 'source_bundle' in source:

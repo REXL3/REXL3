@@ -81,7 +81,10 @@ profiles; the split applies to models added after v0.1.0 and to subsequent GLM v
   tower does not fit, when vision is off) are allowed). A release with vision off also carries an
   unexpired owner vision exception (`granted_by` am423 or vcruz305, `granted`, `expires`, `reason`)
   in each vision-off profile's sealed qualification receipt; production accepts it in place of a
-  does-not-fit proof.
+  does-not-fit proof. A profile whose thinking row ran under an owner thinking exception carries
+  the same record fields as `thinking_exception` in its sealed receipt, beside the excepted case
+  `capability/thinking_excepted`; production accepts that case only with a valid, unexpired record
+  that matches the case's detail, and the record only with that case.
 
 Template allow-list (`runtimes/templates/APPROVED.json`, schema `rexl3.approved-templates.v1`):
 `templates` maps a template version (e.g. `v1`) to one approved digest string or to a non-empty list

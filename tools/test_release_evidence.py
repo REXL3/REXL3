@@ -65,8 +65,22 @@ def stage_assets(dest, f, doc):
     return dest
 
 
+THINKING_RECORD = dict(granted_by='am423', granted='2026-11-11', expires='2099-12-31',
+                       reason='synthetic owner exception: thinking-off replies carry reasoning text')
+
+
+def thinking_detail(**changes):
+    """Detail the qualifier stores for the excepted thinking case: the record and the strict verdict it measured."""
+    facts = {'claim': 'a thinking-off reply without reasoning is NOT claimed', 'exception': dict(THINKING_RECORD),
+             'strict': {'verdict': 'FAIL', 'failure': 'thinking on/off semantic failure: reasoning in the answer',
+                        'check': 'thinking off: bare answer, no reasoning'}}
+    facts.update(changes)
+    return {'case': {'id': 'capability/thinking_excepted'}, 'details': facts, 'error': None}
+
+
 class ReceiptContract(unittest.TestCase):
     images = True
+    thinking = False   # True: the capability gate holds the excepted thinking case and the receipt its owner record
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -79,7 +93,8 @@ class ReceiptContract(unittest.TestCase):
                              effective_profile_digest='sha256:' + sha(json.dumps({'max_context': 1048576}, sort_keys=True, separators=(',', ':')).encode()),
                              effective_profile_source='owned-launcher-observation',
                              effective_max_context=1048576,
-                             capabilities={'images': self.images, 'audio': False}, topology={'ranks': 1})
+                             capabilities={'images': self.images, 'audio': False,
+                                           **({'reasoning': True} if self.thinking else {})}, topology={'ranks': 1})
         self.argv = ['synthetic-serve', '--max-model-len', '1048576'] + ([] if self.images else ['--no-vision'])
         self.resolved = {'max_context': 1048576, 'capabilities': self.expected['capabilities'],
                          'ranks': [{'rank': 0, 'argv': self.argv, 'env': {'SYNTHETIC_FIXTURE': '1'}}]}
@@ -94,6 +109,11 @@ class ReceiptContract(unittest.TestCase):
                 self.detail_ref = {'path': detail.name, 'sha256': sha(detail.read_bytes())}
                 case.update(name='image_refused', expectation='refused', result=self.detail_ref)
                 extra = [self.detail_ref]
+            if gate == 'capability' and self.thinking:
+                detail = write(self.root, 'thinking-detail.json', encoded(thinking_detail()))
+                self.thinking_ref = {'path': detail.name, 'sha256': sha(detail.read_bytes())}
+                case.update(name='capability/thinking_excepted', result=self.thinking_ref)
+                extra = [self.thinking_ref]
             raw = {'schema': 'rexl3.gate-evidence.v1', 'gate': gate, **self.expected, 'cases': [case]}
             p = write(self.root, gate + '.json', encoded(raw))
             self.doc['gates'][gate] = dict(status='PASS', passed=1, total=1, failed=0, skipped=0,
@@ -110,6 +130,8 @@ class ReceiptContract(unittest.TestCase):
         if not self.images:
             self.doc['vision_exception'] = dict(granted_by='am423', granted='2026-10-25',
                                                 expires='2099-12-31', reason='synthetic owner exception')
+        if self.thinking:
+            self.doc['thinking_exception'] = dict(THINKING_RECORD)
         self.receipt = self.root / 'receipt.json'
 
     def test_naked_digest_is_not_observation(self):
@@ -570,6 +592,81 @@ class VisionOffReceiptContract(ReceiptContract):
                 self.doc['vision_exception'] = dict(base, **change)
                 with self.assertRaises(ValueError):
                     self.validate()
+
+
+class ThinkingExceptedReceiptContract(ReceiptContract):
+    """The whole receipt contract again, for a release whose thinking row ran under an owner thinking exception."""
+    thinking = True
+
+    def rewrite_detail(self, detail):
+        path = self.root / 'thinking-detail.json'
+        path.write_bytes(encoded(detail))
+        digest = sha(path.read_bytes())
+        raw_path = self.root / 'capability.json'
+        raw = json.loads(raw_path.read_bytes())
+        raw['cases'][0]['result']['sha256'] = digest
+        raw_path.write_bytes(encoded(raw))
+        self.doc['gates']['capability']['evidence'] = [{'path': 'capability.json', 'sha256': sha(raw_path.read_bytes())},
+                                                       {'path': 'thinking-detail.json', 'sha256': digest}]
+
+    def test_the_excepted_receipt_is_valid(self):
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_the_record_is_required_and_validated(self):
+        record = self.doc.pop('thinking_exception')
+        with self.assertRaisesRegex(ValueError, 'requires a documented owner thinking exception record'):
+            self.validate()
+        for change, text in (({'expires': '2020-01-01'}, 'expired on 2020-01-01'),
+                             ({'granted_by': 'mallory'}, 'am423 or vcruz305'),
+                             ({'granted': 'yesterday'}, 'YYYY-MM-DD'),
+                             ({'reason': ' '}, 'needs a reason'),
+                             ({'tracking': 'x'}, 'must carry granted_by')):
+            with self.subTest(change=change):
+                self.doc['thinking_exception'] = dict(record, **change)
+                with self.assertRaisesRegex(ValueError, text):
+                    self.validate()
+
+    def test_the_record_must_match_the_case_detail(self):
+        self.doc['thinking_exception'] = dict(THINKING_RECORD, reason='another record')
+        with self.assertRaisesRegex(ValueError, 'different exception records'):
+            self.validate()
+
+    def test_the_detail_must_record_the_strict_verdict_and_be_gate_evidence(self):
+        for strict, text in (({'verdict': 'MAYBE'}, 'strict verdict'), ({'verdict': 'FAIL', 'failure': ' '}, 'record its failure'),
+                             (None, 'strict verdict')):
+            with self.subTest(strict=strict):
+                self.setUp()
+                self.rewrite_detail(thinking_detail(strict=strict))
+                with self.assertRaisesRegex(ValueError, text):
+                    self.validate()
+        self.setUp()
+        self.rewrite_detail(dict(thinking_detail(), error='TimeoutError'))
+        with self.assertRaisesRegex(ValueError, 'records a failure'):
+            self.validate()
+        self.setUp()
+        self.rewrite_detail(thinking_detail(strict={'verdict': 'PASS', 'failure': None}))
+        self.assertEqual(self.validate(), self.doc)
+        self.setUp()
+        del self.doc['gates']['capability']['evidence'][1]
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_the_strict_case_cannot_stand_beside_the_excepted_one(self):
+        path = self.root / 'capability.json'
+        raw = json.loads(path.read_bytes())
+        raw['cases'].append({'name': 'capability/thinking', 'status': 'PASS', 'modality': 'text', 'expectation': 'supported'})
+        path.write_bytes(encoded(raw))
+        self.doc['gates']['capability'].update(passed=2, total=2)
+        self.doc['gates']['capability']['evidence'][0]['sha256'] = sha(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'cannot both be present'):
+            self.validate()
+
+
+class ThinkingRecordWithoutTheCase(ReceiptContract):
+    def test_a_record_without_the_excepted_case_is_refused(self):
+        self.doc['thinking_exception'] = dict(THINKING_RECORD)
+        with self.assertRaises(ValueError):
+            self.validate()
 
 
 class ArchiveContract(unittest.TestCase):

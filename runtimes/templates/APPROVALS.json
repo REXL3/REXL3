@@ -1,5 +1,19 @@
 {
   "approvals": {
+    "deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/v1": {
+      "approval_sha256": "35758d241246f14456abc9c357da68213b72e9048b3f03979def5e5733956adb",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "dsv41-tp2-1m": {
+          "receipt": {
+            "sha256": "321eddf3688a90bac8cf64aeb25437d31004ca98653cff7778b758e17c6334a5"
+          }
+        }
+      },
+      "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
     "deepseek-v4.1/deepseek-v4.1-flash-1017/v1": {
       "approval_sha256": "2485106e16499278c95c49c846992018e1c5eb227b738ae0a2e37fb8cf649d73",
       "binary_sha256": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318",

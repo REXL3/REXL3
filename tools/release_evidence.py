@@ -1470,6 +1470,24 @@ def trusted_entry(approval_path, registry, *, allow_legacy=False, key=None):
     return approval
 
 
+def template_approved(approved_templates, version, digest):
+    """True when ``digest`` is an approved digest of template ``version`` in the allow-list.
+
+    An allow-list value is either one digest string (the original form) or a non-empty list of
+    digest strings, so trees sealed against an earlier digest of a version keep verifying while
+    approvals sealed against a later digest of the same version verify too. An unlisted version,
+    an unlisted digest, an empty list or a malformed value is not approved.
+    """
+    if not isinstance(approved_templates, dict) or not isinstance(version, str) or not isinstance(digest, str):
+        return False
+    listed = approved_templates.get(version)
+    if isinstance(listed, str):
+        listed = [listed]
+    if not isinstance(listed, list) or not listed or not all(isinstance(d, str) for d in listed):
+        return False
+    return digest in listed
+
+
 def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None, key=None, precomputed=None):
     """Authenticate approval, then every archive and receipt, including engine source.
 
@@ -1488,8 +1506,9 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
     doc = trusted_entry(approval_path, registry, key=key)
     validate_request(doc.get('runtime_id'), doc.get('approve_tag'), doc.get('version'))
     template = doc.get('template', {})
-    require(isinstance(template, dict) and approved_templates.get(template.get('version')) == template.get('digest')
-            and template.get('digest') is not None, 'template not approved')
+    require(isinstance(template, dict)
+            and template_approved(approved_templates, template.get('version'), template.get('digest')),
+            'template not approved')
     paths = {}
     precomputed = precomputed or {}
     for asset in approval_assets(doc):

@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "name": "redsnowtp2",
+  "user": "tester",
+  "binary": "/opt/rexl3/bin/rexl3-serve",
+  "binary_max_ranks": 2,
+  "state_dir": "$HOME/.local/share/rexl3/unstarted",
+  "ssh": {
+    "options": [
+      "-F",
+      "/dev/null",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "StrictHostKeyChecking=yes",
+      "-o",
+      "ForwardAgent=no",
+      "-o",
+      "ClearAllForwardings=yes",
+      "-o",
+      "PermitLocalCommand=no",
+      "-o",
+      "SendEnv=-*",
+      "-o",
+      "ConnectTimeout=10",
+      "-o",
+      "ServerAliveInterval=15",
+      "-o",
+      "ServerAliveCountMax=2"
+    ]
+  },
+  "pack": "/models/red-snow-4.91",
+  "memory": {
+    "_comment": "least MemAvailable a rank's node needs before the launcher starts it (huge pages off). Rank 0 binds: its measured minimum was 3.96 GiB over the 2 GiB floor at 115 GiB planned free, its plan's spare falls about 1 GiB per GiB less planned free, and about 0.8 GiB is taken before the plan, so 114 GiB idle keeps at least 1 GiB over the floor (KNOWN_ISSUES.md 'Memory').",
+    "min_free_gib": 114
+  },
+  "serve": {
+    "flags": [
+      "--slots",
+      "1",
+      "--max-model-len",
+      "524288",
+      "--kv-tokens",
+      "524288",
+      "--spec",
+      "auto",
+      "--prefix-cache",
+      "pool",
+      "--prefill-chunk",
+      "2048",
+      "--max-image-tokens",
+      "4096",
+      "--served-model-name",
+      "RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw"
+    ],
+    "env": {
+      "REXL3_MEMORY_FLOOR_GIB": "2",
+      "REXL3_GLM_EMBED_IN_PLACE": "1",
+      "REXL3_GLM_RESERVE_MARGIN_GIB": "4"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 300,
+    "ready_timeout_s": 900,
+    "peer_timeout_s": 60,
+    "shutdown_grace_s": 5
+  },
+  "nccl": {
+    "max_nchannels": 4,
+    "socket_ifname": "eth0",
+    "hca": [
+      "mlx5_0:1"
+    ],
+    "env": {}
+  },
+  "lock_wait_s": 1,
+  "nodes": [
+    {
+      "name": "leader",
+      "address": "192.0.2.2",
+      "fabric_address": "192.0.2.2",
+      "user": "tester",
+      "local": false,
+      "env": {},
+      "flags": []
+    },
+    {
+      "name": "follower",
+      "address": "192.0.2.3",
+      "fabric_address": "192.0.2.3",
+      "user": "tester",
+      "local": false,
+      "env": {},
+      "flags": []
+    }
+  ],
+  "groups": [
+    {
+      "name": "tp2",
+      "ranks": [
+        "leader",
+        "follower"
+      ],
+      "http_host": "192.0.2.2",
+      "http_port": 8952,
+      "tp_port": 29600,
+      "leader_flags": []
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Pack sheet: `redsnow-5.3-flash-tp2-sage-4.91`
 
-Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-tp2-sage-4.91-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `redsnow-5.3-flash-tp2-sage-4.91-1.tar.gz`). This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-tp2-sage-4.91-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `redsnow-5.3-flash-tp2-sage-4.91-1.tar.gz`), brought in by #127. This version is not yet part of a product release; the release tag is set when a release manifest names it.
 
 ## 1. Identity
 

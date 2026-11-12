@@ -1,10 +1,196 @@
 {
   "approvals": {
+    "deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/v1": {
+      "approval_sha256": "35758d241246f14456abc9c357da68213b72e9048b3f03979def5e5733956adb",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "dsv41-tp2-1m": {
+          "receipt": {
+            "sha256": "321eddf3688a90bac8cf64aeb25437d31004ca98653cff7778b758e17c6334a5"
+          }
+        }
+      },
+      "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "deepseek-v4.1/deepseek-v4.1-flash-1017/v1": {
+      "approval_sha256": "2485106e16499278c95c49c846992018e1c5eb227b738ae0a2e37fb8cf649d73",
+      "binary_sha256": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318",
+      "profiles": {
+        "dsv41-single-262k": {
+          "receipt": {
+            "sha256": "64909440512c109aaa5f1d414d9b456d7a253476c9137784b36c482631f6e6da"
+          }
+        }
+      },
+      "runtime_id": "dsv41-flash-1017-sage-1.55",
+      "source_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
+      "source_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8"
+    },
+    "glm-5.3/glm-5.3-flash-tp2/v1": {
+      "approval_sha256": "32185a603fbc745862854394ae668a089be7d914c19f6aeb4bfe25a7ef32d8ef",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "glm53-flash-tp2-1m": {
+          "receipt": {
+            "sha256": "91ea372c4deee5e45ef70b4005b955f5661f6bba76ead7a66213d38a571a2176"
+          }
+        }
+      },
+      "runtime_id": "glm53-flash-tp2-sage-2.25",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "glm-5.3/glm-5.3-flash/v1": {
+      "approval_sha256": "7d1cca67cc1d39871eabc9c786530dda50719c96339a2ee9d1ad3dcafc39492f",
+      "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",
+      "profiles": {
+        "glm53-flash-single": {
+          "receipt": {
+            "sha256": "fe045485d88229d662a7a9d7bba219f697ade1b947946276cd9e115666b0f420"
+          }
+        },
+        "glm53-flash-tp2-1m": {
+          "receipt": {
+            "sha256": "efd1015f3678c5014f46c62406b5c5b528e282612b559d377662084425e4d153"
+          }
+        }
+      },
+      "runtime_id": "glm53-flash-2.25bpw-sm121",
+      "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
+      "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"
+    },
+    "glm-5.3/glm-5.3-flash/v2": {
+      "approval_sha256": "7dd917e144bd94a8be40d7d19017ddb191833e506545fbf84f4afba1bb52a1cf",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "glm53-flash-single": {
+          "receipt": {
+            "sha256": "94ac562958b9043b1b43bec523d94fd3f636264775d7fd5052b189283789ee1a"
+          }
+        }
+      },
+      "runtime_id": "glm53-flash-sage-2.25",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "glm-5.3/red-snow-5.3-flash-tp2/v1": {
+      "approval_sha256": "ec30e53e48079899bbf2047c81213f6f3c444d99cfd00f3789cb6defa1bdeb68",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "redsnow-tp2-512k": {
+          "receipt": {
+            "sha256": "b8ca6ee0c821ae3b37d1d8bce7e336d9dd138599c2a264726155047465a8a073"
+          }
+        }
+      },
+      "runtime_id": "redsnow-5.3-flash-tp2-sage-4.91",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "minicpm-v-4.7/minicpm-v-4.7-35b-a3b/v1": {
+      "approval_sha256": "6c5726edbc5cd6b3debef627758aa68fbf3c177d3d70e338d9afad3c6ac0c1a5",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "minicpmv47-single-262k": {
+          "receipt": {
+            "sha256": "325f7af17fbe88e3daf386887e2f837de911cabe9cfff98c4c1d5767c96f2a8d"
+          }
+        }
+      },
+      "runtime_id": "minicpmv47-35b-a3b-rexl3-sage-6.08",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "nemotron-3.5/nemotron-3.5-super-vl/v1": {
+      "approval_sha256": "bb6a5a00929fd05185f74c91d9d4aca6f955e94c43827413eb0d66b89abd4548",
+      "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",
+      "profiles": {
+        "nemotron35-super-vl-single-1m": {
+          "receipt": {
+            "sha256": "7e2a2fc40d4ce5ea4ee501b6ff22bc01923e1904890a6229d294245440b764c8"
+          }
+        }
+      },
+      "runtime_id": "nemotron35-super-vl-sage-3.85",
+      "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
+      "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"
+    },
+    "nemotron-3.5/nemotron-3.5-super-vl/v2": {
+      "approval_sha256": "bdc5d82c9ca25c447edf428dd6c216312f8f9df740474213f568625dfaf310a3",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "nemotron35-super-vl-single-1m": {
+          "receipt": {
+            "sha256": "c9bc1e7dce5583b8b44b9e0c2277b21fcdfebf1969a98400c011ae3959370095"
+          }
+        }
+      },
+      "runtime_id": "nemotron35-super-vl-sage-3.85",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
     "qwen3.8/qwen3.8-27b/v3": {
       "approval_sha256": "d26800e692a5ac147a774da8505cd36b77a555cfb79414b2329ca923c38441de",
+      "binary_sha256": "3e188724f538d25f7d354e34865a2205c266274171f1d000f764fa5093ad4041",
+      "profiles": {
+        "qwen38-single-262k": {
+          "receipt": {
+            "sha256": "4dd4a58d19f760d85a8e631de6ec8e63e8f112e6a764e907a9e12ffc813e13b6"
+          }
+        }
+      },
       "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
       "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
       "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"
+    },
+    "qwen3.8/qwen3.8-27b/v4": {
+      "approval_sha256": "d17dda427fbf9ba6e2b9b03706b4f8a366c627a894cefdbdb8efa664b629167f",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "qwen38-single-262k": {
+          "receipt": {
+            "sha256": "85d85e8f5b84240928b1e938c299e8b62acf99228023e154eb3ba42d16ed1de8"
+          }
+        }
+      },
+      "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
+    "qwen3.8/qwen3.8-flash-next/v2": {
+      "approval_sha256": "fdbd312cbf6d7345bbb61c9c803d11771933511ed332b3218e1630ac50b7ab2e",
+      "binary_sha256": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318",
+      "profiles": {
+        "qwen38-flash-next-single-262k": {
+          "receipt": {
+            "sha256": "1d157da6f643a376d3b3338aa91c54a9d23aa71210c242ad0b0420f39fe2ee1d"
+          }
+        }
+      },
+      "runtime_id": "qwen38-flash-next-exl3-3.05",
+      "source_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
+      "source_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8"
+    },
+    "qwen3.8/qwen3.8-flash-next/v3": {
+      "approval_sha256": "bc2371eb5b2e8021b281b6082f89986ea25285b3750ea375b5a3012cd981a8b7",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "qwen38-flash-next-single-262k": {
+          "receipt": {
+            "sha256": "1f0b6a28683b36c1110381c2c53a45c117f166958e30f85163e70c22a915f9cb"
+          }
+        },
+        "qwen38-flash-next-single-262k-draft": {
+          "receipt": {
+            "sha256": "e53dbd97ff9d44e94e1b3c9d1c86ca82615f2be5a73a78a9d2944fbc3d274b63"
+          }
+        }
+      },
+      "runtime_id": "qwen38-flash-next-exl3-3.05",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
     }
   },
   "legacy": {},

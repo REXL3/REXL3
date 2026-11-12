@@ -1,0 +1,9 @@
+{
+ "eos_token_id": [
+  258,
+  256
+ ],
+ "temperature": 1.0,
+ "top_p": 0.95,
+ "top_k": 20
+}

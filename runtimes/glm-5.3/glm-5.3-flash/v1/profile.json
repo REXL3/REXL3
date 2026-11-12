@@ -1,0 +1,165 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "glm53-flash-2.25bpw-sm121",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "6b56c6bad8dfb041d39b431355e7d9e5bcfe6e66",
+    "path": "docs/GLM53.md",
+    "sha256": "fc17befa8e9ab21f882879870ee5a6277a7cebae5eb7030e237b627732c5971d"
+  },
+  "target_repo": "r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+  "default_profile": "glm53-flash-single",
+  "profiles": {
+    "glm53-flash-single": {
+      "kind": "single",
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir",
+        "binary_dir"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "262144",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--prefix-cache-mib",
+        "3584",
+        "--served-model-name",
+        "GLM-5.3-Flash-EXL3-2.25bpw-sm121"
+      ],
+      "env": {
+        "REXL3_MEMORY_FLOOR_GIB": "4"
+      },
+      "files": {},
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8950,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 2048,
+        "chat_template_kwargs": {
+          "reasoning_effort": "low"
+        }
+      }
+    },
+    "glm53-flash-tp2-1m": {
+      "kind": "cluster",
+      "site_fields": [
+        "nodes",
+        "http_port",
+        "tp_port",
+        "fabric_interface",
+        "hca"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "1048576",
+        "--kv-tokens",
+        "1048576",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--prefix-cache-mib",
+        "13440",
+        "--served-model-name",
+        "GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--tp-ranks",
+        "2",
+        "--tp-rank",
+        "0",
+        "--tp-peer",
+        "@NODES@:@TP_PORT@",
+        "--tp-connect-timeout",
+        "300",
+        "--tp-ready-timeout",
+        "900",
+        "--tp-peer-timeout",
+        "60",
+        "--shutdown-grace",
+        "5"
+      ],
+      "env": {
+        "REXL3_MEMORY_FLOOR_GIB": "4",
+        "NCCL_MAX_NCHANNELS": "4",
+        "NCCL_SOCKET_IFNAME": "@FABRIC_INTERFACE@",
+        "NCCL_IB_HCA": "=@HCA@"
+      },
+      "files": {
+        "config/cluster.tp2-1m.json": "39cb4a85d249f1ad88e7af8f35d1f36854287a70e6f98fa8ec30c5de4d94c104"
+      },
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8950,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 2048,
+        "chat_template_kwargs": {
+          "reasoning_effort": "low"
+        }
+      },
+      "cluster_adapter": "attested-v1",
+      "cluster_file": "config/cluster.tp2-1m.json",
+      "group": "tp2"
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

@@ -1,0 +1,110 @@
+{
+ "schema": "rexl3.model-lock.v1",
+ "packs": {
+  "target": {
+   "repo": "vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+   "revision": "cba79c67582950ea44a4a449b3bb85b800748a35",
+   "fingerprint": "sha256:c34045423c126e40d051943ff46bd57a67c07350d8b1743ed5185415db61351c",
+   "license": "see the upstream model card and LICENSE in the pack",
+   "files": {
+    "chat_template.jinja": {
+     "sha256": "adaa16cddf2ed5415bb2518e72b514b9c8dbb750bcb8aa0b6a0de9c8e6b616b9",
+     "bytes": 4015
+    },
+    "config.json": {
+     "sha256": "25882944c203b1970a9187dc47334ebafbb7e95ffda888fd86c8181af9e15867",
+     "bytes": 3170
+    },
+    "engram_token_map.u32": {
+     "sha256": "c60a86322ec17b4142bfef3c57a8d81fb428550cdf487f88a4320cb59fe46481",
+     "bytes": 517120
+    },
+    "generation_config.json": {
+     "sha256": "96a22d3ec2d7c13d94641a2446a75ff0403f23d91f748f3e12e109aa0c9c2b7b",
+     "bytes": 191
+    },
+    "model.safetensors.index.json": {
+     "sha256": "aca1776829a6754f9d9d3434a862a6a0728aec6c04f1abcf238991ad53a623f4",
+     "bytes": 14618660
+    },
+    "tokenizer.json": {
+     "sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+     "bytes": 6367257
+    },
+    "tokenizer_config.json": {
+     "sha256": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+     "bytes": 801
+    },
+    "model-00001-of-00017.safetensors": {
+     "sha256": "3325699ab4f884be2a9b21df2ae808f07620ac2551857a146917fd61d08d9ac3",
+     "bytes": 8435709676
+    },
+    "model-00002-of-00017.safetensors": {
+     "sha256": "a9bb7a4a945a0f2415bbd987cee74debe65b50b48c58ec241e748ea5020a4566",
+     "bytes": 8497805052
+    },
+    "model-00003-of-00017.safetensors": {
+     "sha256": "2195e269b88ae8199413d125bc74de59925edb68679b184f2aff193af00043c6",
+     "bytes": 8499766344
+    },
+    "model-00004-of-00017.safetensors": {
+     "sha256": "7e4cdeebf47ad56ec5914d780a5c57e8b9734a750284d6eb0a492b604b541eda",
+     "bytes": 8498337912
+    },
+    "model-00005-of-00017.safetensors": {
+     "sha256": "696f0c282862957c84dfb603523a625e017c585dd1d1b606241e3af87e318da0",
+     "bytes": 8495729900
+    },
+    "model-00006-of-00017.safetensors": {
+     "sha256": "2278cca353412de31b1bd3e84a772e0012e543ebc51f9c1024c6f1e621565b8b",
+     "bytes": 8492707804
+    },
+    "model-00007-of-00017.safetensors": {
+     "sha256": "959a17fbd2f5d5e6e72d0f03ea886fbde9f460ee824c46d5eb48647ce536f7e5",
+     "bytes": 8499856352
+    },
+    "model-00008-of-00017.safetensors": {
+     "sha256": "2f46bf6aee9d609f8d24412c01806801df26a0448d61afff1cc461fd62f61f5f",
+     "bytes": 8499942840
+    },
+    "model-00009-of-00017.safetensors": {
+     "sha256": "4e8e2c63668d1852c4cc54c074ab7253e1e5eae23e76109c288590afb04027a1",
+     "bytes": 8497457720
+    },
+    "model-00010-of-00017.safetensors": {
+     "sha256": "5fd6175054f5ab2066ce23ae795a983839b16b16d9040e104fffcd7b80ac9728",
+     "bytes": 8499019352
+    },
+    "model-00011-of-00017.safetensors": {
+     "sha256": "9a02cefb9fd6837d005ac4dd6ce14195a21d97149e0f70d9b0c791face393208",
+     "bytes": 8498785524
+    },
+    "model-00012-of-00017.safetensors": {
+     "sha256": "ac192e11610d8b260447b53a7d23471694f32aae03eab47414bfbc8081c895e9",
+     "bytes": 8498632912
+    },
+    "model-00013-of-00017.safetensors": {
+     "sha256": "bbafc2f600a94dd8968fd9d9820c11e9039524def5d5d9aab939f82d16efc4bc",
+     "bytes": 8496560936
+    },
+    "model-00014-of-00017.safetensors": {
+     "sha256": "0e09567a49f109c43d97621923253103f49fba4d04e3b95ccc50e34f2b1131f0",
+     "bytes": 4205339304
+    },
+    "model-00015-of-00017.safetensors": {
+     "sha256": "66e3f88eba871acd9df219c7d96b241cc1dd7ec600852804a06a7716027642f9",
+     "bytes": 2565653752
+    },
+    "model-00016-of-00017.safetensors": {
+     "sha256": "76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5",
+     "bytes": 101535150936
+    },
+    "model-00017-of-00017.safetensors": {
+     "sha256": "9dc51433e195bc78b5ad846b68643cc0351d3b174e5e4309222d3b7402c83afd",
+     "bytes": 101537926640
+    }
+   },
+   "_pack_digest_note": "Manifest digest over the pinned files below (canonical per-file sha256/bytes). Engine fingerprint recorded from `rexl3-serve --print-fingerprints` header-only read of the release pack."
+  }
+ }
+}

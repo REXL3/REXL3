@@ -1,0 +1,6 @@
+{
+ "architectures": [
+  "Qwen3_5ForConditionalGeneration"
+ ],
+ "model_type": "qwen3_5"
+}

@@ -56,6 +56,30 @@ class VerifyTest(unittest.TestCase):
         write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
         self.assertTrue(self.verify())
 
+    def test_tree_under_the_renamed_runtime_id_passes_with_the_reviewed_alias(self):
+        # MODEL.json names the runtime's current id; the v1 tree was sealed under its reviewed earlier id.
+        doc = self.f.model_doc(FAMILY, MODEL, runtime_id='synthetic-renamed')
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
+        self.assertTrue(self.verify())
+        with patch.dict(e.RUNTIME_ID_ALIASES, {('synthetic-renamed', 'single'): 'synthetic-demo'}):
+            self.assertEqual(self.verify(), [])
+
+    def test_renamed_runtime_alias_is_exact(self):
+        doc = self.f.model_doc(FAMILY, MODEL, runtime_id='synthetic-renamed')
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
+        for aliases in ({('synthetic-renamed', 'other-profile'): 'synthetic-demo'},   # another profile choice
+                        {('synthetic-renamed', 'single'): 'synthetic-other'},         # another earlier id
+                        {('synthetic-other', 'single'): 'synthetic-demo'}):           # another current id
+            with self.subTest(aliases=aliases), patch.dict(e.RUNTIME_ID_ALIASES, aliases):
+                self.assertTrue(self.verify())
+
+    def test_renamed_runtime_alias_is_one_way(self):
+        # A MODEL.json naming the earlier id does not admit a tree sealed under the current id.
+        doc = self.f.model_doc(FAMILY, MODEL, runtime_id='synthetic-earlier')
+        write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))
+        with patch.dict(e.RUNTIME_ID_ALIASES, {('synthetic-demo', 'single'): 'synthetic-earlier'}):
+            self.assertTrue(self.verify())
+
     def test_model_json_folder_mismatch_is_refused(self):
         doc = self.f.model_doc(FAMILY, 'other-model')
         write(self.tree.parent, 'MODEL.json', e.json_bytes(doc))

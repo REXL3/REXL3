@@ -1,0 +1,14 @@
+{
+  "mtp.0.ffn.experts.0.w1.trellis": { "dtype": "I16", "shape": [320, 144, 32] },
+  "mtp.0.ffn.experts.0.w1.suh": { "dtype": "F16", "shape": [5120] },
+  "mtp.0.ffn.experts.0.w1.svh": { "dtype": "F16", "shape": [2304] },
+  "mtp.0.ffn.experts.0.w1.mul1": { "dtype": "I32", "shape": [] },
+  "mtp.0.ffn.experts.0.w2.trellis": { "dtype": "I16", "shape": [144, 320, 32] },
+  "mtp.0.ffn.experts.0.w2.suh": { "dtype": "F16", "shape": [2304] },
+  "mtp.0.ffn.experts.0.w2.svh": { "dtype": "F16", "shape": [5120] },
+  "mtp.0.ffn.experts.0.w2.mul1": { "dtype": "I32", "shape": [] },
+  "mtp.0.ffn.experts.0.w3.trellis": { "dtype": "I16", "shape": [320, 144, 32] },
+  "mtp.0.ffn.experts.0.w3.suh": { "dtype": "F16", "shape": [5120] },
+  "mtp.0.ffn.experts.0.w3.svh": { "dtype": "F16", "shape": [2304] },
+  "mtp.0.ffn.experts.0.w3.mul1": { "dtype": "I32", "shape": [] }
+}

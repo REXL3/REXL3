@@ -238,6 +238,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             profile_bytes = head_bytes(tree_path + '/profile.json')
             profile = e.loads(profile_bytes)
             models = e.loads(head_bytes(tree_path + '/model.lock.json'))
+            profile = approved_view(profile, approval_doc)
             problems = capability_problems(profile, model_doc, models=models)
             problems = resolve_vision_off(problems, profile, sealed_vision_exceptions(approval_doc, asset_root))
             report('capability contract', not problems, '' if not problems else '; '.join(problems))
@@ -299,6 +300,16 @@ def speculation_on(argv, *, draft_pack=False):
             drafting = False
         index += 1
     return declared and drafting and mode in SPECULATIVE_MODES
+
+
+def approved_view(profile, approval_doc):
+    """The profile restricted to the choices the sealed approval names. A packaged choice without a receipt
+    (tp2 beside tp1, D38/D53) is not approved, so the capability contract is judged on the approved choices only.
+    No approval or no named choice: the profile unchanged (the contract then judges every packaged choice)."""
+    approved = approval_doc.get('profiles') if isinstance(approval_doc, dict) else None
+    if isinstance(approved, dict) and approved and isinstance(profile.get('profiles'), dict):
+        return dict(profile, profiles={n: c for n, c in profile['profiles'].items() if n in approved})
+    return profile
 
 
 def capability_problems(profile, model_doc, models=None):

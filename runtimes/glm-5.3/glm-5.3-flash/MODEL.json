@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "Glm5NextForConditionalGeneration"
+  ],
+  "display_name": "GLM-5.3-Flash",
+  "engine_family": "glm",
+  "family": "glm-5.3",
+  "model": "glm-5.3-flash",
+  "pack": {
+    "bits": "2.25",
+    "format": "exl3",
+    "target_repo": "r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+    "target_revision": "b3194b87af5665bd8b1dd6316c99a48607fc137d"
+  },
+  "runtime_id": "glm53-flash-2.25bpw-sm121",
+  "schema": "rexl3.prod-model.v1"
+}

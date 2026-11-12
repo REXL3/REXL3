@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "name": "glm-sc410-tp2",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The turboderp GLM-5.3-Flash-exl3 sc_4.10bpw pack (exllamav3 1.6.2, 156.19 GiB: routed experts K4 with one layer at K5, attention and the shared experts K8, lm_head K6, an EXL3 K6 vision tower) as a two-rank tensor-parallel group on the GLM track's nodes: N3 = rank 0 (it holds the verified pack), N2 = rank 1 (a copy at the same path). Each rank maps the pack with its share of the routed experts (0..144 | 144..288) and reads and allocates only those; a rank that does not serve images claims and skips the vision tower (--no-vision; a follower always). The binary must be a build that maps this pack (branch glm/sc410-vision or later: older builds refuse its EXL3 tower even under --no-vision). NCCL as the other CRS812 kits (enP7s7, rocep1s0f0 and roceP2p1s0f0 and the env file are present on both gn100s, checked 2026-10-17). The launcher (rexl3-cluster) must have the gn100 deny list lifted (4ca3356b, on integ/main-families and nemotron/main; this file validates with that launcher, checked 2026-10-17): the GLM TP branches' launcher still refuses N2 and N3 by address. Not run yet: the figures are the rank planner's on the pack's header (crates/model/src/families/glm/tp_boot.rs the_sc410_ranks_plan_from_their_share, docs/GLM_TP.md section 12). Text only: --no-vision, --prefix-cache off, --spec none --no-drafts, pinned --slots and --kv-tokens. nccl.lib names the CRS812 fabric's own NCCL build (2.30.7, the path the cluster.crs812-2node.json and cluster.smoke-2node.json kits use, byte-identical on N2 and N3): the gn100s have no system libnccl and the runtime guesses no directory (crates/cuda/src/nccl.rs), so without it the group cannot boot there (added by lane G-2N 2026-10-17, proposed to the main session as D-G5).",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "expected_hostname": "host-b"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "expected_hostname": "host-c"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "disabled": true,
+      "reason": "the Nemotron track's node during the GLM sc_4.10bpw window (the GLM track runs on N2 + N3)"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ],
+    "lib": "/srv/rexl3/nccl/lib/libnccl.so.2"
+  },
+  "pack": "/srv/models/glm53-flash-exl3-sc410",
+  "memory": {
+    "_comment": "a rank's regions 80.53 GiB (the replicated trunk and global, its half of the routed experts; no NextN layer, no tower) plus 2 slots of KDA state, the 16,384-token KV pool and the 512-row chunk's scratch, and the serving floor (8 GiB): the planner grants these flags from 94.375 GiB free on either rank (RED-SNOW's 108.4 GiB is that pack's 94.61 GiB a rank); 1.6 GiB of margin as the RED-SNOW kits keep",
+    "min_free_gib": 96
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--no-vision",
+      "--slots",
+      "2",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "16384",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "none",
+      "--no-drafts",
+      "--prefix-cache",
+      "off",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-sc410-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 900,
+    "ready_timeout_s": 1800,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N3",
+        "N2"
+      ],
+      "tp_port": 29614,
+      "http_port": 8955,
+      "http_host": "0.0.0.0"
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 0,
+    "window_s": 900
+  }
+}

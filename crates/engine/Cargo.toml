@@ -1,0 +1,13 @@
+[package]
+name = "gb-engine"
+description = "Step loop over a Backend trait, the exactness harness, and a CPU mock backend"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gb-sampling = { path = "../sampling" }
+gb-spec = { path = "../spec" }
+gb-sched = { path = "../sched" }

@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "name": "glm-redsnow-tp2-vision",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The RED-SNOW 4.91bpw GLM-5.3-Flash pack with IMAGES at TP=2 (lane L13, docs/GLM_TP.md section 10): N4 = rank 0 (serves HTTP, holds the vision tower: its 347 tensors are byte-identical to the 2.25bpw pack's, so the tower and its validation carry over), N1 = rank 1 (no tower). Each rank maps and allocates only its share of the routed experts (94.6 GiB). No single-node phase (186 GiB does not fit one node): two independent boots must give byte-identical replies and row digests. --max-image-tokens 4096 (not 8,000): the tower's scratch 0.55 GiB and a features reserve of 0.50 GiB (2 slots) on rank 0, so the leader keeps about 1 GiB more than at 8,000 tokens; images over the limit are scaled, not refused. The rank planner (tp_boot tests, 117 GiB free): rank 0 94.61 GiB + tower 1.60 GiB + reserve 0.50 GiB, free after the weights and the tower 20.79 GiB; rank 1 94.59 GiB, free after 22.41 GiB. Rank 0 also holds the server's image-preparation credit (host memory for decoding images, HTTP side, rank 0 only; leader_flags caps it at 1 GiB instead of the 2 GiB default): about 13.5 to 14.5 GiB stay available on N4 with no image in preparation and 12.5 to 13.5 GiB at the cap, 15.5 to 16 GiB on N1, while the group runs: under the box's 20 GiB rule (stated, not hidden; the kit records the MemAvailable minimum on both nodes). N2 and N3 are the gn100s: disabled by owner rule.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {
+      "name": "N1",
+      "number": 1,
+      "address": "192.0.2.1",
+      "expected_hostname": "host-a"
+    },
+    {
+      "name": "N2",
+      "number": 2,
+      "address": "192.0.2.2",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N3",
+      "number": 3,
+      "address": "192.0.2.3",
+      "disabled": true,
+      "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"
+    },
+    {
+      "name": "N4",
+      "number": 4,
+      "address": "192.0.2.4",
+      "expected_hostname": "host-d"
+    }
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": [
+      "rocep1s0f0:1",
+      "roceP2p1s0f0:1"
+    ]
+  },
+  "pack": "/srv/models/vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+  "memory": {
+    "_comment": "rank 0 (N4) 94.61 + tower 1.60 + reserve 0.50 + runtime 5.75 + floor 8 = 110.5 GiB; rank 1 (N1) 108.4 GiB (lane L9's figure)",
+    "min_free_gib": 110
+  },
+  "serve": {
+    "flags": [
+      "--allow-unvalidated-pack",
+      "--backend",
+      "cuda",
+      "--slots",
+      "2",
+      "--max-model-len",
+      "8192",
+      "--kv-tokens",
+      "16384",
+      "--prefill-chunk",
+      "512",
+      "--spec",
+      "none",
+      "--no-drafts",
+      "--prefix-cache",
+      "off",
+      "--max-image-tokens",
+      "4096",
+      "--served-model-name",
+      "glm"
+    ],
+    "env": {
+      "REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-redsnow-v-digests.log"
+    }
+  },
+  "tp": {
+    "connect_timeout_s": 900,
+    "ready_timeout_s": 1800,
+    "peer_timeout_s": 15,
+    "shutdown_grace_s": 20
+  },
+  "groups": [
+    {
+      "name": "g0",
+      "ranks": [
+        "N4",
+        "N1"
+      ],
+      "tp_port": 29616,
+      "http_port": 8957,
+      "http_host": "0.0.0.0",
+      "min_free_gib": [
+        111,
+        110
+      ]
+    }
+  ],
+  "supervisor": {
+    "backoff_base_s": 15,
+    "backoff_cap_s": 300,
+    "stable_after_s": 300,
+    "max_restarts": 0,
+    "window_s": 900
+  }
+}

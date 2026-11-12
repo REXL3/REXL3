@@ -67,7 +67,9 @@ class ManifestSchemaTest(unittest.TestCase):
             validate_manifest(carried_manifest('T3'), VERSION)
 
     def test_malformed_qualified_engine_release_tag_is_rejected(self):
-        for tag in ('engine-v0.1.1', 'engine-v0.1.1-1111111', 'engine-v0.1.1-1111111g', 'engine-v0.1.1-11111111-extra'):
+        for tag in ('engine-v0.1.1', 'engine-v0.1.1-1111111', 'engine-v0.1.1-1111111g', 'engine-v0.1.1-11111111-extra',
+                    'engine-v0.1.1-dev', 'engine-v0.1.1-dev-1111111', 'engine-v0.1.1-dev-11111111',
+                    'engine-v0.1.1-rc-11111111'):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'invalid qualified engine release tag'):
                 validate_manifest(carried_manifest(qualified_engine_release_tag=tag), VERSION)
 

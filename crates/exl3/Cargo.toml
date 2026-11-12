@@ -1,0 +1,15 @@
+[package]
+name = "gb-exl3"
+description = "EXL3 (ExLlamaV3 trellis) format: metadata scan, bit-exact CPU decoder, float64 reference layer"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "exl3-inspect"
+path = "src/bin/inspect.rs"

@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "DeepseekV41ForCausalLM"
+  ],
+  "display_name": "DeepSeek-V4.1-Flash-1017",
+  "engine_family": "deepseek_v41",
+  "family": "deepseek-v4.1",
+  "model": "deepseek-v4.1-flash-1017",
+  "pack": {
+    "bits": "1.55",
+    "format": "exl3",
+    "target_repo": "vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+    "target_revision": "cba79c67582950ea44a4a449b3bb85b800748a35"
+  },
+  "runtime_id": "dsv41-flash-1017-sage-1.55",
+  "schema": "rexl3.prod-model.v1"
+}

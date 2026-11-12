@@ -33,7 +33,15 @@ DeepSeek-V4.1-Flash-1017.
     (`carried_forward: true`, `qualification_tier: "T0"`).
   - **T1 / T2** (shared-glue smoke / gate-scoped re-run): the required gates re-run on the new
     engine binary, unaffected gate receipts carry forward (`carried_gates`), and a NEW approval is
-    sealed on the new engine build.
+    sealed on the new engine build. A carried gate's evidence keeps its source build's engine
+    commit, tree, binary, release lock and run paths; it must match the new build's model pack,
+    profile choice, capabilities, topology and context, and its source approval must be pinned in
+    the registry with `binary_sha256` and the profile's receipt digest. `exactness` and
+    `prefix_cache` always re-run. Instead of a sealed approval, the source may be a complete,
+    `all_pass` qualification bundle of the earlier build, shipped whole in the evidence with a
+    bit-identity record: the new build answers that bundle binary's requests with token-identical
+    outputs, a full-window request included. An entry sealed before carry-forward gets its pins
+    once with `tools/pin_carry_source.py`, which derives them from its verified sealed evidence.
   - **T3** (new model, or pack weight/sampling/chat-template change): the full nine-gate chain plus
     `Q200` runs again; nothing carries forward.
 - As the first release, v0.1.0 has no earlier engine release to carry from. The four originally
@@ -51,6 +59,10 @@ DeepSeek-V4.1-Flash-1017.
   `<model>` for `tp1`, `<model>-tp2` for `tp2` — packaged, sealed and promoted separately, so a
   `tp1` release never waits on its `tp2` sibling. Each unit seals its own qualification receipts on
   its own runtime id and topology; a receipt is never reused across runtime ids or topologies.
+  While a source tree still packages both profiles in one `profile.json`, the sealed approval names the
+  profiles it qualified (a non-empty subset of the packaged profiles that includes the default profile);
+  a packaged profile without a receipt in the approval is not approved, is not judged by the model-branch
+  check, and is not part of the release.
 
 ## The group freeze on dev
 
@@ -117,6 +129,16 @@ rulesets or settings):
    merge commit, a draft release with the notes and assets, verifies uploaded digests, then publishes.
 5. The maintainer restores the tag ruleset; `python3 tools/cut_release.py --version vX.Y.Z --verify`
    confirms the lock is restored and the published release matches the manifest.
+
+### Agents and the ceremony
+
+An agent that prepares a release runs only the read-only steps: the dry run (step 2) and, after the maintainer has
+published, `--verify`. For each write step (3, 4 and 5) it posts a decision packet (AGENTS.md, Always 9) with the exact
+command, the tag, the release PR merge commit printed in the `DRY_RUN_OK` line, the checkout whose
+`releases/<version>/NOTES.md` becomes the release body, and what is restored afterwards. `cut_release.py` tags the
+release PR's merge commit but reads `NOTES.md` from the checkout it runs in, so the packet names that checkout and the
+two must not be allowed to drift apart unnoticed. The maintainer runs exactly what the packet states; a different
+command, tag or checkout needs a new packet.
 
 `--publish` and `--verify` are mutually exclusive; `--repo` defaults to `REXL3/REXL3` and
 `--repo-root` to `.`; refusals print `CUT_REFUSED: ...` on stderr and exit 2.

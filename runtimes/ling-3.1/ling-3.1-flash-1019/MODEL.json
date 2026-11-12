@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "BailingMoeV3ForCausalLM"
+  ],
+  "display_name": "Ling-3.1-Flash-1019",
+  "engine_family": "bailing_moe_v3",
+  "family": "ling-3.1",
+  "model": "ling-3.1-flash-1019",
+  "pack": {
+    "bits": "1.51",
+    "format": "exl3",
+    "target_repo": "vcruz305/Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw",
+    "target_revision": "437b03e6ddcc8b1ed653619aa8f266bbeeecd084"
+  },
+  "runtime_id": "ling31-flash-1019-sage-1.51",
+  "schema": "rexl3.prod-model.v1"
+}

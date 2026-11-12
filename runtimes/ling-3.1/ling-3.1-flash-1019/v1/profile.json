@@ -1,0 +1,99 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "ling31-flash-1019-sage-1.51",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "f497a339684bbfe27262f3e4a1903eb05d7df34a",
+    "path": "docs/examples/cluster.ling31-sage-single.json",
+    "sha256": "922a4e923c3d22b7a75b8ed376df732e1bc44a853a5fbf5305ec57f0b44d689f"
+  },
+  "target_repo": "vcruz305/Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw",
+  "default_profile": "ling31-single-262k",
+  "profiles": {
+    "ling31-single-262k": {
+      "kind": "single",
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir",
+        "binary_dir"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--max-model-len",
+        "262144",
+        "--slots",
+        "1",
+        "--spec",
+        "mtp",
+        "--prefix-cache",
+        "on",
+        "--no-vision",
+        "--prefill-chunk",
+        "512",
+        "--heartbeat-stale-secs",
+        "1800",
+        "--request-timeout",
+        "7200",
+        "--served-model-name",
+        "Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw"
+      ],
+      "env": {
+        "REXL3_MEMORY_FLOOR_GIB": "2"
+      },
+      "files": {},
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 600,
+      "http_port": 8889,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 256
+      }
+    }
+  },
+  "qualification": {
+    "state": "verified",
+    "evidence": [
+      {
+        "host": "1x NVIDIA GB10 (sm_121, CUDA 13.0, driver 580.178.04)",
+        "engine_commit": "dc884cdaa0f465d4c89b294055f88ecd0da5199b",
+        "kernel_hash": "ddd70252d3a87f9a",
+        "jobs": [
+          "20261108-180659-ling31-v011-manual-512"
+        ],
+        "boot_ready_s": 38.034,
+        "weights_gib": 106.3,
+        "prefill_chunk": 512,
+        "prefix_cache_plan": "entries=15 pages=5069 gib=0.06 reach_tokens=262144 where=disk disk_quota_gib=44.99 (REXL3_MEMORY_FLOOR_GIB=2)",
+        "decode_ttft_s": 0.2666,
+        "decode_completion_tokens": 215,
+        "decode_tok_per_s": 25.79,
+        "smoke": "Five streamed HTTP 200 chat completions at the full 262,144-token contract; median decode 25.79 tok/s"
+      }
+    ]
+  },
+  "configuration_state": "frozen"
+}

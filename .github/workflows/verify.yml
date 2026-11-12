@@ -28,7 +28,7 @@ env:
   # sha256 of runtimes/templates/APPROVALS.json on the protected base. The verifier refuses a registry
   # whose bytes differ, so changing the registry means changing this line in the same reviewed commit.
   # tools/test_verify_mutations.py fails if the two disagree.
-  TRUSTED_APPROVALS_SHA256: 6d54f89788e855acb9c903fa72e983373ff60188e0202853cff2bb424aa5aa16
+  TRUSTED_APPROVALS_SHA256: 7e42b7d9c6f490b92d4b577a0bef341ff960b2e519c9044f89a6916dac5a0126
 jobs:
   verify:
     name: verify

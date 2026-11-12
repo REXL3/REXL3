@@ -187,8 +187,14 @@ def check_pr_rules(repo, pr, title, head_ref, token, files=None):
         return results
 
     if kind == 'model-approval':
-        allowed = {'runtimes/templates/APPROVALS.json', '.github/workflows/verify.yml'}
-        bad = sorted(names - allowed)
+        bad = []
+        for path in sorted(names):
+            if path in {'runtimes/templates/APPROVALS.json', '.github/workflows/verify.yml'}:
+                continue
+            match = re.fullmatch(r'runtimes/templates/approvals/([^/]+)/([^/]+)\.json', path)
+            if match and m.MODEL_NAME_RE.fullmatch(match[1]) and match[2] == model:
+                continue
+            bad.append(path)
         report('scope', not bad, '' if not bad else 'out of scope: ' + ', '.join(bad))
         ok, reason = verify_yml_diff_ok(files, repo, pr, token, head_ref=head_ref)
         report('verify pin only', ok, reason)
@@ -222,7 +228,8 @@ def check_pr_rules(repo, pr, title, head_ref, token, files=None):
         scope_bad = []
         for item in files:
             path = item['filename']
-            if SEALED_TREE_RE.match(path) or path == 'runtimes/templates/APPROVALS.json':
+            if (SEALED_TREE_RE.match(path) or path == 'runtimes/templates/APPROVALS.json'
+                    or path.startswith('runtimes/templates/approvals/')):
                 scope_bad.append(path)
         report('scope', not scope_bad, '' if not scope_bad else 'forbidden paths: ' + ', '.join(scope_bad))
         behavior = any(path.startswith(('tools/', '.github/')) for path in names)
@@ -237,16 +244,36 @@ def check_pr_rules(repo, pr, title, head_ref, token, files=None):
             report('fragment', True, 'not applicable (DOCS-only or no behavior change)')
         return results
 
-    # release/v<X.Y.Z>
+    # release/v<X.Y.Z>: one reviewed cut may carry every promoted model, its
+    # modular registry anchors, pack docs and the corresponding engine source.
     version = model
     scope_bad = []
+    source_files = {
+        '.rexl3_commit', 'Cargo.lock', 'Cargo.toml', 'SOURCE_BUILD.md',
+        'SOURCE_IDENTITY.json', 'rustfmt.toml', 'tools/switch_registry.json',
+    }
     for item in files:
         path = item['filename']
-        if path.startswith(f'releases/{version}/') or path == 'CHANGELOG.md':
+        if path in {f'releases/{version}/manifest.json', f'releases/{version}/NOTES.md', 'CHANGELOG.md'}:
             continue
         if path.startswith('changes/unreleased/'):
             if item['status'] != 'removed':
                 scope_bad.append(path + ' (must be a deletion)')
+            continue
+        runtime = re.fullmatch(r'runtimes/([^/]+)/([^/]+)/(.+)', path)
+        if runtime and runtime[1] != 'templates':
+            if (m.MODEL_NAME_RE.fullmatch(runtime[1]) and m.MODEL_NAME_RE.fullmatch(runtime[2])
+                    and re.fullmatch(r'(?:MODEL\.json|LATEST|v[1-9][0-9]*/.+)', runtime[3])):
+                continue
+        module = re.fullmatch(r'runtimes/templates/approvals/([^/]+)/([^/]+)\.json', path)
+        if module and all(m.MODEL_NAME_RE.fullmatch(part) for part in module.groups()):
+            continue
+        if path == 'runtimes/templates/APPROVALS.json':
+            continue
+        pack_doc = re.fullmatch(r'docs/packs/([^/]+)\.md', path)
+        if pack_doc and m.MODEL_NAME_RE.fullmatch(pack_doc[1]):
+            continue
+        if path in source_files or path.startswith(('crates/', 'testdata/')):
             continue
         scope_bad.append(path)
     report('scope', not scope_bad, '' if not scope_bad else 'out of scope: ' + ', '.join(scope_bad))

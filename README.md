@@ -340,18 +340,17 @@ Every PR to `main` must pass four required checks, each of which always reports 
 that succeed as a no-op; never workflow-level path or branch filters):
 
 - `verify` — the production gate: from the protected base revision, it downloads the authenticated dev
-  release assets for the candidate trees (`tools/fetch_dev_assets.py`, tags derived from each registry
-  entry's `runtime_id`), verifies every tree under `runtimes/` against the pinned registry
-  (`tools/verify_runtime_tree.py`), and runs the unit tests. `MODEL.json` must agree with the sealed
-  approval, and the registry must match the `TRUSTED_APPROVALS_SHA256` pin in
-  `.github/workflows/verify.yml`.
+  release assets for newly added or changed candidate trees (`tools/fetch_dev_assets.py`, diff-scoped against
+  `main` with 4-worker concurrency; full sweep on `main` pushes), verifies every tree, `MODEL.json`, `LATEST`,
+  and immutable/append-only registry anchor under `runtimes/templates/APPROVALS.json` +
+  `runtimes/templates/approvals/<family>/<model>.json` (`tools/verify_runtime_tree.py`), and runs the unit tests.
 - `pr-rules` — title (`TYPE: Past-tense summary`), branch name, path scope per branch type, and the
   `changes/unreleased/` fragment rule.
-- `model-completeness` — runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success
-  otherwise.
-- `local-validation` — for model PRs, an APPROVED review by a maintainer other than the author whose
-  body carries a `LOCAL-VALIDATION v1` block for the current head; no-op success for non-model PRs and
-  `model/*-approval` PRs.
+- `model-completeness` — runs `tools/check_model_branch.py` across every changed model folder on `release/v<X.Y.Z>`
+  and `model/<model>` PRs; no-op success otherwise.
+- `local-validation` — for `release/v<X.Y.Z>` and `model/<model>` PRs that touch model trees, an APPROVED review
+  at the exact PR head `commit_id` by a maintainer other than the author carrying a `LOCAL-VALIDATION v1` block
+  covering every changed model; no-op success when no model trees changed.
 
 `governance-audit` is a scheduled daily plus manual, read-only audit (not required): it fails when live
 releases, merged-PR reviews or live rulesets deviate from the committed policy on `main`.

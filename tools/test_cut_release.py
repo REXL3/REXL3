@@ -19,6 +19,7 @@ DEV = 'REXL3/REXL3-dev'
 VERSION = 'v0.1.0'
 FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
 MERGE = 'c' * 40
+PR_HEAD = 'e' * 40
 HEX64 = 'd' * 64
 
 # Release asset names spelled out literally: the model version in a manifest is already `v<N>`, so a
@@ -88,9 +89,10 @@ class FakeApi(c.Api):
             if not self.merged:
                 return [{'number': 9, 'merged_at': None, 'user': {'login': 'vcruz305'}}]
             return [{'number': 9, 'merged_at': '2026-10-26T00:00:00Z', 'merge_commit_sha': MERGE,
-                     'user': {'login': 'vcruz305'}}]
+                     'user': {'login': 'vcruz305'}, 'head': {'sha': PR_HEAD}}]
         if '/reviews' in path:
-            return self.reviews
+            page = int(urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get('page', ['1'])[0])
+            return self.reviews[(page - 1) * 100:page * 100]
         if '/git/ref/tags/' in path:
             tag = path.rsplit('/', 1)[1]
             if tag in self.existing_tags or 'refs/tags/' + tag in self.created_refs:
@@ -188,10 +190,39 @@ class CutFixture(unittest.TestCase):
         write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
 
     def api(self, **kwargs):
-        return FakeApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'am423'}}], **kwargs)
+        return FakeApi(self.fixtures, [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'am423'}}], **kwargs)
 
     def cut(self, api, mode='dry'):
         return c.cut(api, REPO, VERSION, mode, repo_root=str(self.root))
+
+
+class ApiUploadTest(unittest.TestCase):
+    def test_upload_uses_uploads_host_and_raw_octet_stream(self):
+        seen = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"size": 3}'
+
+        class Opener:
+            def urlopen(self, request, timeout):
+                seen.append((request, timeout))
+                return Response()
+
+        result = c.Api('token', REPO, opener=Opener()).upload(12, 'a b.tar.gz', b'abc')
+        self.assertEqual(result['size'], 3)
+        request, timeout = seen[0]
+        self.assertTrue(request.full_url.startswith('https://uploads.github.com/repos/REXL3/REXL3/releases/12/assets?'))
+        self.assertIn('name=a%20b.tar.gz', request.full_url)
+        self.assertEqual(request.data, b'abc')
+        self.assertEqual(request.headers['Content-type'], 'application/octet-stream')
+        self.assertEqual(timeout, 600)
 
 
 class DryRunTest(CutFixture):
@@ -205,9 +236,24 @@ class DryRunTest(CutFixture):
             self.cut(self.api(merged=False))
 
     def test_no_non_author_approval_refuses(self):
-        api = FakeApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'vcruz305'}}])
+        api = FakeApi(self.fixtures, [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'vcruz305'}}])
         with self.assertRaisesRegex(ValueError, 'non-author maintainer'):
             self.cut(api)
+
+    def test_outside_or_stale_approval_refuses(self):
+        for review in (
+                {'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'outside-random'}},
+                {'state': 'APPROVED', 'commit_id': 'f' * 40, 'user': {'login': 'am423'}}):
+            with self.subTest(review=review):
+                api = FakeApi(self.fixtures, [review])
+                with self.assertRaisesRegex(ValueError, 'non-author maintainer'):
+                    self.cut(api)
+
+    def test_review_pagination_finds_a_qualified_head_approval(self):
+        filler = [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'outside-random'}}
+                  for _ in range(100)]
+        qualified = {'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'am423'}}
+        self.assertEqual(self.cut(FakeApi(self.fixtures, filler + [qualified])), 0)
 
     def test_existing_tag_refuses(self):
         with self.assertRaisesRegex(ValueError, 'tag already exists'):
@@ -273,6 +319,53 @@ class AssetNameTest(CutFixture):
         self.assertIn('synthetic-demo-vv1-bundle.tar.gz', published)
         with self.assertRaises(AssertionError):
             self.assertEqual(published, PUBLISHED_NAMES)
+
+
+class UnifiedReleaseCutTest(CutFixture):
+    def setUp(self):
+        super().setUp()
+        self.unified_tag = 'engine-v0.1.2-' + self.f.commit[:8]
+        prefix = 'synthetic-demo-v1'
+        original = {field: self.doc[field]['archive'] for field in
+                    ('bundle', 'source_asset', 'engine_source_asset', 'evidence_asset')}
+        payloads = {field: (self.f.assets / name).read_bytes() for field, name in original.items()}
+        self.doc['approve_tag'] = self.unified_tag
+        renamed = {}
+        for field, kind in (('bundle', 'bundle'), ('source_asset', 'source'), ('evidence_asset', 'evidence')):
+            renamed[field] = f'{prefix}-{kind}.tar.gz'
+        renamed['engine_source_asset'] = e.shared_engine_source_name(self.unified_tag)
+        for field, name in renamed.items():
+            self.doc[field]['archive'] = name
+            (self.f.assets / name).write_bytes(payloads[field])
+        self.approval.write_bytes(encoded(self.doc))
+        approval_hash = sha(self.approval.read_bytes())
+        key = f'{FAMILY}/{MODEL}/v1'
+        self.registry['approvals'][key]['approve_tag'] = self.unified_tag
+        self.registry['approvals'][key]['approval_sha256'] = approval_hash
+        write(self.root, 'runtimes/templates/APPROVALS.json', encoded(self.registry))
+        write(self.root / 'runtimes' / FAMILY / MODEL / 'v1', 'approval.json', self.approval.read_bytes())
+        self.manifest['models'][0]['approval_sha256'] = approval_hash
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        names = [f'{prefix}-approval.json'] + list(renamed.values())
+        (self.f.assets / names[0]).write_bytes(self.approval.read_bytes())
+        dev_assets = [{'id': i + 1, 'name': name, 'size': (self.f.assets / name).stat().st_size,
+                       'digest': 'sha256:' + e.sha256_file(self.f.assets / name)}
+                      for i, name in enumerate(names)]
+        self.fixtures['dev_release'] = {'id': 50, 'tag_name': self.unified_tag,
+                                        'draft': False, 'prerelease': False, 'assets': dev_assets}
+        self.fixtures['assets'] = {i + 1: (self.f.assets / name).read_bytes()
+                                   for i, name in enumerate(names)}
+        self.fixtures['assets'][99] = (self.f.assets / names[0]).read_bytes()[:0] + b'SYNTHETIC ENGINE ARTIFACT'
+
+    def test_publish_consumes_prefixed_assets_and_deduplicates_engine_source(self):
+        api = self.api()
+        with patch.object(c, 'dev_tag_commit', return_value=self.f.commit):
+            self.assertEqual(self.cut(api, 'publish'), 0)
+        published = {asset['name'] for asset in api.releases[VERSION]['assets']}
+        self.assertIn('synthetic-demo-v1-bundle.tar.gz', published)
+        self.assertIn(e.shared_engine_source_name(self.unified_tag), published)
+        self.assertNotIn('synthetic-demo-v1-engine-source.tar.gz', published)
+        self.assertEqual(published, c.model_assets(self.manifest, self.root))
 
 
 class DevReleaseApi(FakeApi):
@@ -379,7 +472,7 @@ class EngineReleaseCutTest(unittest.TestCase):
         self.dev_tags = {self.tag: self.f.commit}
 
     def api(self):
-        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'am423'}}],
+        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'am423'}}],
                              self.dev_releases, self.dev_tags)
 
     def test_publish_verifies_the_approval_with_the_engine_release_binaries(self):
@@ -506,7 +599,7 @@ class SeparateStageTest(unittest.TestCase):
                              'engine-v0.1.2-4208d848': engine_release}
 
     def api(self):
-        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'am423'}}], self.dev_releases, {})
+        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'am423'}}], self.dev_releases, {})
 
     def test_the_fixture_evidence_really_collides(self):
         self.assertTrue(self.shared)
@@ -601,7 +694,7 @@ class CarryForwardCutTest(unittest.TestCase):
         self.dev_tags = {self.old_tag: self.carried.commit, self.new_tag: self.fresh.commit}
 
     def api(self):
-        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'user': {'login': 'am423'}}],
+        return DevReleaseApi(self.fixtures, [{'state': 'APPROVED', 'commit_id': PR_HEAD, 'user': {'login': 'am423'}}],
                              self.dev_releases, self.dev_tags)
 
     def test_download_stages_each_models_own_engine_binaries(self):

@@ -74,6 +74,15 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertNotIn('statuses: write', body)
         self.assertNotIn('pull_request_target', body)
 
+    def test_verify_is_unpinned_diff_scoped_and_full_on_push(self):
+        body = text('verify.yml')
+        self.assertNotIn('TRUSTED_APPROVALS_SHA256', body)
+        self.assertEqual(body.count('--base base'), 2)
+        self.assertEqual(body.count('FULL=(--full)'), 2)
+        completeness = text('model-completeness.yml')
+        self.assertNotIn('TRUSTED_APPROVALS_SHA256', completeness)
+        self.assertIn('--base base', completeness)
+
     def test_model_completeness_downloads_then_runs_base_checker(self):
         body = text('model-completeness.yml')
         self.assertIn('base/tools/fetch_dev_assets.py', body)

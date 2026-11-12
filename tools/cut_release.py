@@ -19,7 +19,6 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +34,7 @@ except ImportError:
 
 DEV_REPO = 'REXL3/REXL3-dev'
 API = 'https://api.github.com'
+UPLOAD_API = 'https://uploads.github.com'
 MAX_ASSET_BYTES = 8 * 1024 ** 3
 
 
@@ -78,16 +78,11 @@ class Api:
         return self._request('GET', path, accept='application/octet-stream', raw=True)
 
     def upload(self, release_id, name, data):
-        boundary = uuid.uuid4().hex
-        head = (f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; filename="{name}"\r\n'
-                f'Content-Type: application/octet-stream\r\n\r\n').encode()
-        tail = f'\r\n--{boundary}--\r\n'.encode()
-        body = head + data + tail
         headers = {'Authorization': 'Bearer ' + self.token, 'User-Agent': 'rexl3-cut-release',
-                   'Accept': 'application/vnd.github+json',
-                   'Content-Type': 'multipart/form-data; boundary=' + boundary}
-        request = urllib.request.Request(f'{API}/repos/{self.repo}/releases/{release_id}/assets?name={urllib.parse.quote(name, safe="")}',
-                                         data=body, headers=headers, method='POST')
+                   'Accept': 'application/vnd.github+json', 'Content-Type': 'application/octet-stream'}
+        request = urllib.request.Request(
+            f'{UPLOAD_API}/repos/{self.repo}/releases/{release_id}/assets?name={urllib.parse.quote(name, safe="")}',
+            data=data, headers=headers, method='POST')
         try:
             with self.opener.urlopen(request, timeout=600) as response:
                 return json.loads(response.read().decode())
@@ -104,7 +99,7 @@ def maintainers(path):
     return owners
 
 
-def release_pr(api, repo, version):
+def release_pr(api, repo, version, owners):
     """The merged release PR for `version`: exactly one, merged, with a non-author maintainer approval."""
     head = f'{repo.split("/", 1)[0]}:release/{version}'
     pulls = api.get(f'/repos/{repo}/pulls?state=closed&base=main&head={urllib.parse.quote(head, safe="")}&per_page=100')
@@ -117,11 +112,24 @@ def release_pr(api, repo, version):
         raise ValueError('release PR is not merged')
     author = pull.get('user', {}).get('login')
     number = pull.get('number')
-    reviews = api.get(f'/repos/{repo}/pulls/{number}/reviews?per_page=100')
-    approved = any(r.get('state') == 'APPROVED' and r.get('user', {}).get('login') not in (None, author)
+    pr_head_sha = pull.get('head', {}).get('sha')
+    e.full_hash(pr_head_sha, e.HEX40)
+    reviews = []
+    page = 1
+    while True:
+        batch = api.get(f'/repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}')
+        e.require(isinstance(batch, list), 'release PR reviews response is malformed')
+        reviews.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    approved = any(r.get('state') == 'APPROVED'
+                   and r.get('user', {}).get('login') in owners
+                   and r.get('user', {}).get('login') != author
+                   and r.get('commit_id') == pr_head_sha
                    for r in reviews)
     if not approved:
-        raise ValueError('release PR has no approving review by a non-author maintainer')
+        raise ValueError('release PR has no approving review by a non-author maintainer at the PR head')
     merge_commit = pull.get('merge_commit_sha')
     e.full_hash(merge_commit, e.HEX40)
     return pull, merge_commit
@@ -157,7 +165,7 @@ def check_local_main(repo_root, version, token=None, api=None):
     changelog = root / 'CHANGELOG.md'
     if not changelog.is_file() or version not in changelog.read_text(encoding='utf-8'):
         raise ValueError('CHANGELOG.md has no entry for ' + version)
-    registry = e.load_json(root / 'runtimes/templates/APPROVALS.json')
+    registry = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
     for item in manifest['models']:
         folder = root / 'runtimes' / item['family'] / item['model']
         model_doc = m.parse_model_json(folder / 'MODEL.json')
@@ -246,13 +254,19 @@ def model_assets(manifest, repo_root=None):
     carried engine assets are read from the local prod tree when ``repo_root`` is given.
     """
     names = set(manifest['engine']['artifacts'])
+    shared_sources = {}
     if repo_root is not None:
         root = Path(repo_root)
         for item in manifest['models']:
-            if item.get('carried_forward') is not True:
-                continue
             tree = root / 'runtimes' / item['family'] / item['model'] / item['version']
             approval = e.load_json(tree / 'approval.json')
+            e.approval_assets(approval)
+            engine_source = approval['engine_source_asset']['archive']
+            if engine_source == e.shared_engine_source_name(approval.get('approve_tag')):
+                shared_sources[(item['family'], item['model'], item['version'])] = engine_source
+                names.add(engine_source)
+            if item.get('carried_forward') is not True:
+                continue
             engine = approval.get('engine_binaries')
             if engine is not None:
                 e.validate_engine_binaries(engine)
@@ -261,6 +275,8 @@ def model_assets(manifest, repo_root=None):
         prefix = asset_prefix(item)
         names.add(f'{prefix}-approval.json')
         for kind in ('bundle', 'source', 'engine-source', 'evidence'):
+            if kind == 'engine-source' and (item['family'], item['model'], item['version']) in shared_sources:
+                continue
             names.add(f'{prefix}-{kind}.tar.gz')
     return names
 
@@ -324,51 +340,99 @@ def stage_engine_binaries(api, approval, dest, engine_tag):
 
 
 def download_dev_assets(api, manifest, repo_root):
-    """Download the dev release for every model and verify it against the prod registry (local files).
+    """Download and verify each model, caching unified release metadata and shared bytes.
 
-    Each model is staged in its own directory, as fetch_dev_assets gives each tree its own asset
-    directory: receipts of different runtimes share member paths with different bytes. An approval
-    whose bundle leaves the native executables to the dev engine release is verified with those
-    executables, downloaded into the stage's ``engine/`` directory.
-
-    Returns a flat directory with the release asset files named exactly as they will be uploaded.
+    Legacy approve-* releases retain their exact inventory checks. A unified release
+    supplies one prefixed approval per model; only that approval's bound archives are
+    selected. Separate evidence stages and per-model verification remain mandatory.
     """
     root = Path(repo_root)
-    registry = e.load_json(root / 'runtimes/templates/APPROVALS.json')
+    registry = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
     approved = e.load_json(root / 'runtimes/templates/APPROVED.json')['templates']
     work = Path(tempfile.mkdtemp(prefix='.cut-release-'))
+    release_cache = {}
+    byte_cache = {}
+    original_api = api
+
+    class DownloadCache:
+        def get(self, *args, **kwargs):
+            return original_api.get(*args, **kwargs)
+
+        def download(self, path):
+            if path not in byte_cache:
+                byte_cache[path] = original_api.download(path)
+            return byte_cache[path]
+
+    api = DownloadCache()
+
+    def release_for(tag):
+        if tag not in release_cache:
+            release = original_api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(tag, safe="")}')
+            if release is None:
+                raise ValueError('dev release missing: ' + tag)
+            e.require(isinstance(release, dict) and release.get('tag_name') == tag
+                      and release.get('draft') is False and release.get('prerelease') is False
+                      and isinstance(release.get('assets'), list), 'unpublished or malformed dev release: ' + tag)
+            release_cache[tag] = release
+        return release_cache[tag]
+
+    def asset_bytes(asset):
+        name = asset.get('name')
+        if not name or '/' in name:
+            raise ValueError('unsafe dev asset name')
+        data = api.download(f'/repos/{DEV_REPO}/releases/assets/{asset["id"]}')
+        if asset.get('size') not in (None, len(data)):
+            raise ValueError('dev asset size mismatch: ' + name)
+        if asset.get('digest') not in (None, 'sha256:' + hashlib_hex(data)):
+            raise ValueError('dev asset digest mismatch: ' + name)
+        return data
+
     for item in manifest['models']:
         engine_tag = manifest['engine']['engine_release_tag']
         if item.get('carried_forward'):
-            # A carried-forward model was sealed against an earlier engine release; stage the binaries
-            # from that exact release so its approval verifies against the engine it was sealed with.
             engine_tag = item['qualified_engine_release_tag']
-        tag = f"approve-{item['runtime_id']}-{int(item['version'][1:])}"
-        key = m.registry_key(item['family'], item['model'], int(item['version'][1:]))
+        version = int(item['version'][1:])
+        key = m.registry_key(item['family'], item['model'], version)
         entry = registry.get('approvals', {}).get(key)
         if not isinstance(entry, dict):
             raise ValueError('registry entry missing: ' + key)
-        release = api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(tag, safe="")}')
-        if release is None:
-            raise ValueError('dev release missing: ' + tag)
+        e.validate_registry_entry(key, entry)
+        tag = entry.get('approve_tag') or f"approve-{item['runtime_id']}-{version}"
+        e.validate_request(item['runtime_id'], tag, version)
+        release = release_for(tag)
+        remote = {asset.get('name'): asset for asset in release.get('assets', [])}
+        e.require(len(remote) == len(release['assets']), 'duplicate dev release asset name')
         dest = work / '.stage' / item['family'] / item['model'] / item['version']
         dest.mkdir(parents=True)
-        for asset in release.get('assets', []):
-            name = asset.get('name')
-            if not name or '/' in name:
-                raise ValueError('unsafe dev asset name')
-            data = api.download(f'/repos/{DEV_REPO}/releases/assets/{asset["id"]}')
-            path = dest / name
-            path.write_bytes(data)
-            if asset.get('size') not in (None, len(data)):
-                raise ValueError('dev asset size mismatch: ' + name)
         approval = dest / 'approval.json'
-        if not approval.exists():
-            raise ValueError('dev release has no approval.json')
-        e.full_hash(entry['approval_sha256'])
-        if e.sha256_file(approval) != entry['approval_sha256']:
-            raise ValueError('dev approval bytes differ from the pinned registry')
-        doc = e.load_json(approval)
+        if e.is_engine_tag(tag):
+            approval_name = f"{item['runtime_id']}-v{version}-approval.json"
+            if approval_name not in remote:
+                raise ValueError('unified dev release has no model approval: ' + approval_name)
+            approval.write_bytes(asset_bytes(remote[approval_name]))
+            e.full_hash(entry['approval_sha256'])
+            if e.sha256_file(approval) != entry['approval_sha256']:
+                raise ValueError('dev approval bytes differ from the pinned registry')
+            doc = e.load_json(approval)
+            e.require(doc.get('approve_tag') == tag, 'unified dev approval tag mismatch')
+            for asset in e.approval_assets(doc):
+                name = asset['archive']
+                if name not in remote:
+                    raise ValueError('unified dev asset missing: ' + name)
+                (dest / name).write_bytes(asset_bytes(remote[name]))
+        else:
+            for asset in release.get('assets', []):
+                (dest / asset['name']).write_bytes(asset_bytes(asset))
+            if not approval.exists():
+                raise ValueError('dev release has no approval.json')
+            e.full_hash(entry['approval_sha256'])
+            if e.sha256_file(approval) != entry['approval_sha256']:
+                raise ValueError('dev approval bytes differ from the pinned registry')
+            doc = e.load_json(approval)
+        e.validate_request(doc.get('runtime_id'), doc.get('approve_tag'), doc.get('version'))
+        if e.is_engine_tag(tag):
+            e.require(dev_tag_commit(original_api, tag) == doc['source_commit'],
+                      'unified dev tag does not name the sealed source commit')
         # The bound evidence (receipts, observations, raw files) travels inside evidence.tar.gz.
         evidence = doc['evidence_asset']
         e.require(not any(name == 'engine' or name.startswith('engine/') for name in evidence['members']),
@@ -376,10 +440,6 @@ def download_dev_assets(api, manifest, repo_root):
         e.extract_files(dest / evidence['archive'], dest, evidence['members'])
         engine_dir = stage_engine_binaries(api, doc, dest / 'engine', engine_tag)
         e.verify_assets(approval, registry=registry, approved_templates=approved, engine_dir=engine_dir, key=key)
-        # A model whose engine binaries come from an engine release publishes those binaries as
-        # release assets too. Copy the staged files into the work dir top level, deduplicated by
-        # filename+sha256: shared engine releases (two carried models from the same tag) collide on
-        # identical bytes and are uploaded once; a same-name different-bytes collision is refused.
         if engine_dir is not None:
             for path in sorted(engine_dir.iterdir()):
                 if not path.is_file():
@@ -396,10 +456,17 @@ def download_dev_assets(api, manifest, repo_root):
         for kind, field in (('bundle', 'bundle'), ('source', 'source_asset'), ('engine-source', 'engine_source_asset'),
                             ('evidence', 'evidence_asset')):
             archive = doc[field]['archive']
-            (work / f'{prefix}-{kind}.tar.gz').write_bytes((dest / archive).read_bytes())
+            shared = archive == e.shared_engine_source_name(tag)
+            target = work / (archive if shared else f'{prefix}-{kind}.tar.gz')
+            data = (dest / archive).read_bytes()
+            if target.exists():
+                e.require(shared and e.sha256_file(target) == e.sha256_file(dest / archive),
+                          'release asset collision: ' + target.name)
+            else:
+                target.write_bytes(data)
     # Engine artifacts named by the manifest come from the dev engine release.
     engine_tag = manifest['engine']['engine_release_tag']
-    engine_release = api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(engine_tag, safe="")}')
+    engine_release = original_api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(engine_tag, safe="")}')
     if engine_release is None:
         raise ValueError('dev engine release missing: ' + engine_tag)
     engine_assets = {a['name']: a for a in engine_release.get('assets', [])}
@@ -411,7 +478,11 @@ def download_dev_assets(api, manifest, repo_root):
         e.full_hash(digest)
         if hashlib_hex(data) != digest:
             raise ValueError('engine artifact digest mismatch: ' + name)
-        (work / name).write_bytes(data)
+        target = work / name
+        if target.exists():
+            e.require(e.sha256_file(target) == digest, 'engine artifact collision: ' + name)
+        else:
+            target.write_bytes(data)
     return work
 
 
@@ -466,14 +537,16 @@ def cut(api, repo, version, mode, repo_root='.'):
         release = api.get(f'/repos/{repo}/releases/tags/{urllib.parse.quote(version, safe="")}')
         if release is None:
             raise ValueError('no published release for tag ' + version)
-        pull, merge_commit = release_pr(api, repo, version)
+        pull, merge_commit = release_pr(api, repo, version,
+                                        maintainers(Path(repo_root) / '.github/CODEOWNERS'))
         manifest = check_local_main(repo_root, version, api=api)
         published = verify_published(api, repo, version, merge_commit, manifest, repo_root=repo_root)
         print(f'VERIFIED {version} id={published["id"]} tag={version} commit={merge_commit}')
         return 0
     if tag_exists(api, repo, version):
         raise ValueError('tag already exists: ' + version)
-    pull, merge_commit = release_pr(api, repo, version)
+    pull, merge_commit = release_pr(api, repo, version,
+                                    maintainers(Path(repo_root) / '.github/CODEOWNERS'))
     immutable_releases(api, repo)
     manifest = check_local_main(repo_root, version, api=api)
     if mode == 'dry':

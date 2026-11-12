@@ -37,8 +37,53 @@ def tree_inventory(tree):
     return files
 
 
+def tree_key(family, model, tree):
+    return m.registry_key(family, model, int(tree.name[1:]))
+
+
+def _validate_local_metadata(tree, registry, family, model, *, authenticate=True):
+    """Validate local metadata, optionally pinning approval bytes before asset access."""
+    approval_path = e.safe_file(tree, 'approval.json')
+    doc = e.load_json(approval_path)
+    e.require(doc.get('schema') == SCHEMA, 'v2 approval required')
+    key = tree_key(family, model, tree)
+    entry = registry.get('approvals', {}).get(key)
+    e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
+    e.validate_registry_entry(key, entry)
+    if authenticate:
+        e.trusted_entry(approval_path, registry, key=key)
+    e.require(doc.get('version') == int(tree.name[1:]), 'runtime path version mismatch')
+    e.validate_request(doc.get('runtime_id'), doc.get('approve_tag'), doc.get('version'))
+    model_doc = m.validate_model_doc(m.parse_model_json(e.safe_file(tree.parent, 'MODEL.json')), family, model)
+    e.require(m.model_runtime_id_matches(model_doc.get('runtime_id'), doc),
+              'MODEL.json runtime_id differs from the sealed approval')
+    return doc
+
+
+def local_metadata_problems(trees, registry):
+    """Validate MODEL.json, LATEST and every local approval/registry binding."""
+    problems = []
+    folders = {}
+    for family, model, tree in trees:
+        folders.setdefault(tree.parent, (family, model, []))[2].append(tree.name)
+        try:
+            _validate_local_metadata(tree, registry, family, model)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            problems.append(str(tree) + ': ' + str(error))
+    for folder, (_, _, versions) in folders.items():
+        try:
+            raw = e.safe_file(folder, 'LATEST').read_bytes()
+            match = re.fullmatch(b'v([1-9][0-9]*)\n', raw)
+            if match is None:
+                raise ValueError('LATEST must contain exactly v<N> and one newline')
+            e.require('v' + match[1].decode() in versions, 'LATEST names no discovered runtime tree')
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            problems.append(str(folder) + ': ' + str(error))
+    return problems
+
+
 def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=None, family=None, model=None,
-                precomputed=None):
+                precomputed=None, trusted_source_registry=None):
     """Return named problems (empty means PASS). All inputs are read-only.
 
     ``precomputed`` (per-archive approval-listed member inventories) is passed
@@ -55,26 +100,18 @@ def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=
         key = m.registry_key(family, model, number)
         e.require(tree.parent.name == model and tree.parent.parent.name == family,
                   'tree path does not match family/model')
-        approval_path = e.safe_file(tree, 'approval.json')
-        doc = e.load_json(approval_path)
-        e.require(doc.get('schema') == SCHEMA, 'v2 approval required')
         e.require(isinstance(trusted_approvals, dict) and trusted_approvals.get('schema') == 'rexl3.approval-registry.v1',
                   'independently trusted approval registry required')
-        entry = trusted_approvals.get('approvals', {}).get(key)
-        e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
-        e.require(entry.get('runtime_id') == doc.get('runtime_id'),
-                  'registry runtime_id differs from the sealed approval')
-        model_path = e.safe_file(tree.parent, 'MODEL.json')
-        model_doc = m.validate_model_doc(m.parse_model_json(model_path), family, model)
-        e.require(m.model_runtime_id_matches(model_doc.get('runtime_id'), doc),
-                  'MODEL.json runtime_id differs from the sealed approval')
+        approval_path = e.safe_file(tree, 'approval.json')
+        _validate_local_metadata(tree, trusted_approvals, family, model, authenticate=False)
         actual = tree_inventory(tree)
         e.require(assets_dir is not None, 'authenticated dev assets directory required')
         asset_root = Path(assets_dir) / family / model / f'v{number}'
         asset_approval = e.safe_file(asset_root, 'approval.json')
         e.require(approval_path.read_bytes() == asset_approval.read_bytes(), 'tree/asset approval inequality')
         approved, _ = e.verify_assets(asset_approval, registry=trusted_approvals, approved_templates=approved_templates,
-                                      engine_dir=Path(asset_root) / 'engine', key=key, precomputed=precomputed)
+                                      engine_dir=Path(asset_root) / 'engine', key=key, precomputed=precomputed,
+                                      trusted_source_registry=trusted_source_registry)
         e.require(approved['version'] == number, 'runtime path version mismatch')
         expected = dict(approved['source_asset']['members'])
         expected['approval.json'] = dict(e.record(approval_path), mode=0o644)
@@ -118,24 +155,52 @@ def main(argv=None):
     parser.add_argument('--root', default='.')
     parser.add_argument('--approved', required=True, help='protected template allow-list JSON')
     parser.add_argument('--trusted-approvals', required=True)
-    parser.add_argument('--trusted-approvals-sha256', required=True)
+    parser.add_argument('--trusted-approvals-sha256')
     parser.add_argument('--assets-dir', required=True, help='asset root containing <family>/<model>/v<N>/approval.json')
+    parser.add_argument('--base', help='protected base checkout; unchanged trees need no dev download')
+    parser.add_argument('--full', action='store_true', help='verify every tree against authenticated dev assets')
     args = parser.parse_args(argv)
     try:
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
-        approved = e.load_json(args.approved)['templates']
+        candidate_registry = None
+        new_keys = set()
         trees = discover(args.root)
-        # Zero trees is a pass only while the pinned registry anchors nothing; a registry that anchors a tree
-        # which is missing, or a wrong --root, still stops here.
-        anchored = bool(registry.get('approvals'))
+        discovered_keys = {tree_key(family, model, tree) for family, model, tree in trees}
+        if args.base is not None:
+            base_registry = e.load_registry(Path(args.base) / 'runtimes/templates/APPROVALS.json')
+            e.require(registry == base_registry,
+                      'trusted approval registry differs from the protected base checkout')
+            candidate_registry = e.load_registry(Path(args.root) / 'runtimes/templates/APPROVALS.json')
+            new_keys = e.validate_registry_transition(base_registry, candidate_registry, discovered_keys)
+            # The candidate's allow-list is not a trust input (the protected one is
+            # used below), but deleting it still corrupts the proposed checkout.
+            candidate_templates = e.load_json(Path(args.root) / 'runtimes/templates/APPROVED.json').get('templates')
+            e.require(isinstance(candidate_templates, dict), 'candidate template allow-list required')
+        approved = e.load_json(args.approved)['templates']
+        # Zero trees is a pass only while the effective registry anchors nothing.
+        active = candidate_registry if candidate_registry is not None else registry
+        anchored = bool(active.get('approvals'))
         e.require(trees or not anchored, 'no runtime trees found but the registry anchors some')
-        problems = []
-        for family, model, tree in trees:
-            problems.extend(verify_tree(tree, approved, trusted_approvals=registry,
-                                       assets_dir=args.assets_dir, family=family, model=model))
+        # A byte-identical v<N>/ tree only skips transport and archive work. These
+        # local candidate checks are mandatory for every tree in every mode.
+        problems = local_metadata_problems(trees, active)
+        skipped = 0
+        if not problems:
+            for family, model, tree in trees:
+                key = tree_key(family, model, tree)
+                previous = Path(args.base) / tree.relative_to(e.checked_path(args.root)) if args.base is not None else None
+                if (previous is not None and not args.full and key not in new_keys and previous.is_dir()
+                        and tree_inventory(previous) == tree_inventory(tree)):
+                    # Exact tree equality plus the immutable base entry authenticates
+                    # the versioned bytes; metadata was still validated above.
+                    skipped += 1
+                    continue
+                problems.extend(verify_tree(tree, approved, trusted_approvals=active,
+                                           assets_dir=args.assets_dir, family=family, model=model,
+                                           trusted_source_registry=registry if args.base is not None else None))
         for problem in problems:
             print(problem)
-        print(f'{len(trees)} tree(s), {len(problems)} problem(s)')
+        print(f'{len(trees)} tree(s), {len(problems)} problem(s); {skipped} unchanged/skipped')
         return 1 if problems else 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         print('TREE_REFUSED: ' + str(error), file=sys.stderr)

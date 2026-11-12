@@ -83,6 +83,56 @@ class FetchTest(unittest.TestCase):
                 self.assertEqual(f.main(['--root', self.root, '--approved', 'x', '--trusted-approvals', 'y',
                                          '--trusted-approvals-sha256', 'z', '--assets-dir', self.root]), 2)
 
+    def test_unified_registry_tag_uses_shared_cache(self):
+        tree(self.root, FAMILY, MODEL, 2)
+        reg = registry(2)
+        tag = 'engine-v0.1.2-4208d848'
+        reg['approvals'][f'{FAMILY}/{MODEL}/v2']['approve_tag'] = tag
+        with patch.object(f.e, 'trusted_entry', return_value={}), patch.object(f.p, 'download_release') as dl:
+            self.assertEqual(f.fetch(self.root, Path(self.root) / 'a', reg, {}), [tag])
+        self.assertEqual(dl.call_args.args[0], tag)
+        self.assertEqual(dl.call_args.kwargs['key'], f'{FAMILY}/{MODEL}/v2')
+        self.assertIsInstance(dl.call_args.kwargs['cache'], f.p.ReleaseAssetCache)
+
+    def test_unchanged_tree_is_not_downloaded(self):
+        tree(self.root, FAMILY, MODEL, 2)
+        base = Path(self.root) / 'base'
+        tree(base, FAMILY, MODEL, 2)
+        reg = registry(2)
+        with (patch.object(f.e, 'load_registry', return_value=reg),
+              patch.object(f.e, 'validate_registry_transition', return_value=set()),
+              patch.object(f, 'local_metadata_problems', return_value=[]),
+              patch.object(f.p, 'download_release') as dl):
+            self.assertEqual(f.fetch(self.root, Path(self.root) / 'a', reg, {}, base=base), [])
+        dl.assert_not_called()
+
+    def test_new_anchor_cannot_skip_and_download_uses_only_base_carry_sources(self):
+        tree(self.root, FAMILY, MODEL, 2)
+        base = Path(self.root) / 'base'
+        tree(base, FAMILY, MODEL, 2)
+        empty = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}
+        candidate = registry(2)
+        with (patch.object(f.e, 'load_registry', side_effect=[empty, candidate]),
+              patch.object(f.e, 'trusted_entry', return_value={}),
+              patch.object(f, 'local_metadata_problems', return_value=[]),
+              patch.object(f.p, 'download_release') as dl):
+            self.assertEqual(f.fetch(self.root, Path(self.root) / 'a', empty, {}, base=base),
+                             ['approve-synthetic-demo-2'])
+        self.assertEqual(dl.call_args.kwargs['trusted_source_registry'], empty)
+
+    def test_invalid_local_metadata_fails_before_download_even_when_tree_is_unchanged(self):
+        tree(self.root, FAMILY, MODEL, 2)
+        base = Path(self.root) / 'base'
+        tree(base, FAMILY, MODEL, 2)
+        reg = registry(2)
+        with (patch.object(f.e, 'load_registry', return_value=reg),
+              patch.object(f.e, 'validate_registry_transition', return_value=set()),
+              patch.object(f, 'local_metadata_problems', return_value=['forged approval']),
+              patch.object(f.p, 'download_release') as dl):
+            with self.assertRaisesRegex(ValueError, 'candidate local metadata refused'):
+                f.fetch(self.root, Path(self.root) / 'a', reg, {}, base=base)
+        dl.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

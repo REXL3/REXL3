@@ -38,7 +38,8 @@ runtimes/
       MODEL.json      schema "rexl3.prod-model.v1" (reviewed metadata; see below)
       LATEST          one line: v<N>
       v<N>/           sealed tree produced by tools/promote_runtime.py (never edited by hand)
-  templates/          APPROVED.json (template allow-list), APPROVALS.json (approval registry)
+  templates/          APPROVED.json (template allow-list), APPROVALS.json (legacy/top-level registry)
+                      approvals/<family>/<model>.json (modular approval anchors)
 ```
 
 Naming:
@@ -91,13 +92,18 @@ Template allow-list (`runtimes/templates/APPROVED.json`, schema `rexl3.approved-
 of approved digest strings. An approval whose version is not listed, or whose digest is not among
 that version's digests, is refused (`template not approved`).
 
-Registry (`runtimes/templates/APPROVALS.json`): entries are keyed `<family>/<model>/v<N>`; each entry
-keeps `approval_sha256`, `source_commit`, `source_tree` and adds `runtime_id`, plus the sealed
-approval's bundle binary digest `binary_sha256` and each profile's sealed receipt digest under
-`profiles/<profile>/receipt/sha256` (the latter two pin carried-gate sources to the actual approval
-identity; omitted for approvals that predate carry-forward). The `TRUSTED_APPROVALS_SHA256` pin in
-`.github/workflows/verify.yml` changes in the same commit as the registry. Tools derive dev release
-tags from `runtime_id` (MODEL.json and the sealed approval must agree), never from folder names.
+Registry entries are keyed `<family>/<model>/v<N>` and live in the top-level
+`runtimes/templates/APPROVALS.json` or modular `runtimes/templates/approvals/<family>/<model>.json`.
+The loader merges both forms and refuses duplicate keys. Each entry keeps `approval_sha256`,
+`source_commit`, `source_tree` and `runtime_id`, plus the sealed approval's bundle binary digest
+`binary_sha256` and each profile's sealed receipt digest under `profiles/<profile>/receipt/sha256`
+(the latter two pin carried-gate sources to the actual approval identity; omitted for approvals that
+predate carry-forward). Existing base entries are append-only; deleting or mutating one is refused.
+The `TRUSTED_APPROVALS_SHA256` pin authenticates only the top-level file and changes with that file.
+A modular anchor is reviewed with its tree and fully authenticated in the same run. Tools derive
+legacy dev tags from `runtime_id` (MODEL.json and the sealed approval must agree), never folder names.
+Unified fresh-model dev tags are `engine-v<X.Y.Z>-<8hex>`: native engine version plus the first eight
+lowercase hex digits of the full sealed source commit; referenced engine binaries name the same tag.
 After a reviewed runtime rename, MODEL.json names the current id and a tree sealed under the earlier id
 still agrees only through its exact reviewed pair in `RUNTIME_ID_ALIASES` (`tools/release_evidence.py`,
 keyed by current id and a profile choice that tree seals); any other mismatch is refused.
@@ -106,17 +112,17 @@ keyed by current id and a profile choice that tree seals); any other mismatch is
 
 | Branch | Purpose | May touch only |
 |---|---|---|
-| `model/<model>-approval` | register one dev approval (merges first; verify trusts only the registry on main) | `runtimes/templates/APPROVALS.json`, the pin line in `.github/workflows/verify.yml` |
-| `model/<model>` | bring one validated model into prod | `runtimes/<family>/<model>/**`, `docs/packs/<model>.md`, `changes/unreleased/<model>.md` |
-| `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**` and `runtimes/templates/APPROVALS.json` |
-| `release/v<X.Y.Z>` | the release PR, opened by a maintainer only | `releases/v<X.Y.Z>/**`, `CHANGELOG.md`, deleting consumed `changes/unreleased/*.md` |
+| `model/<model>-approval` | legacy standalone registration of one dev approval (merges first) | `runtimes/templates/approvals/<family>/<model>.json`, `runtimes/templates/APPROVALS.json`, the pin line in `.github/workflows/verify.yml` |
+| `model/<model>` | bring one validated model into prod; no registry edits | `runtimes/<family>/<model>/**`, `docs/packs/<model>.md`, `changes/unreleased/<model>.md` |
+| `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**`, `runtimes/templates/APPROVALS.json` and `runtimes/templates/approvals/**` |
+| `release/v<X.Y.Z>` | single-PR product cut, opened by a maintainer only | release manifest/notes, `CHANGELOG.md`, consumed fragment deletions, promoted `runtimes/<family>/<model>/**`, modular/top-level anchors, `docs/packs/**`, and the corresponding engine source under `crates/`, `testdata/` and the listed source-metadata files |
 
 - A release scope is an explicitly agreed group of models listed in the release manifest. v0.1.0's
-  current manifest holds the five already-sealed models (section 2).
-  Each `model/<model>` PR holds all the commits that make that
-  model work; a later release may add a single newly validated model as a new version only after
-  v0.1.0 is released, never as a release candidate for one model. No model gets its own release or
-  release candidate. Change-scoped qualification: a model whose family/kernel scope is untouched by
+  current manifest holds the five already-sealed models (section 2). The normal cut is one
+  `release/v<X.Y.Z>` PR containing engine source, model trees, modular anchors, pack docs and release
+  metadata. A patch release may contain one newly validated model as a new version, but no model gets
+  its own product release or release candidate. The legacy two-PR standalone model route remains
+  available. Change-scoped qualification: a model whose family/kernel scope is untouched by
   the newer engine commits carries forward its prior sealed approval (T0, `carried_forward: true`
   in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
   unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
@@ -167,8 +173,10 @@ smoke: PASS
 gates: <free text naming the gates run on that host>
 ```
 
-Rules: `head` equals the PR head at evaluation time; `model` equals the PR's model folder; the four
-PASS fields are exactly `PASS`; the reviewer is a maintainer and not the PR author.
+Rules: `head` equals the PR head at evaluation time; the review API's `commit_id` must independently
+equal that same head (editing a stale review body is insufficient); `model` equals the PR's model
+folder; the four PASS fields are exactly `PASS`; the reviewer is a CODEOWNERS maintainer and not the
+PR author. Release-cut reviews paginate every GitHub review page and apply the same head binding.
 
 ## 5. PR types, titles and required checks
 
@@ -191,7 +199,9 @@ and past tense (ends in "ed" or an irregular past form), at most 90 characters, 
 Required checks on every PR to main (each must ALWAYS report; use job-level conditions that succeed as a
 no-op, never workflow-level path or branch filters):
 
-- `verify` (existing tree verifier; keep its trust model).
+- `verify` (existing tree verifier; keep its trust model). Diff-scoped `--base` verification skips
+  only authenticated transport/archive work for unchanged trees; `MODEL.json`, `LATEST`, approval
+  and registry checks always run, and new/changed anchors require full downloads in the same run.
 - `pr-rules`: title (above), branch name, path scope per branch type, `changes/unreleased/` fragment
   present for `model/*` and for `engine/*` PRs that change behavior (tools/workflows), not for DOCS-only.
 - `model-completeness`: runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success otherwise.
@@ -219,7 +229,6 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 python3 -B -E -s tools/verify_runtime_tree.py --root . \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
   --assets-dir "$(mktemp -d)"
 ```
 
@@ -299,12 +308,12 @@ writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-
 ```bash
 python3 tools/promote_runtime.py \
   --family <family> --model <model> --version <N> \
-  --approve-tag approve-<runtime_id>-<N> \
+  --approve-tag engine-v<X.Y.Z>-<8hex> \
+  --release-branch release/v<X.Y.Z> \
   --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
   [--dry-run] [--display-name "Display Name" --engine-family <module> \
    --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
 ```
@@ -361,9 +370,10 @@ branch, review and check rules above.
 ### Always
 
 1. **Use the right branch type** (section 3): `model/<model>` brings one validated model into
-   production, `model/<model>-approval` registers that model's dev approval and merges first,
-   `engine/<topic>` is any universal production change: tools, workflows, policy, docs, templates.
-   `release/v<X.Y.Z>` is opened by a maintainer only; never open one.
+   production, `model/<model>-approval` is the legacy standalone registry step and merges first,
+   `engine/<topic>` is any universal production change except sealed trees and either registry form.
+   A maintainer-opened `release/v<X.Y.Z>` is the single-PR product cut for engine source, models,
+   modular anchors and release metadata; agents never open one.
 2. **Name runtime folders by family, then model**: `runtimes/<family>/<model>/`, lowercase. Never put a
    bit width, quantization format, draft method or other pack detail in a folder or branch name; those
    belong in `MODEL.json` and the sealed approval.

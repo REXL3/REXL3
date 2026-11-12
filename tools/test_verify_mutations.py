@@ -380,10 +380,13 @@ class WorkflowPolicy(unittest.TestCase):
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text()
 
-    def test_pinned_registry_hash_matches_the_registry(self):
-        match = re.search(r'^\s*TRUSTED_APPROVALS_SHA256:\s*"?([0-9a-f]{64})"?\s*$', self.text, re.M)
-        self.assertIsNotNone(match, 'workflow must pin the registry hash')
-        self.assertEqual(match[1], hashlib.sha256(REGISTRY.read_bytes()).hexdigest())
+    def test_registry_has_no_conflicting_workflow_pin_and_uses_diff_scoped_verification(self):
+        self.assertNotIn('TRUSTED_APPROVALS_SHA256', self.text)
+        self.assertNotIn('--trusted-approvals-sha256', self.text)
+        self.assertEqual(self.text.count('--base base'), 2)
+        self.assertEqual(self.text.count('if [ "$GITHUB_EVENT_NAME" = "push" ]; then FULL=(--full); fi'), 2)
+        # The optional legacy pin still authenticates the exact current top-level file.
+        self.assertEqual(e.sha256_file(REGISTRY), hashlib.sha256(REGISTRY.read_bytes()).hexdigest())
 
     def test_no_merge_and_no_write_permission_anywhere(self):
         for forbidden in ('gh pr merge', '--auto', 'auto-merge', 'merge:', 'contents: write', 'pull-requests: write',

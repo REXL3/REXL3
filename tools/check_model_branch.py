@@ -95,7 +95,27 @@ def model_folder_changes(files):
     return folders
 
 
-def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_dir, base_tree_dir=None):
+def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_dir, base_tree_dir=None,
+               selected_folder=None, release_scope=False):
+    if (branch or '').startswith('release/v') and selected_folder is None:
+        if base_tree_dir is None:
+            git(root, 'rev-parse', '--verify', base.strip() + '^{commit}')
+            git(root, 'rev-parse', '--verify', head.strip() + '^{commit}')
+            release_files = changed_files(root, base.strip(), head.strip())
+        else:
+            release_files = diff_dirs(base_tree_dir, tree_dir)
+        folders = sorted(model_folder_changes(release_files))
+        if not folders:
+            return [(name, True, 'no model trees changed (no-op)') for name in CHECKS]
+        results = []
+        for family, model in folders:
+            nested = run_checks(root, base, head, branch=f'model/{model}', rc_commit=rc_commit,
+                                local=local, assets_dir=assets_dir, tree_dir=tree_dir,
+                                base_tree_dir=base_tree_dir, selected_folder=(family, model),
+                                release_scope=True)
+            results.extend((f'{family}/{model}: {name}', ok, reason) for name, ok, reason in nested)
+        return results
+
     results = []
 
     def report(name, ok, reason):
@@ -123,6 +143,11 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
         files = changed_files(root, base, head)
     else:
         files = diff_dirs(base_tree_dir, tree_dir)
+    if selected_folder is not None:
+        selected_family, selected_model = selected_folder
+        runtime_prefix = f'runtimes/{selected_family}/{selected_model}/'
+        allowed = {f'docs/packs/{selected_model}.md', f'changes/unreleased/{selected_model}.md'}
+        files = [item for item in files if item[1].startswith(runtime_prefix) or item[1] in allowed]
 
     model = None
     family = None
@@ -171,7 +196,7 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     if model is not None:
         # MODEL.json check (validity vs its folder)
         try:
-            m.validate_model_doc(e.loads(head_bytes(f'runtimes/{family}/{model}/MODEL.json')), family, model)
+            model_doc = m.validate_model_doc(e.loads(head_bytes(f'runtimes/{family}/{model}/MODEL.json')), family, model)
             report('MODEL.json', True, '')
         except (CheckError, ValueError) as error:
             report('MODEL.json', False, str(error))
@@ -190,13 +215,14 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     # Tree check: the sealed tree passes the verifier against the registry on the base.
     if model is not None and tree_path is not None:
         try:
-            registry_raw = e.loads(base_bytes('runtimes/templates/APPROVALS.json'))
+            if release_scope:
+                registry_raw = e.load_registry(Path(tree_dir) / 'runtimes/templates/APPROVALS.json')
+            else:
+                registry_raw = e.loads(base_bytes('runtimes/templates/APPROVALS.json'))
+                pin_line = base_bytes('.github/workflows/verify.yml').decode()
+                match = re.search(r'^\s*TRUSTED_APPROVALS_SHA256:\s*"?([0-9a-f]{64})"?\s*$', pin_line, re.M)
+                e.load_registry(_write_temp(e.json_bytes(registry_raw)), match[1] if match else None)
             approved_raw = e.loads(base_bytes('runtimes/templates/APPROVED.json'))['templates']
-            pin_line = base_bytes('.github/workflows/verify.yml').decode()
-            match = re.search(r'^\s*TRUSTED_APPROVALS_SHA256:\s*"?([0-9a-f]{64})"?\s*$', pin_line, re.M)
-            if match is None:
-                raise CheckError('verify.yml pin line missing on the base')
-            e.load_registry(_write_temp(e.json_bytes(registry_raw)), match[1])
             version = int(tree_path.rsplit('/', 1)[1][1:])
             entry = registry_raw.get('approvals', {}).get(m.registry_key(family, model, version))
             if not isinstance(entry, dict):
@@ -204,9 +230,11 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             runtime_id = entry.get('runtime_id')
             if local:
                 tmp_assets = Path(tempfile.mkdtemp(prefix='.check-model-assets-'))
-                p.download_release(f'approve-{runtime_id}-{version}',
-                                   tmp_assets / family / model / f'v{version}',
-                                   registry=registry_raw, approved_templates=approved_raw)
+                tag = entry.get('approve_tag') or f'approve-{runtime_id}-{version}'
+                e.validate_request(runtime_id, tag, version)
+                p.download_release(tag, tmp_assets / family / model / f'v{version}',
+                                   registry=registry_raw, approved_templates=approved_raw,
+                                   key=m.registry_key(family, model, version))
                 assets_dir = tmp_assets
             if assets_dir is None:
                 raise CheckError('no authenticated dev assets (run --local or provide --assets-dir)')
@@ -247,10 +275,13 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
     else:
         report('capability contract', False, 'no tree to inspect')
 
-    # Docs and fragment must exist and be non-empty at the head.
+    # Model hotfixes carry a new fragment; a release consumes it and retains the pack doc.
     if model is not None:
         missing = []
-        for doc_path in (f'docs/packs/{model}.md', f'changes/unreleased/{model}.md'):
+        docs = [f'docs/packs/{model}.md']
+        if not release_scope:
+            docs.append(f'changes/unreleased/{model}.md')
+        for doc_path in docs:
             try:
                 if not head_bytes(doc_path).strip():
                     missing.append(doc_path + ' (empty)')

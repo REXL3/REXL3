@@ -10,7 +10,9 @@ never by agents, never by automation. Agents never create, edit, publish or dele
   - MINOR: new models or architectures, new features, breaking changes (pre-1.0).
   - PATCH: fixes and performance work that keep recipes compatible.
 - Prod tags: `v<X.Y.Z>` only. No per-runtime GitHub releases; `prod/<runtime>/v<N>` is retired.
-- Dev releases `approve-*` and `engine-v*` are internal provenance, never product releases.
+- Dev releases `approve-*` and unified `engine-v<X.Y.Z>-<8hex>` releases are internal provenance,
+  never product releases. In a unified tag, `<X.Y.Z>` is the native engine version and `<8hex>` is
+  the first eight lowercase hex digits of the sealed approval's full source commit.
 - No model ever gets its own release or release candidate.
 
 ## Grouped releases
@@ -20,13 +22,15 @@ A release is cut from an explicitly agreed group of models listed in the release
 models: Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash, Nemotron-3.5-Super-VL and
 DeepSeek-V4.1-Flash-1017.
 
-- Each model enters prod through its own `model/<model>` branch and PR, which holds all the commits
-  that make that model work. Each model PR must be validated (LOCAL-VALIDATION v1) and approved by
-  the maintainer who did NOT submit it (CONTRIBUTING.md section 4).
-- The release is cut ONLY after every in-scope model PR has been validated and merged.
-- No model gets its own release or release candidate.
-- Only AFTER v0.1.0 is released may a later release contain a single newly validated model as a new
-  version; it is never phrased as a release candidate for one model.
+- The normal cut is one maintainer-opened `release/v<X.Y.Z>` PR containing the engine source, all
+  promoted model trees, their modular registry anchors and pack docs, and the release manifest,
+  notes and CHANGELOG. One sealed-receipt LOCAL-VALIDATION v1 review covers every changed model at
+  the exact PR head, and the other maintainer approves that head before merge.
+- The legacy standalone two-PR route (`model/<model>-approval`, then `model/<model>`) remains
+  available for an individual promotion. Each model PR is validated and approved by the maintainer
+  who did NOT submit it; the release is cut only after every in-scope standalone model PR merges.
+- No model gets its own product release or release candidate. A patch product release may contain a
+  single newly validated model as a new version; it is still a normal `v<X.Y.Z>` product release.
 - Change-scoped qualification tiers:
   - **T0** (untouched scope): the model's family/kernel scope is untouched by the newer engine
     commits, so its prior sealed approval travels as-is in the release manifest
@@ -90,7 +94,21 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
   was assessed against).
 - `releases/v<X.Y.Z>/NOTES.md` — the assembled release notes.
 - The `CHANGELOG.md` entry.
-- It deletes the consumed `changes/unreleased/*.md` fragments.
+- Every promoted `runtimes/<family>/<model>/v<N>/` tree with its `MODEL.json` and `LATEST`, plus
+  `docs/packs/<model>.md` for each promoted model.
+- Registry anchors in `runtimes/templates/approvals/<family>/<model>.json` (the top-level
+  `APPROVALS.json` remains supported for legacy entries). Existing base entries are immutable; new
+  entries must name trees fully authenticated in this PR's verification run.
+- The corresponding engine snapshot and build identity (`crates/`, `testdata/`, `Cargo.toml`,
+  `Cargo.lock`, `SOURCE_BUILD.md`, `SOURCE_IDENTITY.json` and the related source metadata) for the
+  unified `engine-v<X.Y.Z>-<8hex>` dev release.
+- It deletes the consumed `changes/unreleased/*.md` fragments. `runtimes/templates/APPROVED.json`
+  and unrelated tool/workflow changes are outside release scope.
+
+Diff-scoped verification compares the candidate with the protected base. A byte-identical,
+already-anchored tree may skip its remote archive download, but never its `MODEL.json`, `LATEST`,
+approval or registry checks. Changed and newly anchored trees always download and pass full asset
+verification; carried-gate sources must be pinned by the protected base registry.
 
 ## Notes assembly
 
@@ -120,10 +138,11 @@ No GitHub App. The ceremony is run by a maintainer personally on their own machi
 authenticated `gh`; `tools/cut_release.py` requires `GH_TOKEN` in the environment (it never edits
 rulesets or settings):
 
-1. **Release PR approved by the other maintainer and merged.**
+1. **Release PR approved by the other CODEOWNERS maintainer at the exact PR head and merged.**
 2. `python3 tools/cut_release.py --version vX.Y.Z` — dry run (the default) verifies: release PR
-   merged with an approving review by a non-author maintainer, manifest valid and consistent with main,
-   notes present, tag absent, immutable releases enabled.
+   merged with an APPROVED review whose author is a non-author CODEOWNERS maintainer and whose
+   `commit_id` equals the PR head (all review pages are checked), manifest valid and consistent with
+   main, notes present, tag absent, immutable releases enabled.
 3. A maintainer temporarily allows creation of exactly that tag in the tag ruleset.
 4. `python3 tools/cut_release.py --version vX.Y.Z --publish` — creates the tag at the release PR's
    merge commit, a draft release with the notes and assets, verifies uploaded digests, then publishes.
@@ -168,11 +187,13 @@ At the release PR:
 
 - [ ] `releases/v<X.Y.Z>/manifest.json` is schema-valid (`rexl3.release-manifest.v1`) and consistent
       with main (engine dev commit/tree/tag/digests; every model entry matches the registry).
+- [ ] The single PR contains every promoted tree, its modular registry anchor and pack doc, and the
+      corresponding engine source; diff-scoped verification fully authenticated every new/changed tree.
 - [ ] The manifest lists the agreed release group (all in-scope models; no model outside the group).
 - [ ] `releases/v<X.Y.Z>/NOTES.md` assembled from fragments via
       `tools/assemble_release_notes.py`; `CHANGELOG.md` entry added; consumed
       `changes/unreleased/*.md` fragments deleted.
-- [ ] Release PR approved by the other maintainer and merged (squash).
+- [ ] Release PR approved by the other CODEOWNERS maintainer at the exact PR head and merged (squash).
 
 At the ceremony:
 

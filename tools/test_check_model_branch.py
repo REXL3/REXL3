@@ -4,6 +4,7 @@ Uses disposable Git repos with the synthetic seal; no network, credentials or na
 """
 import contextlib
 import io
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -244,6 +245,28 @@ class CheckModelBranchTest(unittest.TestCase):
         code, lines = self.captured(lambda: self.run_check(fx))
         self.assertEqual(code, 0, '\n'.join(lines))
         self.assertEqual([line for line in lines if line.startswith('FAIL')], [])
+
+    def test_release_checks_every_changed_model_with_merged_candidate_registry(self):
+        fx = self.fixture('release-batch')
+        fx.init()
+        fx.add_model()
+        second = 'qwen3.8-flash-next'
+        second_tree = fx.repo / 'runtimes' / FAMILY / second / 'v1'
+        shutil.copytree(fx.tree, second_tree)
+        write(second_tree.parent, 'MODEL.json', e.json_bytes(fx.f.model_doc(FAMILY, second)))
+        write(second_tree.parent, 'LATEST', b'v1\n')
+        write(fx.repo, f'docs/packs/{second}.md', b'# Second pack\n')
+        shutil.copytree(fx.assets / FAMILY / MODEL / 'v1', fx.assets / FAMILY / second / 'v1')
+        entry = dict(fx.registry['approvals'][f'{FAMILY}/{MODEL}/v1'])
+        write(fx.repo, f'runtimes/templates/approvals/{FAMILY}/{second}.json', encoded({
+            'schema': 'rexl3.approval-registry.v1',
+            'approvals': {f'{FAMILY}/{second}/v1': entry}}))
+        (fx.repo / f'changes/unreleased/{MODEL}.md').unlink()
+        fx.commit('release batch')
+        code, lines = self.captured(lambda: self.run_check(fx, branch='release/v0.1.2'))
+        self.assertEqual(code, 0, '\n'.join(lines))
+        self.assertTrue(any(line.startswith(f'PASS {FAMILY}/{MODEL}: tree') for line in lines), lines)
+        self.assertTrue(any(line.startswith(f'PASS {FAMILY}/{second}: tree') for line in lines), lines)
 
     def test_a_model_whose_profiles_pin_their_own_pack_and_runtime_id_passes(self):
         # The DeepSeek shape: a second profile with its own lock role and runtime id (dev #159).

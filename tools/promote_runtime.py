@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from urllib.parse import quote
 try:
     from . import release_evidence as e
@@ -45,6 +46,45 @@ def _run(command, cwd=None, *, not_found=False):
 
 def gh(*args, cwd=None, not_found=False):
     return _run(['gh', *map(str, args)], cwd=cwd, not_found=not_found)
+
+
+class ReleaseAssetCache:
+    """Thread-safe transport cache; every consumer still authenticates copied bytes."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._guard = threading.Lock()
+        self._locks = {}
+
+    def _lock(self, key):
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    def fetch(self, tag, repo, name, dest):
+        e.require(e.is_engine_tag(tag) and repo == DEV_REPO, 'shared cache is only for unified dev releases')
+        e.relative_path(name)
+        e.require('/' not in name, 'cached asset must be a basename')
+        key = (repo, tag, name)
+        with self._lock(key):
+            folder = self.root / __import__('hashlib').sha256((repo + '/' + tag).encode()).hexdigest()
+            folder.mkdir(exist_ok=True)
+            cached = e.checked_path(folder / name)
+            if not cached.exists():
+                with tempfile.TemporaryDirectory(prefix='.shared-download-', dir=self.root) as tmp:
+                    gh('release', 'download', tag, '-R', repo, '-p', name, '-D', tmp)
+                    source = e.safe_file(Path(tmp), name)
+                    with source.open('rb') as incoming, cached.open('xb') as output:
+                        shutil.copyfileobj(incoming, output)
+                        output.flush()
+                        os.fsync(output.fileno())
+            target = e.checked_path(Path(dest) / name)
+            if target.exists():
+                e.require(e.sha256_file(target) == e.sha256_file(cached), 'shared asset destination conflict')
+            else:
+                with cached.open('rb') as incoming, target.open('xb') as output:
+                    shutil.copyfileobj(incoming, output)
+            return target
 
 
 def git(*args, cwd):
@@ -91,9 +131,11 @@ def tag_commit(tag, repo):
     raise ValueError('annotated tag chain limit')
 
 
-def verify_approval(approval_path, approved_templates, registry, engine_dir=None, key=None, precomputed=None):
+def verify_approval(approval_path, approved_templates, registry, engine_dir=None, key=None, precomputed=None,
+                    trusted_source_registry=None):
     return e.verify_assets(approval_path, registry=registry, approved_templates=approved_templates,
-                           engine_dir=engine_dir, key=key, precomputed=precomputed)
+                           engine_dir=engine_dir, key=key, precomputed=precomputed,
+                           trusted_source_registry=trusted_source_registry)
 
 
 def precomputed_for_assets(approval, assets_dir):
@@ -121,7 +163,7 @@ def engine_release_tag(approval):
     return next(iter(e.validate_engine_binaries(engine).values()))['release_tag']
 
 
-def fetch_engine(approval, stage, *, repo):
+def fetch_engine(approval, stage, *, repo, cache=None):
     """Download the engine release assets an approval references into ``stage`` and check them byte for byte."""
     tag = engine_release_tag(approval)
     if tag is None:
@@ -135,7 +177,10 @@ def fetch_engine(approval, stage, *, repo):
         e.require(asset.get('digest') in (None, 'sha256:' + item['sha256']), 'engine release asset digest differs')
     stage.mkdir(parents=True)
     for item in engine.values():
-        gh('release', 'download', tag, '-R', repo, '-p', item['asset'], '-D', stage)
+        if cache is None:
+            gh('release', 'download', tag, '-R', repo, '-p', item['asset'], '-D', stage)
+        else:
+            cache.fetch(tag, repo, item['asset'], stage)
     e.require({f.name for f in stage.iterdir()} == {item['asset'] for item in engine.values()}, 'engine download inventory mismatch')
     for item in engine.values():
         path = e.safe_file(stage, item['asset'])
@@ -213,11 +258,13 @@ def _store_download_identity(path, receipt):
     e.require(_load_download_identity(path) == receipt, 'download identity persistence failed')
 
 
-def download_release(tag, dest, *, repo=DEV_REPO, registry, approved_templates, target_commit=None, key=None):
+def download_release(tag, dest, *, repo=DEV_REPO, registry, approved_templates, target_commit=None, key=None,
+                     cache=None, trusted_source_registry=None):
     """Download with content-free failures; CLI/metadata errors may contain secrets."""
     try:
         return _download_release(tag, dest, repo=repo, registry=registry,
-                                 approved_templates=approved_templates, target_commit=target_commit, key=key)
+                                 approved_templates=approved_templates, target_commit=target_commit, key=key,
+                                 cache=cache, trusted_source_registry=trusted_source_registry)
     except (ValueError, OSError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         raise ValueError('release download verification refused') from None
 
@@ -231,10 +278,29 @@ def registry_key_for_tag(tag, repo):
     return f'{match[1]}/v{match[2]}'
 
 
-def _download_release(tag, dest, *, repo, registry, approved_templates, target_commit, key=None):
-    registry_key = key if key is not None else registry_key_for_tag(tag, repo)
+def _download_release(tag, dest, *, repo, registry, approved_templates, target_commit, key=None, cache=None,
+                      trusted_source_registry=None):
+    registry_key = key
     approvals = registry.get('approvals') if isinstance(registry, dict) else None
-    e.require(isinstance(approvals, dict) and registry_key in approvals, 'approval not in independently trusted registry: ' + registry_key)
+    e.require(isinstance(approvals, dict), 'independently trusted approval registry required')
+    if registry_key is None and e.is_engine_tag(tag):
+        matches = [name for name, entry in approvals.items()
+                   if isinstance(entry, dict) and entry.get('approve_tag') == tag]
+        e.require(len(matches) == 1, 'unified release needs an explicit family/model registry key')
+        registry_key = matches[0]
+    if registry_key is None:
+        registry_key = registry_key_for_tag(tag, repo)
+    e.require(registry_key in approvals, 'approval not in independently trusted registry: ' + registry_key)
+    entry = approvals[registry_key]
+    trust_key = registry_key if registry_key.count('/') == 2 else None
+    e.validate_registry_entry(registry_key, entry, legacy=(registry_key.count('/') == 1))
+    version = int(registry_key.rsplit('/v', 1)[1])
+    runtime_id = entry.get('runtime_id')
+    if registry_key.count('/') == 1:
+        runtime_id = runtime_id or registry_key.rsplit('/v', 1)[0]
+    e.validate_request(runtime_id, tag, version)
+    if entry.get('approve_tag') is not None:
+        e.require(entry['approve_tag'] == tag, 'release tag differs from the trusted registry')
     dest = e.checked_path(dest)
     receipt_path = e.checked_path(dest / DEV_DOWNLOAD_RECEIPT)
     previous = _load_download_identity(receipt_path) if repo == DEV_REPO and receipt_path.exists() else None
@@ -247,18 +313,57 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
     with tempfile.TemporaryDirectory(prefix='.download-', dir=dest.parent) as tmp:
         stage = Path(tmp) / 'release'
         stage.mkdir()
-        gh('release', 'download', tag, '-R', repo, '-D', stage)
+        unified = e.is_engine_tag(tag)
+        approval = None
+        remote_names = {asset['name'] for asset in before['assets']}
+        if unified:
+            # Fetch only this model's sealed approval first. Its pinned bytes, not a
+            # candidate-controlled tag or URL, determine the remaining asset names.
+            approval_name = f'{runtime_id}-v{version}-approval.json'
+            e.require(approval_name in remote_names, 'unified release approval missing')
+            if cache is None:
+                gh('release', 'download', tag, '-R', repo, '-p', approval_name, '-D', stage)
+            else:
+                cache.fetch(tag, repo, approval_name, stage)
+            prefixed_approval = e.safe_file(stage, approval_name)
+            approval = e.trusted_entry(prefixed_approval, registry, key=trust_key)
+            e.require(approval.get('approve_tag') == tag, 'unified approval tag mismatch')
+            assets = approval_assets(approval)
+            archive_names = {asset['archive'] for asset in assets}
+            e.require(archive_names <= remote_names, 'unified release assets missing')
+            if cache is None:
+                command = ['release', 'download', tag, '-R', repo]
+                for name in sorted(archive_names):
+                    command.extend(('-p', name))
+                gh(*command, '-D', stage)
+            else:
+                for name in sorted(archive_names):
+                    cache.fetch(tag, repo, name, stage)
+            os.replace(prefixed_approval, stage / 'approval.json')
+            selected_assets = [asset for asset in before['assets']
+                               if asset['name'] == approval_name or asset['name'] in archive_names]
+        else:
+            gh('release', 'download', tag, '-R', repo, '-D', stage)
+            assets = None
+            selected_assets = before['assets']
         approval_path = e.safe_file(stage, 'approval.json')
-        approval = e.trusted_entry(approval_path, registry, key=key)
+        if approval is None:
+            approval = e.trusted_entry(approval_path, registry, key=trust_key)
+        e.validate_request(approval.get('runtime_id'), approval.get('approve_tag'), approval.get('version'))
         engine_stage = Path(tmp) / 'engine'
-        engine_release = fetch_engine(approval, engine_stage, repo=repo)
-        assets = approval_assets(approval)
+        engine_release = fetch_engine(approval, engine_stage, repo=repo, cache=cache)
+        if assets is None:
+            assets = approval_assets(approval)
         names = {'approval.json'} | {asset['archive'] for asset in assets}
-        e.require({a['name'] for a in before['assets']} == names, 'unexpected/missing release assets')
+        if unified:
+            e.require(names <= ({'approval.json'} | remote_names), 'unexpected/missing release assets')
+        else:
+            e.require(remote_names == names, 'unexpected/missing release assets')
         e.require({f.name for f in stage.iterdir()} == names, 'download inventory mismatch')
         measured = {}
-        for asset in before['assets']:
-            path = e.safe_file(stage, asset['name'])
+        for asset in selected_assets:
+            local_name = 'approval.json' if unified and asset['name'].endswith('-approval.json') else asset['name']
+            path = e.safe_file(stage, local_name)
             e.require(path.stat().st_size == asset['size'], 'download size mismatch')
             measured[asset['name']] = e.sha256_file(path)
             if asset.get('digest') is not None:
@@ -273,7 +378,8 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
         e.require(not any(name.startswith('engine/') for name in evidence['members']), 'evidence collides with the engine directory')
         e.extract_files(transport, stage, evidence['members'])
         verify_approval(approval_path, approved_templates, registry,
-                        engine_dir=engine_stage if engine_release else None, key=key)
+                        engine_dir=engine_stage if engine_release else None, key=trust_key,
+                        trusted_source_registry=trusted_source_registry)
         expected_commit = approval['source_commit']
         e.full_hash(expected_commit, e.HEX40)
         expected_tag = approval['approve_tag']
@@ -284,7 +390,7 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
             release_id=before['id'], tag=tag, target_commit=expected_commit,
             target_commitish=before.get('target_commitish'), assets={asset['name']: dict(
                 id=asset['id'], size=asset['size'], digest=asset.get('digest'), sha256=measured[asset['name']])
-                for asset in before['assets']}))
+                for asset in selected_assets}))
         e.require(previous is None or previous == receipt, 'download retry identity drift')
         files = {p.relative_to(stage).as_posix(): p for p in stage.rglob('*') if p.is_file()}
         if engine_release:
@@ -310,8 +416,9 @@ def _download_release(tag, dest, *, repo, registry, approved_templates, target_c
             e.require(target.stat().st_size == source.stat().st_size and
                       e.sha256_file(target) == e.sha256_file(source), 'cached download bytes differ')
         verify_approval(dest / 'approval.json', approved_templates, registry,
-                        engine_dir=dest / 'engine' if engine_release else None, key=key,
-                        precomputed=precomputed_for_assets(approval, dest))
+                        engine_dir=dest / 'engine' if engine_release else None, key=trust_key,
+                        precomputed=precomputed_for_assets(approval, dest),
+                        trusted_source_registry=trusted_source_registry)
         e.require(_load_download_identity(receipt_path) == receipt, 'download identity persistence failed')
     return dest / 'approval.json'
 
@@ -390,13 +497,59 @@ def _prepare_model_branch(root, model, target_commit):
     return branch
 
 
+def _prepare_release_branch(root, branch, target_commit):
+    """Create or reuse one local release branch without resetting earlier models."""
+    e.require(isinstance(branch, str) and re.fullmatch(r'release/v[0-9]+\.[0-9]+\.[0-9]+', branch),
+              'invalid release branch')
+    current = git('branch', '--show-current', cwd=root).stdout.strip()
+    if current == branch:
+        git('merge-base', '--is-ancestor', target_commit, 'HEAD', cwd=root)
+        return branch
+    exists = subprocess.run(['git', '--no-replace-objects', '-C', str(root), 'show-ref', '--verify', '--quiet',
+                             'refs/heads/' + branch], capture_output=True, check=False).returncode == 0
+    if exists:
+        git('switch', branch, cwd=root)
+        git('merge-base', '--is-ancestor', target_commit, 'HEAD', cwd=root)
+    else:
+        git('switch', '-c', branch, target_commit, cwd=root)
+    return branch
+
+
+def _write_release_registry_entry(root, family, model, version, entry):
+    """Persist this model's anchor without rewriting or clobbering sibling modules."""
+    path = root / 'runtimes/templates/approvals' / family / f'{model}.json'
+    key = m.registry_key(family, model, version)
+    merged = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
+    if key in merged.get('approvals', {}):
+        e.require(merged['approvals'][key] == entry, 'existing approval registry entry differs')
+        return None
+    if path.exists():
+        doc = e.load_json(path)
+        e.require(isinstance(doc, dict) and doc.get('schema') == 'rexl3.approval-registry.v1',
+                  'invalid existing model approval module')
+        entries = doc.setdefault('approvals', {})
+        e.require(isinstance(entries, dict), 'invalid existing model approvals')
+        if key in entries:
+            e.require(entries[key] == entry, 'existing model approval module entry differs')
+            return None
+        entries[key] = entry
+    else:
+        doc = {'schema': 'rexl3.approval-registry.v1', 'approvals': {key: entry}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(e.json_bytes(doc))
+    path.chmod(0o644)
+    e.require(e.load_registry(root / 'runtimes/templates/APPROVALS.json').get('approvals', {}).get(key) == entry,
+              'written model approval module did not merge cleanly')
+    return path
+
+
 def model_assets_dir(assets_dir, family, model, version):
     """<assets_dir>/<family>/<model>/v<N>: one model version's verified dev release assets in the cache."""
     return Path(assets_dir) / family / model / f'v{version}'
 
 
 def prepare_promotion(family, model, version, *, approve_tag, target_commit, prod_checkout, assets_dir,
-                      registry, approved_templates, meta, dry_run=False):
+                      registry, approved_templates, meta, dry_run=False, release_branch=None):
     key = m.registry_key(family, model, version)
     entry = registry.get('approvals', {}).get(key)
     e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
@@ -414,7 +567,15 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) ==
               (runtime_id, version, approve_tag), 'promotion identity mismatch')
     root = e.checked_path(prod_checkout)
-    e.require(git('rev-parse', 'HEAD', cwd=root).stdout.strip() == target_commit, 'explicit base commit required')
+    current_head = git('rev-parse', 'HEAD', cwd=root).stdout.strip()
+    if release_branch is None:
+        e.require(current_head == target_commit, 'explicit base commit required')
+    else:
+        e.require(re.fullmatch(r'release/v[0-9]+\.[0-9]+\.[0-9]+', release_branch), 'invalid release branch')
+        current_branch = git('branch', '--show-current', cwd=root).stdout.strip()
+        if current_head != target_commit:
+            e.require(current_branch == release_branch, 'release promotion must start at the target or its release branch')
+            git('merge-base', '--is-ancestor', target_commit, 'HEAD', cwd=root)
     e.require(not git('status', '--porcelain', '--untracked-files=all', cwd=root).stdout.strip(), 'dirty production checkout')
     git('merge-base', '--is-ancestor', target_commit, 'origin/main', cwd=root)
     family_dir = root / 'runtimes' / family
@@ -437,16 +598,28 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
         meta = {}
     meta = dict(meta, runtime_id=runtime_id)
     doc = m.model_json_doc(family=family, model=model, **meta)
+    if release_branch is None:
+        branch = _prepare_model_branch(root, model, target_commit)
+    else:
+        branch = _prepare_release_branch(root, release_branch, target_commit)
     m.write_or_validate_model_json(model_dir / 'MODEL.json', family=family, model=model, doc=doc)
-    branch = _prepare_model_branch(root, model, target_commit)
     extract_tree(archive, tree, approval, approval_path=approval_path, preverified=True)
     write_latest(model_dir / 'LATEST', version)
     problems = verify_tree(tree, approved_templates, trusted_approvals=registry,
                            assets_dir=assets_dir, family=family, model=model,
                            precomputed=precomputed)
     e.require(not problems, '; '.join(problems))
-    git('add', '--', str(model_dir.relative_to(root)), cwd=root)
+    registry_path = None
+    if release_branch is not None:
+        registry_path = _write_release_registry_entry(root, family, model, version, entry)
+    paths = [str(model_dir.relative_to(root))]
+    if registry_path is not None:
+        paths.append(str(registry_path.relative_to(root)))
+    git('add', '--', *paths, cwd=root)
     git('commit', '-m', f'FEAT: Promoted {model} v{version}', cwd=root)
+    if release_branch is not None:
+        print(f'VERIFIED_RELEASE_BRANCH {branch}; promoted {family}/{model}/v{version} locally')
+        return 0
     git('push', '--set-upstream', 'origin', branch, cwd=root)
     gh('pr', 'create', '--repo', PROD_REPO, '--base', 'main', '--head', branch,
        '--title', f'FEAT: Promoted {model} v{version}',
@@ -473,7 +646,8 @@ def main(argv=None):
     parser.add_argument('--download', action='store_true')
     parser.add_argument('--approved', required=True, help='protected template allow-list JSON')
     parser.add_argument('--trusted-approvals', required=True)
-    parser.add_argument('--trusted-approvals-sha256', required=True)
+    parser.add_argument('--trusted-approvals-sha256')
+    parser.add_argument('--release-branch', help='local release/v<X.Y.Z> branch; never pushes or creates a PR')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--display-name', help='human display name (required when MODEL.json is new)')
     parser.add_argument('--engine-family', help='dev engine module name (required when MODEL.json is new)')
@@ -511,7 +685,8 @@ def main(argv=None):
                              registry=registry, approved_templates=approved, key=key)
         return prepare_promotion(args.family, args.model, args.version, approve_tag=args.approve_tag,
             target_commit=args.target_commit, prod_checkout=args.prod_checkout, assets_dir=args.assets_dir,
-            registry=registry, approved_templates=approved, meta=meta, dry_run=args.dry_run)
+            registry=registry, approved_templates=approved, meta=meta, dry_run=args.dry_run,
+            release_branch=args.release_branch)
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
         print('PROMOTION_REFUSED: ' + str(error), file=sys.stderr)
         return 2

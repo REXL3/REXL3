@@ -1,0 +1,18 @@
+window case 0 lens [1] q b242af5716ea38b9 k a8e49fe8cc09a8f1 v 45b312679cb7d132 g a748a0b83d5e8f08 beta 83b462262330ae2c o 96dbee7b488c23c0
+commit case 0 keep [1] s 119aebcd2b31dca7 conv 64077d31e98004a9
+window case 1 lens [4] q be6f6b72b61c3892 k 263dd3eb05afe2a1 v 60574cafcd8659cd g a3d0863279da326b beta 0e8a8fd4d12b18eb o 346f59f26c0e323f
+commit case 1 keep [3] s 148146601e939ef8 conv 73e05abcb039628f
+window case 2 lens [8] q e741411e4fbeb83f k 5f820825493b44d2 v 4c6263d76e34d918 g 33232e56e48e1c74 beta 58631807874b706a o 9becdd8e46bb5e6c
+commit case 2 keep [8] s 3b57b02307f68701 conv acbe4325aee7b1ae
+window case 3 lens [16] q 2839232b1cacbedb k 0783b62eb6169f19 v 910e2ac715052350 g 3e64ecbceea4a5fd beta 83aa51742ec70e6c o 2c180f0b70062d34
+commit case 3 keep [5] s 5cc802b60f115dbe conv 084572f8522d7fad
+window case 4 lens [8, 3, 1] q f31d72d869110f6f k e8ee0659f647c7ba v d63995d1bcd1e9c4 g af3fbc7fe711a9f4 beta f0d06c18dfd9d377 o 42d1a7bad6d96a41
+commit case 4 keep [2, 3, 0] s a9afab0d16093360 conv abebe63e431f93ae
+window case 5 lens [5, 16, 2, 7] q c7cbb8a58d0efe75 k 11a0b2076b13028f v eef3f465bc75a0a5 g bc23db3e7c5cb31d beta a4c6e1bfa4c53ec8 o 23b2c028a716b84c
+commit case 5 keep [5, 1, 2, 7] s 0fb4d2980365b3af conv f8914e1e7bf0340b
+owed fold o e83bd5ba72984416 s bb634e66c68af2eb conv 250c230430a8e38b
+prefill whole o 9141ac98f7f28bd5 s 3a74c254078996d6 conv 637fb17152cf3b1a
+prefill parts o 9141ac98f7f28bd5
+prefill two o 080fdc34bd730a35 s 6872352e5ffa197a conv 44c5bca1d8252241
+tree 9+17 q 310fb77a6a8e7066 k ebe93d98d7209ebe v 527fc2475d98d440 g 0f01800e58cfbc63 beta 1cb5911b828c9d2a o 18e4c3bf00859639
+tree commit path s e55351519329ce50 conv 2ae1c7049ab554b5

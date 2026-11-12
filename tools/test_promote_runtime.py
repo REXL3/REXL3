@@ -561,5 +561,52 @@ class PromotionTest(unittest.TestCase):
         self.assertTrue((root / 'runtimes' / FAMILY / MODEL / 'v1/approval.json').is_file())
 
 
+class WriteLatestTest(unittest.TestCase):
+    """LATEST moves forward only: a later version of a model already on main replaces an earlier v<M>."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.latest = Path(self.tmp.name) / 'LATEST'
+
+    def test_creates_latest_when_absent(self):
+        p.write_latest(self.latest, 1)
+        self.assertEqual(self.latest.read_bytes(), b'v1\n')
+        self.assertEqual(self.latest.stat().st_mode & 0o777, 0o644)
+
+    def test_keeps_latest_that_names_this_version(self):
+        self.latest.write_bytes(b'v2\n')
+        p.write_latest(self.latest, 2)
+        self.assertEqual(self.latest.read_bytes(), b'v2\n')
+
+    def test_moves_an_earlier_latest_forward(self):
+        self.latest.write_bytes(b'v1\n')
+        self.latest.chmod(0o664)
+        p.write_latest(self.latest, 2)
+        self.assertEqual(self.latest.read_bytes(), b'v2\n')
+        self.assertEqual(self.latest.stat().st_mode & 0o777, 0o644)
+
+    def test_refuses_a_later_latest(self):
+        self.latest.write_bytes(b'v3\n')
+        with self.assertRaisesRegex(ValueError, 'later version'):
+            p.write_latest(self.latest, 2)
+        self.assertEqual(self.latest.read_bytes(), b'v3\n')
+
+    def test_refuses_a_malformed_latest(self):
+        for bad in (b'v0\n', b'v1', b'2\n', b'v01\n', b'v1\nv2\n', b''):
+            self.latest.write_bytes(bad)
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'malformed'):
+                p.write_latest(self.latest, 2)
+            self.assertEqual(self.latest.read_bytes(), bad)
+
+    def test_refuses_a_latest_that_is_not_a_regular_file(self):
+        target = Path(self.tmp.name) / 'elsewhere'
+        target.write_bytes(b'v1\n')
+        self.latest.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'regular file'):
+            p.write_latest(self.latest, 2)
+        self.assertEqual(target.read_bytes(), b'v1\n')
+
+
 if __name__ == '__main__':
     unittest.main()

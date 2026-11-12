@@ -1,0 +1,3 @@
+## Bug fixes
+
+- A model folder whose runtime was renamed can now hold versions sealed under both ids. `MODEL.json` names the runtime's current id; production verification accepts a tree sealed under the earlier id only through its exact reviewed pair in the runtime-id alias table, for a profile choice that tree seals, and refuses any other mismatch. When the first version under the new id is promoted, `tools/promote_runtime.py` moves `MODEL.json` to the new id (and to a reviewed pack-repo rename) only if nothing else changes and every sealed tree in the folder still matches. This lets GLM-5.3-Flash version 2 (`glm53-flash-sage-2.25`) be promoted beside version 1 (`glm53-flash-2.25bpw-sm121`). PR #138.

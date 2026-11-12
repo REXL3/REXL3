@@ -66,7 +66,7 @@ def verify_tree(tree, approved_templates, *, trusted_approvals=None, assets_dir=
                   'registry runtime_id differs from the sealed approval')
         model_path = e.safe_file(tree.parent, 'MODEL.json')
         model_doc = m.validate_model_doc(m.parse_model_json(model_path), family, model)
-        e.require(model_doc.get('runtime_id') == doc.get('runtime_id'),
+        e.require(m.model_runtime_id_matches(model_doc.get('runtime_id'), doc),
                   'MODEL.json runtime_id differs from the sealed approval')
         actual = tree_inventory(tree)
         e.require(assets_dir is not None, 'authenticated dev assets directory required')

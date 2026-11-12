@@ -1,0 +1,4 @@
+arith glm-kda-chunk16-v1 chunk 16
+p2kda rows=16 y de230c80bced6f15 state 3ecf4f7768492c08
+p2kda rows=37 y ede2427d28bdb107 state 49b374a896926599
+p2kda rows=512 y 5d0810142ed7e89b state 66e891fc8e4fb3d3

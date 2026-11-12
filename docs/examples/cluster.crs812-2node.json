@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "crs812-2node",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. The two usable GB10 nodes of the CRS812 cluster (N1 = this box, N4). Seeded from /srv/rexl3/cluster-2node.json (2026-10-10). N2 and N3 (the gn100s) were out of service 2026-10-10 to 2026-10-16: disabled in this two-node file and refused by name if a rank map names them; docs/examples/cluster.nemotron-2x-tp2.json is the four-node layout of 2026-10-16.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {"name": "N1", "number": 1, "address": "192.0.2.1", "expected_hostname": "host-a"},
+    {"name": "N2", "number": 2, "address": "192.0.2.2", "disabled": true,
+     "reason": "out of service 2026-10-10 to 2026-10-16 (the gn100s, owner rule, lifted 2026-10-16): disabled in this two-node file; cluster.nemotron-2x-tp2.json is the four-node layout"},
+    {"name": "N3", "number": 3, "address": "192.0.2.3", "disabled": true,
+     "reason": "out of service 2026-10-10 to 2026-10-16 (the gn100s, owner rule, lifted 2026-10-16): disabled in this two-node file; cluster.nemotron-2x-tp2.json is the four-node layout"},
+    {"name": "N4", "number": 4, "address": "192.0.2.4", "expected_hostname": "host-d"}
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "lib": "/srv/rexl3/nccl/lib/libnccl.so.2",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": ["rocep1s0f0:1", "roceP2p1s0f0:1"]
+  },
+  "pack": "/srv/models/nemotron-super-exl3",
+  "memory": {"_comment": "36.00 GiB of weights on the larger rank (docs/NEMOTRON_TP.md 11.1) plus KV, graphs and activations", "min_free_gib": 50},
+  "serve": {
+    "flags": ["--allow-unvalidated-pack", "--backend", "cuda", "--no-vision", "--slots", "20", "--max-model-len", "40000", "--kv-tokens", "40000",
+              "--prefill-chunk", "256", "--spec", "auto", "--prefix-cache", "off", "--served-model-name", "m"]
+  },
+  "tp": {"connect_timeout_s": 300, "ready_timeout_s": 300, "peer_timeout_s": 15, "shutdown_grace_s": 20},
+  "groups": [
+    {"name": "g0", "ranks": ["N1", "N4"], "tp_port": 29600, "http_port": 8941, "http_host": "0.0.0.0"}
+  ],
+  "supervisor": {"backoff_base_s": 15, "backoff_cap_s": 300, "stable_after_s": 300, "max_restarts": 5, "window_s": 900}
+}

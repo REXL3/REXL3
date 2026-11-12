@@ -467,9 +467,12 @@ is attached to the release as a source archive, and you can ask the maintainers 
 
 ## 11. Reporting a problem or feedback
 
+Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+and check the recipe's `KNOWN_ISSUES.md`; if an open issue already tracks the same problem or bottleneck,
+add your reproduction, diagnostics, or proposed fix as a comment on that issue rather than opening a duplicate.
 Open **one issue per problem** in this repository: Issues, New issue, **Tester report**. The form asks
-for the facts below. Issues are visible to the maintainers and to every invited tester, so write
-nothing in one that you want kept private. For a quick question, or to compare notes with other
+for the facts below. Issues are public: anyone can read them, and only invited testers and the
+maintainers can open or comment on them, so write nothing in one that you want kept private. For a quick question, or to compare notes with other
 testers, use the testers' Discord server (your invitation names it); anything you want looked at and
 tracked belongs in an issue. A report needs:
 
@@ -483,6 +486,8 @@ tracked belongs in an issue. A report needs:
    sent and the response you got (remove anything private), the `seed` if you set one, and the
    `finish_reason`.
 6. What you checked and what you could not check on your machine.
+
+If you are proposing a fix, new feature, drafter binding, kernel speedup, or runtime improvement rather than reporting a failure, use the **Tester finding, fix, or feature proof** template (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `). **Do not open bare feature requests:** build your change against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`), validate it on your own setup at the profile's full supported context (`262,144` for `tp1` or `1,048,576` for `tp2`), and include the complete `git diff` plus measured before/after validation evidence so the maintainers can test it in `REXL3/REXL3-dev` and promote it to `REXL3/REXL3`.
 
 Do not include raw logs, prompts or responses you do not want shared, credentials, or SSH keys. For a
 security problem follow [SECURITY](../SECURITY.md) instead: never an issue and never a chat channel.

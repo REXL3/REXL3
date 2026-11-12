@@ -1,6 +1,9 @@
 {
   "schema": "rexl3.approved-templates.v1",
   "templates": {
-    "v1": "sha256:b97918f80561f9d28eced8154abc225ecd5fdf5cca579e0702a646eef6ccdc1d"
+    "v1": [
+      "sha256:b97918f80561f9d28eced8154abc225ecd5fdf5cca579e0702a646eef6ccdc1d",
+      "sha256:1a13b3e24965ffa6aa806c3e0db0e02109f253af823fe6a69e753e98ef21da8e"
+    ]
   }
 }

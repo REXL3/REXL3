@@ -1,0 +1,109 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "redsnow-5.3-flash-tp2-sage-4.91",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "2eac342dc217733311aa5b6f901ab15811e56a14",
+    "path": "docs/examples/cluster.redsnow53-sage-tp2-512k.json",
+    "sha256": "4d52b949a74216092a9adb6b9f6b9161bf0ff8c03320b34520981998c8d6195b"
+  },
+  "target_repo": "vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+  "default_profile": "redsnow-tp2-512k",
+  "profiles": {
+    "redsnow-tp2-512k": {
+      "kind": "cluster",
+      "site_fields": [
+        "nodes",
+        "http_port",
+        "tp_port",
+        "fabric_interface",
+        "hca"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "524288",
+        "--kv-tokens",
+        "524288",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "pool",
+        "--prefill-chunk",
+        "2048",
+        "--max-image-tokens",
+        "4096",
+        "--served-model-name",
+        "RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--tp-ranks",
+        "2",
+        "--tp-rank",
+        "0",
+        "--tp-peer",
+        "@NODES@:@TP_PORT@",
+        "--tp-connect-timeout",
+        "300",
+        "--tp-ready-timeout",
+        "900",
+        "--tp-peer-timeout",
+        "60",
+        "--shutdown-grace",
+        "5"
+      ],
+      "env": {
+        "REXL3_MEMORY_FLOOR_GIB": "2",
+        "REXL3_GLM_EMBED_IN_PLACE": "1",
+        "REXL3_GLM_RESERVE_MARGIN_GIB": "4",
+        "NCCL_MAX_NCHANNELS": "4",
+        "NCCL_SOCKET_IFNAME": "@FABRIC_INTERFACE@",
+        "NCCL_IB_HCA": "=@HCA@"
+      },
+      "files": {
+        "config/cluster.tp2-512k.json": "bff1fb5a8ea0e0d2221cdad77979eada26915fe84ef7a8c5ba2740bdf9ceb98b"
+      },
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8952,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 2048,
+        "chat_template_kwargs": {
+          "reasoning_effort": "low"
+        }
+      },
+      "cluster_adapter": "attested-v1",
+      "cluster_file": "config/cluster.tp2-512k.json",
+      "group": "tp2"
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

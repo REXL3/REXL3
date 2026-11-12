@@ -15,6 +15,7 @@ pub mod bind;
 pub mod config;
 pub mod contract;
 pub mod device;
+pub mod dflash;
 pub mod digest_log;
 pub mod dump;
 pub mod engine;
@@ -160,6 +161,11 @@ impl ModelFamily for GlmFamily {
     fn prefix_cache(&self) -> bool {
         true
     }
+    /// `--prefix-cache pool`: one node (`engine::build_engine`) and a two-rank group (`tp_boot::plan_from_split`, `GlmTpBackend`) plan no pages
+    /// for the cache and report the pool to the engine's room step.
+    fn prefix_cache_in_pool(&self) -> bool {
+        true
+    }
 }
 
 /// GLM-5.3-Flash's image preprocessing for a server limited to `o.max_image_tokens` tokens an image: the pack's `processor_config.json` read by
@@ -261,6 +267,20 @@ impl GlmPack {
         vision: bool,
     ) -> Result<Self, GlmPackError> {
         let weights = GlmWeights::map_with(inv, &config, own, vision).map_err(GlmPackError::Layout)?;
+        let plan = weights.load_plan().map_err(GlmPackError::Plan)?;
+        Ok(Self { config, weights, plan })
+    }
+
+    /// [`GlmPack::from_inventory_with`] with the embedding's placement given instead of read from `load::EMBED_IN_PLACE_ENV`
+    /// (`GlmWeights::map_with_embed`).
+    pub fn from_inventory_embed(
+        inv: &PackInventory,
+        config: GlmConfig,
+        own: &gb_cuda::moe::ExpertOwnership,
+        vision: bool,
+        embed_in_place: bool,
+    ) -> Result<Self, GlmPackError> {
+        let weights = GlmWeights::map_with_embed(inv, &config, own, vision, embed_in_place).map_err(GlmPackError::Layout)?;
         let plan = weights.load_plan().map_err(GlmPackError::Plan)?;
         Ok(Self { config, weights, plan })
     }

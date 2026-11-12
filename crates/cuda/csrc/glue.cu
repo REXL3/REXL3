@@ -436,7 +436,9 @@ __global__ void __launch_bounds__(SL_NT, SLR_MINB) small_linear_rows_k(const u16
 constexpr int SLC_J = 8;
 constexpr int SLC_RG = 4;
 template <bool F32OUT>
-__global__ void __launch_bounds__(SL_NT, 2) small_linear_cols_k(const u16* x, const __half* w, void* y, int rows, int k, int n,
+// No minBlocksPerMultiprocessor: during decode/verify this launches 1-2 blocks across all SMs, so the cap
+// gained no occupancy while forcing ptxas into a 128-register budget (16 bytes of register spills).
+__global__ void __launch_bounds__(SL_NT) small_linear_cols_k(const u16* x, const __half* w, void* y, int rows, int k, int n,
                                                                 int rows_per_block) {
     __shared__ float sm[2][SL_NT / 32][32];
     const int j0 = blockIdx.x * SLC_J;
@@ -862,6 +864,177 @@ GB_EXPORT int gb_small_linear_f16w(const void* x, const void* w, void* y, int ro
 }
 GB_EXPORT int gb_small_linear_f16w_f32out(const void* x, const void* w, void* y, int rows, int k, int n, void* stream) {
     return small_linear(x, w, y, rows, k, n, true, stream);
+}
+
+// ---------------------------------------------------------------------------------------- small linear fused pair
+
+// One launch for two small linears on the SAME x: blocks [0, n0) compute y0 = x w0^T, [n0, n0 + n1) compute
+// y1 = x w1^T. Each block's arithmetic is bit-for-bit the same as small_linear_k's (same per-thread FMA chains in
+// element order, same warp_sum butterfly, same warp-ordered sm reduction), so a paired output equals two separate
+// small_linear_k launches bit for bit. This is the generic path; the qfn specialization below covers rows <= 8,
+// k == 2560.
+template <bool F32OUT>
+__global__ void __launch_bounds__(SL_NT) small_linear_pair_k(const u16* x, const __half* w0, const __half* w1,
+                                                             void* y0, void* y1, int rows, int k, int n0, int n1) {
+    __shared__ float sm[SL_RT][SL_NT / 32];
+    const bool second = blockIdx.x >= n0;
+    const int j = second ? blockIdx.x - n0 : blockIdx.x;
+    const __half* w = second ? w1 : w0;
+    const int n = second ? n1 : n0;
+    void* y = second ? y1 : y0;
+    const int r0 = blockIdx.y * SL_RT;
+    const int nvec = k / 8;
+    float acc[SL_RT];
+#pragma unroll
+    for (int r = 0; r < SL_RT; ++r) acc[r] = 0.f;
+    const uint4* wr = (const uint4*)(w + (size_t)j * k);
+    for (int v = threadIdx.x; v < nvec; v += SL_NT) {
+        const uint4 wu = __ldg(wr + v);
+        float wf[8];
+        {
+            const __half2* h2 = (const __half2*)&wu;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 f = __half22float2(h2[i]);
+                wf[2 * i] = f.x; wf[2 * i + 1] = f.y;
+            }
+        }
+#pragma unroll
+        for (int r = 0; r < SL_RT; ++r) {
+            if (r0 + r < rows) {
+                float xf[8];
+                unpack8(__ldg((const uint4*)(x + (size_t)(r0 + r) * k) + v), xf);
+#pragma unroll
+                for (int i = 0; i < 8; ++i) acc[r] = fmaf(xf[i], wf[i], acc[r]);
+            }
+        }
+    }
+    const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+#pragma unroll
+    for (int r = 0; r < SL_RT; ++r) {
+        const float s = warp_sum(acc[r]);
+        if (lane == 0) sm[r][wid] = s;
+    }
+    __syncthreads();
+    if (threadIdx.x < SL_RT && r0 + (int)threadIdx.x < rows) {
+        float s = sm[threadIdx.x][0];
+        for (int wv = 1; wv < SL_NT / 32; ++wv) s = s + sm[threadIdx.x][wv];
+        const size_t o = (size_t)(r0 + threadIdx.x) * n + j;
+        if (F32OUT) ((float*)y)[o] = s;
+        else ((u16*)y)[o] = f2bf(s);
+    }
+}
+
+// Specialization for rows <= 8, k == 2560 (nvec = 320 = 256 + 64): NT = rows is a compile-time constant, so the
+// row-bound check disappears and the v-loop collapses to two static loads (v = threadIdx.x, then threadIdx.x + 256
+// for threads 0..63) while every FMA chain and the reduction stay identical to small_linear_k — 0 differing bits by
+// construction. Grid y must be 1; the launcher only routes here when rows <= SL_RT.
+template <bool F32OUT, int NT>
+__global__ void __launch_bounds__(SL_NT) small_linear_pair_qfn_k(const u16* x, const __half* w0, const __half* w1,
+                                                                 void* y0, void* y1, int k, int n0, int n1) {
+    __shared__ float sm[NT][SL_NT / 32];
+    const bool second = blockIdx.x >= n0;
+    const int j = second ? blockIdx.x - n0 : blockIdx.x;
+    const __half* w = second ? w1 : w0;
+    const int n = second ? n1 : n0;
+    void* y = second ? y1 : y0;
+    float acc[NT];
+#pragma unroll
+    for (int r = 0; r < NT; ++r) acc[r] = 0.f;
+    const uint4* wr = (const uint4*)(w + (size_t)j * k);
+    // v = threadIdx.x
+    {
+        const uint4 wu = __ldg(wr + threadIdx.x);
+        float wf[8];
+        {
+            const __half2* h2 = (const __half2*)&wu;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 f = __half22float2(h2[i]);
+                wf[2 * i] = f.x; wf[2 * i + 1] = f.y;
+            }
+        }
+#pragma unroll
+        for (int r = 0; r < NT; ++r) {
+            float xf[8];
+            unpack8(__ldg((const uint4*)(x + (size_t)r * k) + threadIdx.x), xf);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[r] = fmaf(xf[i], wf[i], acc[r]);
+        }
+    }
+    // v = threadIdx.x + 256 (nvec 320: threads 0..63)
+    if (threadIdx.x < 64) {
+        const uint4 wu = __ldg(wr + threadIdx.x + 256);
+        float wf[8];
+        {
+            const __half2* h2 = (const __half2*)&wu;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 f = __half22float2(h2[i]);
+                wf[2 * i] = f.x; wf[2 * i + 1] = f.y;
+            }
+        }
+#pragma unroll
+        for (int r = 0; r < NT; ++r) {
+            float xf[8];
+            unpack8(__ldg((const uint4*)(x + (size_t)r * k) + threadIdx.x + 256), xf);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[r] = fmaf(xf[i], wf[i], acc[r]);
+        }
+    }
+    const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+#pragma unroll
+    for (int r = 0; r < NT; ++r) {
+        const float s = warp_sum(acc[r]);
+        if (lane == 0) sm[r][wid] = s;
+    }
+    __syncthreads();
+    if (threadIdx.x < NT) {
+        float s = sm[threadIdx.x][0];
+        for (int wv = 1; wv < SL_NT / 32; ++wv) s = s + sm[threadIdx.x][wv];
+        const size_t o = (size_t)threadIdx.x * n + j;
+        if (F32OUT) ((float*)y)[o] = s;
+        else ((u16*)y)[o] = f2bf(s);
+    }
+}
+
+static int small_linear_pair(const void* x, const void* w0, const void* w1, void* y0, void* y1, int rows, int k,
+                             int n0, int n1, bool f32out, void* stream) {
+    if (rows < 0 || k <= 0 || n0 < 0 || n1 < 0 || k % 8 != 0) return ERR_INVALID;
+    if (!aligned16(x) || !aligned16(w0) || !aligned16(w1)) return ERR_INVALID;
+    if (rows == 0 || (n0 == 0 && n1 == 0)) return 0;
+    const dim3 grid(n0 + n1, (rows + SL_RT - 1) / SL_RT);
+    if (rows <= SL_RT && k == 2560) {
+        cudaStream_t st = gb_stream(stream);
+#define SL_PAIR_QFN_CASE(NT)                                                                                       \
+        case NT:                                                                                                   \
+            if (f32out)                                                                                            \
+                small_linear_pair_qfn_k<true, NT><<<grid, SL_NT, 0, st>>>((const u16*)x, (const __half*)w0,        \
+                                                                          (const __half*)w1, y0, y1, k, n0, n1);  \
+            else                                                                                                   \
+                small_linear_pair_qfn_k<false, NT><<<grid, SL_NT, 0, st>>>((const u16*)x, (const __half*)w0,       \
+                                                                           (const __half*)w1, y0, y1, k, n0, n1); \
+            return GB_CHECK_LAUNCH();
+        switch (rows) {
+            SL_PAIR_QFN_CASE(1) SL_PAIR_QFN_CASE(2) SL_PAIR_QFN_CASE(3) SL_PAIR_QFN_CASE(4)
+            SL_PAIR_QFN_CASE(5) SL_PAIR_QFN_CASE(6) SL_PAIR_QFN_CASE(7) SL_PAIR_QFN_CASE(8)
+        }
+#undef SL_PAIR_QFN_CASE
+    }
+    if (f32out)
+        small_linear_pair_k<true><<<grid, SL_NT, 0, gb_stream(stream)>>>((const u16*)x, (const __half*)w0,
+                                                                          (const __half*)w1, y0, y1, rows, k, n0, n1);
+    else
+        small_linear_pair_k<false><<<grid, SL_NT, 0, gb_stream(stream)>>>((const u16*)x, (const __half*)w0,
+                                                                           (const __half*)w1, y0, y1, rows, k, n0, n1);
+    return GB_CHECK_LAUNCH();
+}
+// One launch for (w0 -> y0) and (w1 -> y1): `y0 = bf16(x w0^T)`, `y1 = bf16(x w1^T)`, bit for bit the same as two
+// `gb_small_linear_f16w` calls on the same x. x bf16 `[rows, k]`, w0/w1 f16 `[n0, k]`/`[n1, k]`, y0/y1 bf16
+// `[rows, n0]`/`[rows, n1]`. `k % 8 == 0`, x, w0 and w1 16-byte aligned.
+GB_EXPORT int gb_small_linear_pair_f16w(const void* x, const void* w0, const void* w1, void* y0, void* y1, int rows,
+                                        int k, int n0, int n1, void* stream) {
+    return small_linear_pair(x, w0, w1, y0, y1, rows, k, n0, n1, false, stream);
 }
 
 // Same results as gb_small_linear_f16w / _f32out bit for bit, faster for many rows (a prefill chunk): weight-stationary blocks for

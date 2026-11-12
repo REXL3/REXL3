@@ -421,3 +421,34 @@ fn hcg_reads_only_its_declared_operands_with_poisoned_neighbors_at_qfn_dims() {
     assert_eq!(base.0, fresh.0, "hcg y not reproducible on fresh buffers");
     assert_eq!(base.1, fresh.1, "hcg inject not reproducible on fresh buffers");
 }
+
+/// The DFlash2 tap (Flash-Next's width, 4 streams): every row's mean of the streams, summed in stream order in fp32, times 1/4, one bf16
+/// rounding, lands in its column band of the tap buffer, bit for bit as the host computes it; the other bands are left untouched.
+#[test]
+fn the_tap_is_the_stream_mean_in_its_column_band_bit_for_bit() {
+    let Some(st) = gpu() else { return };
+    let (t, h, hc, taps) = (7usize, 2560usize, 4usize, 5usize);
+    let ld = taps * h;
+    let mut rng = Rng(0x7a95);
+    let streams: Vec<f32> = (0..t * hc * h).map(|_| rng.uniform(-3., 3.)).collect();
+    let sentinel = 0x7fc1u16;
+    let xs = DevBuf::from_slice(&streams).unwrap();
+    let mut out = DevBuf::from_slice(&vec![sentinel; t * ld]).unwrap();
+    fn_mhc::hc_tap(&xs, &mut out, h, hc, ld, 2 * h, t, &st).unwrap();
+    let got: Vec<u16> = dl(&out, &st);
+    for r in 0..t {
+        for c in 0..ld {
+            let g = got[r * ld + c];
+            if (2 * h..3 * h).contains(&c) {
+                let d = c - 2 * h;
+                let s = &streams[r * hc * h..];
+                let want = bf((((s[d] + s[h + d]) + s[2 * h + d]) + s[3 * h + d]) * 0.25);
+                assert_eq!(g, want, "row {r} column {d}");
+            } else {
+                assert_eq!(g, sentinel, "row {r} column {c} outside the band was written");
+            }
+        }
+    }
+    // a band past the row is refused before anything is queued
+    assert!(fn_mhc::hc_tap(&xs, &mut out, h, hc, ld, 4 * h + 1, t, &st).is_err());
+}

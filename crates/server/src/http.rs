@@ -30,6 +30,9 @@ pub struct AppState {
     pub tok: Arc<Tok>,
     /// The model family's chat conventions: template, thinking markers, tool-call syntax, image placeholders.
     pub format: Arc<dyn ChatFormat>,
+    /// The engine stop set every reply is submitted with: the tokenizer's eos ids plus the family's generated role-open tokens
+    /// ([`reply_stop_set`]). Computed once at startup from `tok` and `format`.
+    pub reply_stop: Vec<u32>,
     pub defaults: GenDefaults,
     pub model_name: String,
     pub model_aliases: Vec<String>,
@@ -61,6 +64,19 @@ impl AppState {
     pub fn reasoning_fields(&self) -> Vec<String> {
         crate::reasoning_controls::known_top_level(&self.reasoning_caps.caps)
     }
+}
+
+/// The engine stop set a reply is submitted with: the tokenizer's eos ids (`generation_config.json`), then the family's
+/// generated role-open tokens ([`ChatFormat::reply_role_stops`]) that are not already eos. Order is eos first, then any added
+/// role tokens in the family's order; duplicates are dropped. A family with no extra role stops gets exactly its eos list.
+pub fn reply_stop_set(tok: &Tok, format: &dyn ChatFormat) -> Vec<u32> {
+    let mut stop = tok.eos.clone();
+    for id in format.reply_role_stops(tok) {
+        if !stop.contains(&id) {
+            stop.push(id);
+        }
+    }
+    stop
 }
 
 #[derive(Clone)]
@@ -409,6 +425,8 @@ async fn models(State(s): State<Arc<AppState>>) -> Json<Value> {
         "pack_validated": gb_engine::boot::facts().into_iter().find(|(n, _)| *n == "pack_validated").map(|(_, v)| v),
         // a pack served with --allow-unvalidated-pack: the boot's warning line (`gb_model::serve::UNVALIDATED_PACK_WARNING`); null otherwise
         "pack_warning": gb_engine::boot::facts().into_iter().find(|(n, _)| *n == "pack_warning").map(|(_, v)| v),
+        // how the `--draft` pack was validated (`gb_model::serve::pack_verdict`): `listed (<pair>)` or `structural (<geometry>)`; null without one
+        "draft_validated": gb_engine::boot::facts().into_iter().find(|(n, _)| *n == "draft_validated").map(|(_, v)| v),
         // what reasoning/thinking controls the model offers (docs/REASONING_CAPABILITIES.md)
         "reasoning": s.reasoning_caps.exposure(s.default_thinking),
     }]}))
@@ -910,7 +928,7 @@ async fn start(
         prompt,
         sampling,
         max_new,
-        stop: s.tok.eos.clone(),
+        stop: s.reply_stop.clone(),
         draft: p.draft,
         images,
         cache: p.prefix_cache,

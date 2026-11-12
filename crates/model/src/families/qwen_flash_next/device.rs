@@ -489,12 +489,25 @@ impl FlashNextWeights {
     /// When `warm` is set and the pack has a PLE stage, the n-gram table warm must complete before load returns:
     /// this is the readiness gate (the server cannot become ready before a successful warm).
     pub fn load(dir: &Path, cfg: &FlashNextConfig, warm: bool, progress: impl FnMut(usize, usize)) -> Result<Self, ModelError> {
+        Self::load_with(dir, cfg, warm, true, progress)
+    }
+
+    /// [`FlashNextWeights::load`], with the MTP head's tensors bound only when `mtp` (and the pack and `REXL3_MTP` allow it): a boot
+    /// that drafts with a DFlash2 draft leaves the head on disk.
+    pub fn load_with(
+        dir: &Path,
+        cfg: &FlashNextConfig,
+        warm: bool,
+        mtp: bool,
+        progress: impl FnMut(usize, usize),
+    ) -> Result<Self, ModelError> {
         let map = WeightMap::from_dir(dir, cfg).map_err(|errs| {
             let head: Vec<&str> = errs.iter().take(8).map(String::as_str).collect();
             ModelError::Config(format!("Qwen3.8-Flash-Next pack: {} problems: {}", errs.len(), head.join("; ")))
         })?;
         let pack = Pack::open(dir)?;
-        let want = Wanted::new(cfg);
+        let mut want = Wanted::new(cfg);
+        want.mtp &= mtp;
         let mut ctx = LoadCtx::from_env();
         let mut staged = stage(&mut ctx, &pack, dir, &map, &want)?;
         let mut w = Self::claim(&mut staged, cfg, dir, &want, progress)?;

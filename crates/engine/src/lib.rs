@@ -13,7 +13,7 @@ pub mod mock;
 pub mod prefix;
 pub mod score;
 
-pub use prefix::{CacheBudget, Captured, CutPolicy, Eviction, PrefixCaps, PrefixConfig, PrefixHandle, PrefixStats};
+pub use prefix::{CacheBudget, Captured, CutPolicy, Eviction, PoolRoom, PrefixCaps, PrefixConfig, PrefixHandle, PrefixStats};
 use prefix::{PrefillCache, PrefixState};
 
 use gb_sampling::{try_choose, Sampling, SamplingError};
@@ -248,6 +248,12 @@ pub trait Backend {
     /// Tell the backend whether the next score request wants [`Backend::take_score_rows`]. A backend that cannot produce
     /// them keeps the default and answers the request with the last row only.
     fn score_all_rows(&mut self, _on: bool) {}
+    /// Whether [`Backend::take_score_rows`] returns every prompt row of a `ScoreRequest { all_rows: true }` (the
+    /// `prompt_logprobs` readout). The default `false` makes [`Engine::score_validate`] refuse such a request by name, rather
+    /// than score the whole prompt and answer it with no rows.
+    fn score_rows_supported(&self) -> bool {
+        false
+    }
     fn vocab_size(&self) -> usize;
     /// Whether [`Backend::step_tree`] verifies real trees (a backend that does not keeps the default `false` and only ever gets chains).
     fn supports_trees(&self) -> bool {
@@ -371,6 +377,12 @@ pub trait Backend {
     fn prefix_caps(&self) -> Option<PrefixCaps> {
         None
     }
+    /// The family's cut grid: every planned cut is rounded down to a multiple of this (0 or 1: off, the engine's
+    /// `PrefixConfig::cut_align` default otherwise). A backend overrides it when its snapshots carry derived state whose
+    /// restore is only exact on a structure boundary (the Bailing family's KDA recurrence resumes in 16-row chunks).
+    fn prefix_cut_align(&self) -> usize {
+        0
+    }
     /// The prefill path id of a prompt of `total` tokens when its state may be cached, `None` when it may not. State depends on the
     /// arithmetic that produced it, and the arithmetic is picked by the prompt's TOTAL length (the Qwen backend: the decode GEMV up to
     /// 128 tokens, the pinned GEMM above), so a snapshot is only ever interchangeable between prompts of one path, and the GEMV path is
@@ -382,6 +394,13 @@ pub trait Backend {
     /// Snapshot slots no capture holds right now.
     fn prefix_free_snapshots(&self) -> usize {
         0
+    }
+    /// `Some` when this backend's prefix cache keeps its entries in the KV pool's idle pages (a pool-page cache: its budget has no pages of
+    /// its own, `page_blocks == 0`) instead of a region of its own: the pool's physical state now. The engine then keeps the pages every
+    /// live sequence may still claim free by evicting entries before a prefill begins (`Engine::pool_room`). `None` (every backend's default,
+    /// and every cache with a region of its own): the region's limit alone keeps entries out of the sequences' way.
+    fn prefix_pool_room(&self) -> Option<PoolRoom> {
+        None
     }
     /// Put `slot` in the state a prefill of the first `len` tokens of the entry's prompt would have left it in: the sequence starts over from
     /// `handle` (the slot's previous state and pages are dropped, the entry's pages are shared by reference with the partial last page
@@ -1005,7 +1024,16 @@ impl<B: Backend> Engine<B> {
     pub fn with_prefix_cache(mut self, cfg: PrefixConfig) -> Self {
         if let Some(caps) = self.backend.prefix_caps() {
             if caps.budget.enabled() {
-                self.prefix = Some(PrefixState::new(caps, cfg));
+                // the family's own cut grid (its snapshots' derived-state boundary) when the config leaves it off
+                let cfg =
+                    if cfg.cut_align <= 1 { PrefixConfig { cut_align: self.backend.prefix_cut_align(), ..cfg } } else { cfg };
+                let mut st = PrefixState::new(caps, cfg);
+                // a pool-page cache: entries may hold any of the pool's pages; the room step keeps the live sequences' pages free
+                if let Some(room) = self.backend.prefix_pool_room() {
+                    st.index.set_page_limit(room.pool_pages);
+                    st.stats.pool_pages = room.pool_pages as u64;
+                }
+                self.prefix = Some(st);
             }
         }
         self
@@ -1210,9 +1238,14 @@ impl<B: Backend> Engine<B> {
         p.planned = true;
         let total = p.req.prompt.len();
         if self.prefix.is_none() || !p.req.cache || p.req.images.iter().any(|im| im.key == 0) {
+            // an uncached prompt still needs its pages: a pool-page cache's idle entries make room for it
+            self.pool_room(None, 0);
             return Ok(());
         }
-        let Some(path) = self.backend.prefix_path(total) else { return Ok(()) };
+        let Some(path) = self.backend.prefix_path(total) else {
+            self.pool_room(None, 0);
+            return Ok(());
+        };
         // the key stream: the prompt's tokens, with each image's placeholders replaced by tokens that name the image's content
         let prompt = std::sync::Arc::new(cache_tokens(&p.req.prompt, &p.req.images));
         let hit = {
@@ -1223,6 +1256,9 @@ impl<B: Backend> Engine<B> {
         };
         let mut hit_len = 0usize;
         if let Some(hit) = hit {
+            // a pool-page cache: room for the restore's copy of the partial last page, the other live sequences' room kept, the hit itself
+            // pinned (the lookup pins it), and nothing owed for this slot yet: its room is made below, AFTER the hit's pages are its own
+            self.pool_room(Some(p.slot), 1);
             let restored = self.backend.prefix_restore(p.slot, &hit.handle, hit.len);
             let fault = self.backend_fault()?; // a fatal error stops the engine; a recoverable one spoils only this restore
             let st = self.prefix.as_mut().unwrap();
@@ -1251,6 +1287,9 @@ impl<B: Backend> Engine<B> {
                 }
             }
         }
+        // a pool-page cache: the pages this sequence may still claim (its admitted tokens less the pages it holds, the hit's shared pages
+        // credited), and every other live sequence's, are free before its first slice runs
+        self.pool_room(None, 0);
         let st = self.prefix.as_mut().unwrap();
         let ghost = st.ghost.observe(path, &prompt);
         // a cut never falls inside an image: it moves to the image's first placeholder (a prefix that ends before it), or goes; that happens BEFORE the
@@ -1316,6 +1355,50 @@ impl<B: Backend> Engine<B> {
     }
 
     /// Give back snapshots that will not enter the index: the prompt did not complete (the sequence failed or was cancelled), or a slice failed.
+    /// The room step of a pool-page cache (`Backend::prefix_pool_room`; a no-op for every other cache and without one). Every live slot is owed
+    /// the pages its admitted tokens (plus the backend's write-ahead) need beyond the pages its table holds now, shared ones included: what it
+    /// holds by reference from an entry is credited, never evicted to be allocated again. `skip`: a slot owed nothing yet (it is about to
+    /// adopt a hit's pages); `extra`: pages wanted on top (the restore's copy of the partial last page). While the free pages fall short,
+    /// the least recently used UNPINNED entry is evicted and the backend asked again (an eviction frees only the pages no other holder
+    /// references). Whatever is left short is the backend's backstop (`OutOfPages`), named here first.
+    ///
+    /// The invariant it keeps from one prefill's start to the next: free >= the pages every live slot may still claim. A slot's growth
+    /// takes from both sides alike, a release only frees, an entry adds references to pages its slot holds, never pages.
+    fn pool_room(&mut self, skip: Option<usize>, extra: usize) {
+        if self.prefix.is_none() {
+            return;
+        }
+        let Some(mut room) = self.backend.prefix_pool_room() else { return };
+        let per = room.page_tokens.max(1);
+        loop {
+            let owed: usize = self
+                .admission
+                .reserved()
+                .filter(|&(slot, _)| Some(slot) != skip)
+                .map(|(slot, tokens)| {
+                    let need = (tokens as usize).saturating_add(room.write_ahead_tokens).div_ceil(per);
+                    need.saturating_sub(room.slot_pages.get(slot).copied().unwrap_or(0))
+                })
+                .sum::<usize>()
+                + extra;
+            if room.free_pages >= owed {
+                return;
+            }
+            let Some(h) = self.prefix.as_mut().and_then(|st| st.index.evict_for_pool()) else {
+                eprintln!(
+                    "rexl3 level=warn event=prefix_pool_short free_pages={} owed_pages={owed} (every entry left is pinned)",
+                    room.free_pages
+                );
+                return;
+            };
+            self.backend.prefix_release(h);
+            match self.backend.prefix_pool_room() {
+                Some(r) => room = r,
+                None => return,
+            }
+        }
+    }
+
     fn prefix_discard(&mut self, cache: Option<PrefillCache>, extra: Vec<Captured>) {
         let mut n = 0u64;
         for cap in cache.into_iter().flat_map(|c| c.pending).chain(extra) {

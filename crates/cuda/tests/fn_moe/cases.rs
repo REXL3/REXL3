@@ -128,7 +128,7 @@ fn run_frost(o: &Owned, inp: &Inputs, t: usize, kc: usize, st: &Stream) -> Resul
     let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc, max_tokens: 64 };
     let mut frost = DevBuf::zeroed(t * H * 2).unwrap();
     let mut ws = fmoe::workspace(64, TK, H, I, kc)?;
-    fmoe::forward(&x, &logits, &sg, &o.tables(), &mut frost, shape, None, fmoe::SwigluLimit::default(), &mut ws, st)?;
+    fmoe::forward(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut frost, shape, None, fmoe::SwigluLimit::default(), &mut ws, st)?;
     Ok(dl(&frost, st))
 }
 fn run(o: &Owned, inp: &Inputs, t: usize, st: &Stream) -> Out {
@@ -144,10 +144,10 @@ fn run(o: &Owned, inp: &Inputs, t: usize, st: &Stream) -> Out {
     let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 64 };
     let mut frost = DevBuf::zeroed(t * H * 2).unwrap();
     let mut ws = fmoe::workspace(64, TK, H, I, KC).unwrap();
-    fmoe::forward(&x, &logits, &sg, &o.tables(), &mut frost, shape, None, fmoe::SwigluLimit::default(), &mut ws, st).unwrap();
+    fmoe::forward(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut frost, shape, None, fmoe::SwigluLimit::default(), &mut ws, st).unwrap();
     let mut prefill = DevBuf::zeroed(t * H * 2).unwrap();
     let mut pws = fmoe::prefill_workspace(64, TK, NE, H, I).unwrap();
-    fmoe::prefill(&x, &logits, &sg, &o.tables(), &mut prefill, shape, None, fmoe::SwigluLimit::default(), &mut pws, st).unwrap();
+    fmoe::prefill(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut prefill, shape, None, fmoe::SwigluLimit::default(), &mut pws, st).unwrap();
     Out { sel: dl(&sel, st), rw: dl(&rw, st), coop: dl(&coop, st), frost: dl(&frost, st), prefill: dl(&prefill, st) }
 }
 fn cpu_projection(g: &LoadedGroup, x: &[f64]) -> Vec<f64> {

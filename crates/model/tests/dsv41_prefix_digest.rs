@@ -163,3 +163,48 @@ fn the_prefix_state_digest_cost_at_the_1m_geometry() {
     );
     m.release_prefix(snap);
 }
+
+/// A prompt prefilled with a cut, and its warm continuation from the snapshot at that cut, equal the whole prompt bit for bit, for
+/// cuts on both sides of the 128-row sliding window. Below the window a row's attention bits depend on how the prompt was split: the
+/// kernel reduces each row's key list in 16-entry tiles, and `window_idxs_kernel` lays that list out by call (a first chunk of fewer
+/// rows than the window puts the compressed half after its own row count, not after the window; a chunk that starts past 0
+/// right-aligns the window keys), so the same keys land in different tile lanes for positions below 127. The model therefore takes no
+/// snapshot below the window, and such a prompt runs whole. The geometry (110 of 168) is the one `check_prefix_cache.py --tail 48`'s
+/// "just above 128" next turn resumes from. A warm tail of 16 rows or fewer must take the prefill (MMA) shape in every linear, the
+/// engram projection included, or its rows differ from the same rows of the whole prompt's pass.
+#[test]
+#[ignore = "GPU and REXL3_DSV41_DIR"]
+fn a_cut_and_its_warm_continuation_equal_the_whole_prompt_on_both_sides_of_the_window() {
+    let Some(mut e) = engine(16_384) else { return };
+    let b = &mut e.backend;
+    let window = 128;
+    let cases = [
+        (11, 64, 122),
+        (12, 110, 168),
+        (13, 120, 178),
+        (14, 127, 185),
+        (15, 128, 186),
+        (16, 129, 187),
+        (17, 200, 258),
+        // warm tails of 16 rows or fewer (the fp8 decode shape): one row, sixteen, and sixteen past a later cut
+        (18, 128, 129),
+        (19, 128, 144),
+        (20, 300, 316),
+    ];
+    for (seed, cut, total) in cases {
+        let p = toks(seed, total);
+        let (cold, _) = prefill(b, &p, 0, &[]);
+        let (with_cut, caps) = prefill(b, &p, 0, &[cut]);
+        assert_eq!(with_cut, cold, "cut {cut} of {total}: the prompt prefilled with the cut equals the whole prompt");
+        let snap = caps.into_iter().find(|c| c.len == cut);
+        if cut < window {
+            assert!(snap.is_none(), "cut {cut} of {total}: no snapshot below the window");
+            continue;
+        }
+        let c = snap.unwrap_or_else(|| panic!("cut {cut} of {total}: the cut at or above the window was captured"));
+        b.prefix_restore(0, &c.handle, cut).unwrap();
+        let (warm, _) = prefill(b, &p, cut, &[]);
+        assert_eq!(warm, cold, "cut {cut} of {total}: the warm continuation equals the whole prompt");
+        b.prefix_release(c.handle);
+    }
+}

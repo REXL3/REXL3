@@ -1,0 +1,24 @@
+[package]
+name = "gb-quant"
+description = "REXL3's EXL3 quantizer: per-tensor core, calibration, capture, allocation and pack writer (rexl3-quant)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "gb_quant"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rexl3-quant"
+path = "src/main.rs"
+
+[dependencies]
+gb-cuda = { path = "../cuda" }
+gb-exl3 = { path = "../exl3" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

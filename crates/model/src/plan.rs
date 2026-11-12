@@ -156,6 +156,8 @@ pub enum PlanError {
     /// An explicit prefix-cache size cut by pages first ([`plan_memory_cached_windowed`]) that is under the least that is a cache: the
     /// minimum snapshot slots and the pages of [`gb_sched::prefix::MIN_CACHE_REACH_TOKENS`] tokens.
     CacheBelowMinimumReach { bytes: u64, minimum_bytes: u64 },
+    /// A pool-page prefix cache ([`plan_memory_pool_cached`]) asked for with more than one sequence slot: its room step is proven for one.
+    PoolCacheNeedsOneSlot { slots: usize },
 }
 
 impl From<MemoryError> for PlanError {
@@ -177,6 +179,10 @@ impl std::fmt::Display for PlanError {
                 write!(f, "the memory profile is for {profile}-token pages but the KV pool uses {pool}-token pages")
             }
             PlanError::NoSlots => write!(f, "at least one sequence slot is needed"),
+            PlanError::PoolCacheNeedsOneSlot { slots } => write!(
+                f,
+                "--prefix-cache pool keeps the cache in the KV pool's idle pages and is built for one sequence slot, not {slots}: use --slots 1, or --prefix-cache on / --prefix-cache-mib for a cache with pages of its own"
+            ),
             PlanError::Overflow(what) => write!(f, "byte arithmetic overflows in {what}"),
             PlanError::Memory(e) => write!(f, "{e}"),
             PlanError::CacheTooSmall { bytes, entry_bytes } => write!(
@@ -283,6 +289,55 @@ pub fn plan_memory_cached_windowed(
         wq_budget_bytes,
         CacheSizing::Window { window_tokens },
     )
+}
+
+/// The plan of a POOL-PAGE prefix cache (`--prefix-cache pool`): the cache keeps its entries in the KV pool's idle pages and has no pages of its own
+/// (`cache.page_blocks == 0`), so the pool is exactly the plan without a cache and holds the admitted window once, not twice. Its snapshot slots
+/// come first: [`gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS`] out of the allocatable bytes before the pool is sized (a cache, however tight the box),
+/// then more from what the pool left, under the cache margin, up to the window rule's wanted count. One sequence slot only (refused by name
+/// otherwise): the engine's room step (`gb_engine::Engine` `pool_room`) evicts idle entries for the pages a live sequence may still claim.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_memory_pool_cached(
+    profile: &MemoryProfile,
+    free_bytes: u64,
+    floor_bytes: u64,
+    slots: usize,
+    kv_tokens_cap: u64,
+    vision_reserve_bytes: u64,
+    snapshot_bytes: u64,
+    wq_budget_bytes: u64,
+    window_tokens: u64,
+) -> Result<MemoryPlan, PlanError> {
+    if slots != 1 {
+        return Err(PlanError::PoolCacheNeedsOneSlot { slots });
+    }
+    if snapshot_bytes == 0 {
+        return Err(PlanError::Overflow("a snapshot slot of 0 bytes"));
+    }
+    let base = gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS;
+    let carve = snapshot_bytes.checked_mul(base).ok_or(PlanError::Overflow("snapshot slots"))?;
+    if free_bytes < carve {
+        return Err(PlanError::NoRoom { allocatable: free_bytes, needed: carve });
+    }
+    let mut plan = plan_memory_cached_with(
+        profile,
+        free_bytes - carve,
+        floor_bytes,
+        slots,
+        kv_tokens_cap,
+        vision_reserve_bytes,
+        CacheRequest::Off,
+        0,
+        wq_budget_bytes,
+        CacheSizing::Legacy,
+    )?;
+    let wanted = WindowRule { window_tokens, live_slots: slots }.wanted_slots();
+    let room = plan.spare_bytes.saturating_sub(cache_margin_bytes(plan.spare_bytes));
+    let more = (room / snapshot_bytes).min(wanted.saturating_sub(base));
+    plan.cache =
+        CacheBudget { snapshot_slots: (base + more) as usize, page_blocks: 0, snapshot_bytes, page_bytes: plan.block_bytes };
+    plan.spare_bytes -= more * snapshot_bytes;
+    Ok(plan)
 }
 
 /// How the prefix cache is cut into snapshot slots and pages.
@@ -422,6 +477,44 @@ mod tests {
     }
 
     // ---- planner arithmetic
+
+    /// `--prefix-cache pool`: no pages of its own, the pool is the uncached plan's pool, the snapshot slots come out first, and the planned bytes
+    /// stay within what was given (floor and reserves kept). More than one slot is refused by name.
+    #[test]
+    fn a_pool_page_cache_plans_no_pages_and_the_uncached_pool() {
+        // the arithmetic is the family's profile's; the Qwen profile needs no kernel sizes (the GLM one does: its 1M figures are
+        // `glm::tp_boot::tests::a_pool_page_cache_plans_the_1m_window_once`, on a CUDA build and the real pack)
+        let p = qwen_profile();
+        let snap = 70 << 20;
+        let free = 30 * GIB;
+        let window = 262_144;
+        let pool = plan_memory_pool_cached(&p, free, 4 * GIB, 1, window, 0, snap, 0, window).unwrap();
+        assert_eq!(pool.cache.page_blocks, 0, "no second window of pages");
+        assert!(pool.cache.enabled() && pool.cache.snapshot_slots as u64 >= gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS);
+        // the pool is the plan without a cache, computed from what the minimum snapshot slots left
+        let off = plan_memory_cached(&p, free - 2 * snap, 4 * GIB, 1, window, 0, CacheRequest::Off, 0, 0).unwrap();
+        assert_eq!((pool.kv_blocks, pool.kv_tokens), (off.kv_blocks, off.kv_tokens));
+        assert_eq!(pool.kv_blocks, window as usize / BLOCK_TOKENS + 1, "the window's pages and the slot's page of rounding");
+        assert!(pool.planned_bytes(1) + 4 * GIB <= free, "planned {} of {}", pool.planned_bytes(1), free);
+        // a cache of its own reaching the window holds a second window of pages on top of the same pool
+        let own =
+            plan_memory_cached_windowed(&p, 60 * GIB, 4 * GIB, 1, window, 0, CacheRequest::Fixed(17 * GIB), snap, 0, window)
+                .unwrap();
+        assert!(own.cache.page_blocks >= window as usize / BLOCK_TOKENS, "{}", own.cache.page_blocks);
+        assert!(own.planned_bytes(1) >= pool.planned_bytes(1) + (window / BLOCK_TOKENS as u64) * pool.block_bytes);
+        // the snapshot slots grow with spare memory up to the rule's wanted count, never past it, and never take pages
+        let roomy = plan_memory_pool_cached(&p, 60 * GIB, 4 * GIB, 1, window, 0, snap, 0, window).unwrap();
+        let wanted = WindowRule { window_tokens: window, live_slots: 1 }.wanted_slots();
+        assert_eq!(roomy.cache.snapshot_slots as u64, wanted);
+        assert_eq!(roomy.cache.page_blocks, 0);
+        assert!(roomy.planned_bytes(1) + 4 * GIB <= 60 * GIB);
+        // one slot only, refused by name
+        let e = plan_memory_pool_cached(&p, free, 4 * GIB, 2, window, 0, snap, 0, window).unwrap_err();
+        assert_eq!(e, PlanError::PoolCacheNeedsOneSlot { slots: 2 });
+        assert!(e.to_string().contains("--prefix-cache pool") && e.to_string().contains("--slots 1"), "{e}");
+        // a box that cannot hold the reserves, the minimum snapshot slots and a page is refused, not given a cache of nothing
+        assert!(plan_memory_pool_cached(&p, 6 * GIB, 4 * GIB, 1, window, 0, snap, 0, window).is_err());
+    }
 
     #[test]
     fn a_page_is_sixteen_mib() {

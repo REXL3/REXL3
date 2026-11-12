@@ -265,7 +265,9 @@ impl Dsv41Device {
         let l: u64 = self
             .layers
             .iter()
-            .map(|l| l.attn_norm.bytes() as u64 + l.ffn_norm.bytes() as u64 + l.mla.bytes() as u64 + l.shared.bytes())
+            // the layer's weights without its RoPE tables: the tables are shared across layers and `rope_bytes` counts
+            // each distinct one once, below
+            .map(|l| l.attn_norm.bytes() as u64 + l.ffn_norm.bytes() as u64 + l.mla.weight_bytes() as u64 + l.shared.bytes())
             .sum();
         let m: u64 = self.mtp.iter().flat_map(|m| m.tensors.iter().map(|(_, b)| b.bytes() as u64)).sum();
         let eg: u64 =

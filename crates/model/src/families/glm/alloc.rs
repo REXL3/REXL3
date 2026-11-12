@@ -249,9 +249,14 @@ impl AllocPlan {
 
     /// The plan with the prefix cache's snapshot pool: `slots` snapshot slots of `prefix::snapshot_bytes` each, named `prefix_snapshots` (the pages the cache
     /// holds are part of `kv_blocks`, which the caller passes in the settings: the pool is `admitted pages + the cache's`). No slots: the plan as it was.
-    pub fn with_prefix_snapshots(mut self, cfg: &GlmConfig, slots: usize, mtp: bool) -> Result<Self, String> {
+    pub fn with_prefix_snapshots(self, cfg: &GlmConfig, slots: usize, mtp: bool) -> Result<Self, String> {
+        self.with_prefix_snapshots_draft(cfg, slots, mtp, false)
+    }
+
+    /// [`AllocPlan::with_prefix_snapshots`] whose snapshots also keep a DFlash2 draft's window (`draft`).
+    pub fn with_prefix_snapshots_draft(mut self, cfg: &GlmConfig, slots: usize, mtp: bool, draft: bool) -> Result<Self, String> {
         if slots > 0 {
-            let per = super::prefix::snapshot_bytes(cfg, mtp)?;
+            let per = super::prefix::snapshot_bytes_with(cfg, mtp, draft)?;
             self.items.push(Item { name: "prefix_snapshots", bytes: slots as u64 * per });
         }
         Ok(self)

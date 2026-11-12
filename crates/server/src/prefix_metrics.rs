@@ -85,6 +85,17 @@ pub fn render(s: &PrefixStats) -> String {
     put(&mut out, "rexl3_prefix_cache_pages", g, "Distinct KV pages the entries hold.", s.pages_held);
     put(&mut out, "rexl3_prefix_cache_snapshot_slots", g, "Snapshot slots reserved for the cache.", s.snapshot_slots);
     put(&mut out, "rexl3_prefix_cache_page_blocks", g, "KV pages reserved for the cache.", s.page_blocks);
+    // a pool-page cache reserves no pages (`page_blocks` 0) and may hold any idle page of the pool: said only for it, so every other
+    // server serves the /metrics text it did before
+    if s.pool_pages > 0 {
+        put(
+            &mut out,
+            "rexl3_prefix_cache_pool_pages",
+            g,
+            "KV pool pages the cache may hold while idle (--prefix-cache pool: it reserves none of its own).",
+            s.pool_pages,
+        );
+    }
     put(&mut out, "rexl3_prefix_cache_bytes", g, "Bytes the entries hold (snapshot slots plus distinct pages).", s.bytes_held);
     put(&mut out, "rexl3_prefix_cache_budget_bytes", g, "Bytes reserved for the cache at boot.", s.bytes_budget);
     put(&mut out, "rexl3_prefix_cache_hit_ratio", g, "Hits per lookup since boot.", format!("{:.6}", s.hit_rate()));
@@ -149,6 +160,122 @@ mod tests {
         ] {
             assert!(on.contains(&format!("\n{line}\n")), "{line}");
         }
+    }
+
+    /// The series a shipped cache (pages of its own) serves, in order: the pool-page gauge is not among them, so its /metrics text is the
+    /// text it served before `--prefix-cache pool` existed.
+    #[test]
+    fn a_cache_with_pages_of_its_own_serves_the_series_it_did_before() {
+        let t = render(&PrefixStats { enabled: true, page_blocks: 48, snapshot_slots: 6, ..Default::default() });
+        let names: Vec<&str> = t.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split(' ').next()).collect();
+        assert_eq!(
+            names,
+            [
+                "rexl3_prefix_cache_enabled",
+                "rexl3_prefix_cache_lookups_total",
+                "rexl3_prefix_cache_lookup_tokens_total",
+                "rexl3_prefix_cache_hits_total",
+                "rexl3_prefix_cache_tokens_saved_total",
+                "rexl3_prefix_cache_inserts_total",
+                "rexl3_prefix_cache_duplicates_total",
+                "rexl3_prefix_cache_no_room_total",
+                "rexl3_prefix_cache_evictions_total",
+                "rexl3_prefix_cache_evicted_for_pages_total",
+                "rexl3_prefix_cache_evicted_for_slots_total",
+                "rexl3_prefix_cache_restore_failures_total",
+                "rexl3_prefix_cache_captures_discarded_total",
+                "rexl3_prefix_cache_entries",
+                "rexl3_prefix_cache_pages",
+                "rexl3_prefix_cache_snapshot_slots",
+                "rexl3_prefix_cache_page_blocks",
+                "rexl3_prefix_cache_bytes",
+                "rexl3_prefix_cache_budget_bytes",
+                "rexl3_prefix_cache_hit_ratio",
+            ]
+        );
+    }
+
+    /// `--prefix-cache pool` reports through the SAME series as a cache with pages of its own (what the gate's prefix stage reads): a cached
+    /// turn moves the hits by one and the saved tokens by the hit's length, a full-window prompt counts its evictions, and the one gauge of
+    /// its own says how many pool pages the entries may hold (its `page_blocks` is 0: it reserved none). Driven on the engine's GLM-shaped mock.
+    #[test]
+    fn a_pool_page_cache_reports_its_hits_and_evictions_through_the_same_series() {
+        use gb_engine::mock::{Fault, MockBackend, PrefixFault, MOCK_PAGE};
+        use gb_engine::{CutPolicy, Engine, EngineConfig, PrefixConfig, Request};
+        const WINDOW: usize = 16 * MOCK_PAGE;
+        let pool_pages = WINDOW / MOCK_PAGE + 1;
+        let mm = gb_sched::ModelMemory {
+            weights_bytes: 1 << 30,
+            kv_bytes_per_token: 12_000,
+            state_bytes_per_slot: 141 << 20,
+            activation_reserve: 1 << 30,
+        };
+        let adm = gb_sched::Admission::new(64 << 30, 6 << 30, mm, 1)
+            .unwrap()
+            .with_max_context(WINDOW as u64)
+            .with_kv_tokens(WINDOW as u64);
+        let cfg = EngineConfig {
+            max_rows: 64,
+            max_drafts: 7,
+            cost: gb_sched::CostModel::from_table(vec![(1, 70.0), (16, 74.0), (32, 110.0), (64, 190.0)]),
+            drafting: true,
+        };
+        let backend =
+            MockBackend::new(512, 1, Fault::None).with_glm_shape().with_pool_prefix_cache(4, pool_pages, PrefixFault::None);
+        let mut e = Engine::new(backend, adm, cfg, Box::new(|| Box::new(gb_engine::NoDrafts) as Box<dyn gb_engine::Drafter>))
+            .with_prefix_cache(PrefixConfig {
+                policy: CutPolicy { min_cut: 64, tail: 8, ghost_min_gain: 256, min_gap: 0 },
+                ghost_blocks: 1 << 12,
+                ..Default::default()
+            });
+        let toks = |seed: u32, n: usize| -> Vec<u32> {
+            (0..n as u32).map(|i| 1 + (i.wrapping_mul(2_654_435_761) ^ seed) % 511).collect()
+        };
+        let req = |prompt: Vec<u32>, max_new: usize| Request {
+            prompt,
+            sampling: gb_sampling::Sampling { seed: 7, temperature: 0.0, top_k: 20, top_p: 0.95, min_p: 0.0 },
+            max_new,
+            stop: vec![],
+            draft: true,
+            images: vec![],
+            cache: true,
+        };
+        let mut run = |e: &mut Engine<MockBackend>, r: Request| {
+            let id = e.submit(r).unwrap();
+            e.run().unwrap();
+            e.take_outputs().into_iter().find(|o| o.id == id).unwrap()
+        };
+        let line = |t: &str, name: &str| -> u64 {
+            t.lines()
+                .find_map(|l| l.strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .parse()
+                .unwrap()
+        };
+        let a = toks(1, 3000);
+        run(&mut e, req(a.clone(), 24));
+        let before = render(&e.prefix_stats());
+        assert_eq!(line(&before, "rexl3_prefix_cache_enabled"), 1);
+        assert_eq!(line(&before, "rexl3_prefix_cache_hits_total"), 0);
+        assert_eq!(line(&before, "rexl3_prefix_cache_page_blocks"), 0, "it reserved no pages of its own");
+        assert_eq!(line(&before, "rexl3_prefix_cache_pool_pages"), pool_pages as u64);
+        assert!(line(&before, "rexl3_prefix_cache_pages") > 0, "its entry holds idle pool pages");
+        // the cached turn: hits 0 -> 1, the saved tokens the hit's length (the end cut, 8 tokens short of the prompt)
+        let mut b = a.clone();
+        b.extend(toks(2, 300));
+        let ob = run(&mut e, req(b, 60));
+        let after = render(&e.prefix_stats());
+        assert_eq!(ob.cached_tokens, 3000 - 8);
+        assert_eq!(line(&after, "rexl3_prefix_cache_hits_total"), 1);
+        assert_eq!(line(&after, "rexl3_prefix_cache_tokens_saved_total"), (3000 - 8) as u64);
+        assert_eq!(line(&after, "rexl3_prefix_cache_evictions_total"), line(&before, "rexl3_prefix_cache_evictions_total"));
+        // a full-window prompt evicts the entries in its way: counted as evictions for pages
+        let ev0 = line(&after, "rexl3_prefix_cache_evictions_total");
+        run(&mut e, req(toks(3, WINDOW - 96), 96));
+        let full = render(&e.prefix_stats());
+        assert!(line(&full, "rexl3_prefix_cache_evictions_total") > ev0, "{full}");
+        assert!(line(&full, "rexl3_prefix_cache_evicted_for_pages_total") >= 1, "{full}");
+        assert_eq!(line(&full, "rexl3_prefix_cache_hits_total"), 1);
     }
 
     #[test]

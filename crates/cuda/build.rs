@@ -3,14 +3,17 @@
 //! No nvcc (CI on x86, a laptop) means a stub build: the crate still compiles, `cfg(gb_no_cuda)` is set, and GPU
 //! tests skip. `REXL3_CUDA_ARCH` overrides the target (default `sm_121`, the GB10); `REXL3_NO_CUDA` forces the stub build.
 //! The old names `GB_CUDA_ARCH` and `GB_NO_CUDA` still work and print a warning. A source file can request extra nvcc
-//! flags on its first line: `// gb-nvcc: --fmad=false`.
+//! flags on its first line: `// gb-nvcc: --fmad=false`. At most Cargo's job count (`-j`, passed as `NUM_JOBS`) nvcc
+//! processes run at once.
 //!
 //! The build identity is exported to the crate as `REXL3_NVCC_VERSION`, `REXL3_CUDA_ARCH` and `REXL3_KERNEL_HASH` (FNV-1a
 //! over every file in `csrc/`, the arch and each file's flags), so a running server can say exactly which kernels it runs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::{env, fs, thread};
 
 /// Flags every kernel file is compiled with (part of the kernel hash).
 const NVCC_FLAGS: &[&str] = &["-c", "-O3", "--std=c++17", "-Xcompiler", "-fPIC", "-lineinfo", "-I", "csrc"];
@@ -70,12 +73,71 @@ fn find_cuda() -> Option<PathBuf> {
     None
 }
 
+/// How many nvcc processes may run at once: Cargo's job count (`NUM_JOBS`, which Cargo sets from `-j`), else the CPU
+/// count. One nvcc of a large kernel file can take more than 1 GB, so a clean build that started every file at once could
+/// exhaust the memory of a node that is also serving a model. The count changes scheduling only, never the objects.
+pub fn nvcc_jobs(cargo_jobs: Option<&str>) -> usize {
+    match cargo_jobs.and_then(|s| s.trim().parse::<usize>().ok()) {
+        Some(n) if n > 0 => n,
+        _ => thread::available_parallelism().map_or(4, |n| n.get()),
+    }
+}
+
+/// Runs `run(0..n)` on at most `jobs` threads at once; `run` returns false on failure. After the first failure no new
+/// index starts (the running ones finish). Returns the failed indices, sorted.
+pub fn run_bounded<F: Fn(usize) -> bool + Sync>(jobs: usize, n: usize, run: F) -> Vec<usize> {
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let failed = Mutex::new(Vec::new());
+    thread::scope(|s| {
+        for _ in 0..jobs.clamp(1, n.max(1)) {
+            s.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    if !run(i) {
+                        stop.store(true, Ordering::Relaxed);
+                        failed.lock().unwrap().push(i);
+                    }
+                }
+            });
+        }
+    });
+    let mut failed = failed.into_inner().unwrap();
+    failed.sort_unstable();
+    failed
+}
+
+/// Host-compiler options a kernel file may request that GCC accepts on one target architecture only, with that
+/// architecture (`-mno-outline-atomics` exists on AArch64 only; `roce_shim.cu` asks for it).
+const HOST_ONLY: &[(&str, &str)] = &[("-mno-outline-atomics", "aarch64")];
+
+/// `flags` without the `-Xcompiler <option>` pairs whose option is in [`HOST_ONLY`] for another architecture than
+/// `target_arch`, so a compile-only build on another host does not stop at them. On the GB10 (aarch64) nothing is
+/// dropped. The kernel hash covers each file's bytes, first line included, so it does not depend on this.
+pub fn host_flags(flags: Vec<String>, target_arch: &str) -> Vec<String> {
+    let foreign = |opt: &String| HOST_ONLY.iter().any(|&(o, arch)| opt == o && arch != target_arch);
+    let mut out = Vec::with_capacity(flags.len());
+    let mut it = flags.into_iter().peekable();
+    while let Some(f) = it.next() {
+        if f == "-Xcompiler" && it.peek().is_some_and(foreign) {
+            it.next();
+            continue;
+        }
+        out.push(f);
+    }
+    out
+}
+
 fn extra_flags(src: &Path) -> Vec<String> {
     let text = fs::read_to_string(src).unwrap_or_default();
-    match text.lines().next().and_then(|l| l.strip_prefix("// gb-nvcc:")) {
+    let flags = match text.lines().next().and_then(|l| l.strip_prefix("// gb-nvcc:")) {
         Some(f) => f.split_whitespace().map(str::to_string).collect(),
         None => vec![],
-    }
+    };
+    host_flags(flags, &env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default())
 }
 
 fn main() {
@@ -122,16 +184,18 @@ fn main() {
         .filter_map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
         .max();
     let objs: Vec<PathBuf> = srcs.iter().map(|s| out.join(s.file_stem().unwrap()).with_extension("o")).collect();
-    let mut children = Vec::new();
+    let mut stale = Vec::new();
     for (s, obj) in srcs.iter().zip(objs.iter()) {
         let up_to_date =
             match (fs::metadata(obj).and_then(|m| m.modified()).ok(), fs::metadata(s).and_then(|m| m.modified()).ok()) {
                 (Some(om), Some(sm)) => om >= sm && hdr_mtime.is_none_or(|hm| om >= hm),
                 _ => false,
             };
-        if up_to_date {
-            continue;
+        if !up_to_date {
+            stale.push((s, obj));
         }
+    }
+    let compile = |s: &Path, obj: &Path| {
         let mut cmd = Command::new(&nvcc);
         if let Some(orig_path) = env::var_os("PATH") {
             let mut paths = vec![cuda.join("bin")];
@@ -144,13 +208,12 @@ fn main() {
         }
         cmd.args(NVCC_FLAGS).arg(format!("-arch={arch}"));
         cmd.args(extra_flags(s)).arg("-o").arg(obj).arg(s);
-        let child = cmd.spawn().expect("spawn nvcc");
-        children.push((s.clone(), child));
-    }
-    for (s, mut child) in children {
-        let st = child.wait().expect("wait nvcc");
-        assert!(st.success(), "nvcc failed on {}", s.display());
-    }
+        cmd.status().expect("run nvcc").success()
+    };
+    let jobs = nvcc_jobs(env::var("NUM_JOBS").ok().as_deref());
+    let failed = run_bounded(jobs, stale.len(), |i| compile(stale[i].0, stale[i].1));
+    let names: Vec<String> = failed.iter().map(|&i| stale[i].0.display().to_string()).collect();
+    assert!(names.is_empty(), "nvcc failed on {}", names.join(", "));
     let lib = out.join("libgbkernels.a");
     let _ = fs::remove_file(&lib);
     let st = Command::new("ar").arg("crs").arg(&lib).args(&objs).status().expect("run ar");

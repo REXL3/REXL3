@@ -77,6 +77,8 @@ pub struct GlmTpBackend<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> {
     pub spec: Option<SpecRuntime>,
     /// The prefix cache this group reserved (its namespace and budget), when one is enabled ([`GlmTpBackend::with_prefix_cache`]).
     prefix: Option<PrefixCaps>,
+    /// `--prefix-cache pool` (`with_pool_prefix_cache`): the entries keep the KV pool's idle pages on every rank; rank 0's engine evicts them.
+    prefix_pool: bool,
     /// Rank 0's translation of its snapshot handles (Nemotron's leader `snaps`): its own snapshot slot to the sequence number of the
     /// `Snapshot` call that made it (what every follower keys its own handle by) and the pages it retained. A handle is forwarded only if
     /// it is in here exactly as it was made.
@@ -105,6 +107,7 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> GlmTpBackend<R> {
             images: SlotImages::new(slots),
             spec: None,
             prefix: None,
+            prefix_pool: false,
             snaps: BTreeMap::new(),
             book: lockstep::SnapshotBook::default(),
             snaps_without_drafts: 0,
@@ -124,6 +127,21 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> GlmTpBackend<R> {
         self.leader.settle(seq)?;
         self.prefix = Some(PrefixCaps { namespace, budget });
         Ok(self)
+    }
+
+    /// [`GlmTpBackend::with_prefix_cache`] for a pool-page cache (as `GlmBackend::with_pool_prefix_cache`): no pages of its own on any rank,
+    /// rank 0's engine evicts idle entries for a live sequence (`Backend::prefix_pool_room`, rank 0's own pool standing for the group's), and
+    /// every eviction is forwarded as the `Release` it always was.
+    pub fn with_pool_prefix_cache(self, namespace: u64, budget: CacheBudget) -> Result<Self, ModelError> {
+        if budget.page_blocks != 0 {
+            return Err(ModelError::Config(format!(
+                "a pool-page prefix cache has no pages of its own, not {} (plan it with plan_memory_pool_cached)",
+                budget.page_blocks
+            )));
+        }
+        let mut b = self.with_prefix_cache(namespace, budget)?;
+        b.prefix_pool = true;
+        Ok(b)
     }
 
     /// Snapshots taken whose restore would not draft (see the field): what a two-node gate reads beside the warm turn's drafted counters.
@@ -239,6 +257,9 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> GlmTpBackend<R> {
             }
             self.digests.begin(slot);
         }
+        // rank 0's DFlash2 draft absorbs the prompt's last window, or from the window before the first snapshot still to come (after the
+        // slot's begin, which resets it)
+        self.leader.inner_mut().set_dflash_from(slot, super::dflash::ctx_from(n, cuts, done));
         let at = done;
         let want = (end == n).then_some(candidates);
         let c = self.leader.prefill_chunk(&Self::chunk_batch(slot, at, &prompt[at..end]), want)?;
@@ -271,7 +292,7 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> GlmTpBackend<R> {
         v.check_images(prompt, images)?;
         let planned = self.slice_end(done, n, cuts)?;
         // the rows are read off the device before anything of the slot is touched: a failure here forwards nothing
-        let (call, end) = v.chunk_call(slot, prompt, images, done, planned, candidates)?;
+        let (call, end) = v.chunk_call(slot, prompt, images, done, planned, candidates, prefix::slice_grid(self.contract))?;
         if done == 0 {
             self.leader.begin_slot(slot)?;
             if let Some(s) = self.spec.as_mut() {
@@ -281,6 +302,7 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> GlmTpBackend<R> {
         }
         // set on every slice, as the single node does
         self.images.set(slot, images);
+        self.leader.inner_mut().set_dflash_from(slot, super::dflash::ctx_from(n, cuts, done));
         let c = match call {
             ChunkCall::Text(b, want) => self.leader.prefill_chunk(&b, want)?,
             ChunkCall::Image(p) => tp_vision::forward_image(&mut self.leader, p)?,
@@ -582,6 +604,14 @@ impl<R: GlmMtpRuntime + ImageRuntime + PrefixRuntime> Backend for GlmTpBackend<R
     /// Rank 0's free snapshot slots: every follower's pool moves by the same calls, so it has as many.
     fn prefix_free_snapshots(&self) -> usize {
         self.leader.inner().free_snapshots()
+    }
+
+    fn prefix_pool_room(&self) -> Option<gb_engine::PoolRoom> {
+        if self.prefix.is_some() && self.prefix_pool {
+            self.leader.inner().kv_pool_room()
+        } else {
+            None
+        }
     }
 
     /// As `GlmBackend::prefix_restore`, with the restore forwarded ([`GlmCall::Restore`]): the sequence starts over from the entry on

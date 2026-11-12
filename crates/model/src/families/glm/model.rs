@@ -32,14 +32,17 @@ use gb_cuda::moe_prefill::{PrefillScratch, SharedScratchBig};
 use gb_cuda::{dsa, glm_glue, glue, kda, DevBuf, Stream};
 use std::collections::BTreeMap;
 
+pub mod dflash;
 pub mod graphs;
 mod layers;
 pub mod mtp;
 pub mod snapshot;
 pub mod tp;
+pub use dflash::{DflashAsk, DflashState};
 pub use graphs::{GraphKey, GraphMutant, GraphStats, Wait};
 pub use mtp::{
-    vocab_ranges, BookError, ChainPick, DraftAsk, Drafts, HeadList, MtpCapture, MtpMutant, SubHead, TapBook, VocabMode, MTP_SHARE,
+    strip_copy_bytes, sub_head_bytes, vocab_ranges, BookError, ChainPick, DraftAsk, Drafts, HeadList, MtpCapture, MtpMutant,
+    SubHead, TapBook, VocabMode, MTP_SHARE,
 };
 pub use snapshot::{PrefixDigest, SnapMeta, SnapPool};
 
@@ -169,7 +172,7 @@ pub struct Profile {
 #[allow(clippy::too_many_arguments)]
 fn p2_rank_layer(
     t: &mut tp::GlmTp,
-    ex: &gb_cuda::moe::MoeExperts,
+    ex: tp::P2Experts<'_>,
     owed: Option<&gb_cuda::moe::SharedExpert>,
     with_shared: bool,
     s: &mut Scratch,
@@ -239,6 +242,7 @@ pub fn op_class(op: &Op) -> &'static str {
         Op::MoeExperts { .. } => "moe routed experts",
         Op::HeadMean => "head mean+norm",
         Op::LmHead => "lm_head",
+        Op::Tap { .. } => "dflash2 tap",
     }
 }
 
@@ -289,6 +293,9 @@ pub struct GlmModel {
     splice: Vec<SpliceOp>,
     /// The NextN (MTP) drafter's layer, state and scratch: present exactly when the weights carry the layer (`dev.mtp`).
     mtp: Option<mtp::MtpState>,
+    /// A DFlash2 draft (`--draft`, `enable_dflash`): its weights, context rings and the trunk's tap buffer. `None` for every model without one:
+    /// nothing below reads it then, and the schedule has no taps.
+    dflash: Option<dflash::DflashState>,
     /// The CUDA graphs of the decode windows (see `graphs.rs`).
     graphs: graphs::GraphCache,
     /// The shared expert's side stream and its two events (fork: the layer's input is ready, join: the expert's output is).
@@ -521,6 +528,7 @@ impl GlmModel {
             tp: None,
             own_s,
             mtp,
+            dflash: None,
             graphs: graphs::GraphCache::new(),
             side: graphs::Side::new(),
             run_shape: None,
@@ -805,6 +813,7 @@ impl GlmModel {
         }
         self.kv_tab.release(slot);
         self.mtp_begin(slot);
+        self.dflash_begin(slot);
         self.p2_seg[slot] = None;
         Ok(())
     }
@@ -889,6 +898,8 @@ impl GlmModel {
         }
         // the kept rows' final-normed hidden rows join their slots' stores (the NextN drafter's input) before the next forward overwrites them
         self.mtp_commit_taps(&w.win, &keep)?;
+        // and their taps join the DFlash2 draft's contexts, likewise
+        self.dflash_commit(&w.win, &keep)?;
         // every sequence kept whole: the window already wrote each one's final state, so its replay (which `skip_full` makes a no-op for a sequence
         // kept whole) is skipped altogether and the commit is the conv shift and the flip of every row (`keep == None`: two launches a layer fewer)
         let all_whole = keep.iter().enumerate().all(|(i, &k)| k >= 0 && k as usize >= w.win.seq_rows(i).len());
@@ -986,6 +997,11 @@ impl GlmModel {
             Some(m) => ops::plan_forward_mutated(&self.cfg, self.layers, head != Head::None, m),
             // the drafter taps the head's mean and norm for every row, with or without logits
             None if head == Head::None && self.mtp.is_some() => ops::plan_forward_tap(&self.cfg, self.layers),
+            // a DFlash2 draft taps the target layers' outputs in every forward (prompt chunks and windows alike)
+            None if self.dflash.is_some() => {
+                ops::with_taps(ops::plan_forward(&self.cfg, self.layers, head != Head::None), &super::dflash::TAP_LAYERS)
+                    .map_err(ModelError::Config)?
+            }
             None => ops::plan_forward(&self.cfg, self.layers, head != Head::None),
         };
         if self.graph_eligible(mode, head) {
@@ -1031,6 +1047,7 @@ impl GlmModel {
             profile,
             splice,
             mtp,
+            dflash,
             run_shape,
             side,
             graphs,
@@ -1864,15 +1881,27 @@ impl GlmModel {
                     if p2 {
                         let FfnDevice::MoeSubbanks { shared, .. } = &layer_of(layer).ffn else { unreachable!() };
                         match (tp.as_mut(), m.experts.banks()) {
-                            // a tensor-parallel rank's share bound as one subbank: the P2 rank path (`model/tp/p2.rs`)
-                            (Some(t), [bank]) => {
+                            // a tensor-parallel rank's share, bound as one subbank (run as that bank, as always) or, of a mixed-width
+                            // layer, as several (each subbank's pairs into the one pair buffer): the P2 rank path (`model/tp/p2.rs`)
+                            (Some(t), _) => {
                                 let owed = std::mem::take(&mut shared_deferred).then_some(&**shared);
-                                p2_rank_layer(t, bank, owed, with_shared, s, rows, st, path, &mut |_| Ok(()))?;
+                                let ex = tp::P2Experts::of_subbanks(&m.experts);
+                                p2_rank_layer(t, ex, owed, with_shared, s, rows, st, path, &mut |_| Ok(()))?;
                             }
                             // a mixed-width layer on one node: the pairs stage once per subbank, then the one combine
                             // (`glm_p2_moe::run_subbanks`); the layer's shared expert ran first (on the side stream, when it is on, joined
                             // right before the combine: its one reader)
                             (None, _) => {
+                                // a rank's share outside a group: refused by name before the layer's launch (the pairs stage would
+                                // refuse it too, by an unnamed argument error: every expert on this node)
+                                if !m.experts.ownership().is_all() {
+                                    return Err(ModelError::Config(format!(
+                                        "layer {layer}: the P2 routed experts hold {} of {} experts (a tensor-parallel rank's share) outside a \
+                                         group: the other experts' pairs would need the exchange",
+                                        m.experts.ownership().local(),
+                                        m.dims.experts
+                                    )));
+                                }
                                 let join = shared_forked.then_some(p2_side).flatten();
                                 shared_forked = false;
                                 let sh = with_shared.then_some(&s.moe_shared_out);
@@ -1904,11 +1933,6 @@ impl GlmModel {
                                     &m.dims,
                                     st,
                                 )?;
-                            }
-                            // a rank with several subbanks (a mixed-width layer at TP=2) is refused at boot (`check_p2_tp`)
-                            (Some(_), _) => {
-                                let why = "P2 routed experts bound as several subbanks on a tensor-parallel rank: not built";
-                                return Err(ModelError::Config(format!("layer {layer}: {why}")));
                             }
                         }
                         break 'p2arm;
@@ -2010,7 +2034,7 @@ impl GlmModel {
                     if p2 {
                         let FfnDevice::Moe { shared, .. } = &layer_of(layer).ffn else { unreachable!() };
                         let owed = std::mem::take(&mut shared_deferred).then_some(&**shared);
-                        p2_rank_layer(t, &m.experts, owed, with_shared, s, rows, st, path, &mut |_| Ok(()))?;
+                        p2_rank_layer(t, tp::P2Experts::Bank(&m.experts), owed, with_shared, s, rows, st, path, &mut |_| Ok(()))?;
                         break 'p2arm;
                     }
                     let sh = with_shared.then_some(&s.moe_shared_out);
@@ -2136,6 +2160,27 @@ impl GlmModel {
                     }
                     if cap {
                         capture_streams(capture.as_mut().unwrap(), &s.streams, st, rows, last_sublayer_was_mixer, cur_layer)?;
+                    }
+                }
+                Op::Tap { layer } => {
+                    // the DFlash2 draft's tap: the unweighted mean of the four streams at the layer's output (no norm), bf16, into its column
+                    let d = dflash
+                        .as_mut()
+                        .ok_or_else(|| ModelError::Config("a tap in the schedule of a model without a draft".into()))?;
+                    let t = dflash::DflashState::tap_of(layer)
+                        .ok_or_else(|| ModelError::Config(format!("layer {layer} is not one the draft taps")))?;
+                    let h = cfg.hidden;
+                    unsafe {
+                        mhc::mean(x, None, d.tmp.ptr(), Ty::Bf16, rows, RMS_EPS, st)?;
+                        glue::copy_rows(
+                            d.tmp.ptr() as *const c_void,
+                            h,
+                            (d.taps.ptr() as *mut u16).add(t * h) as *mut c_void,
+                            crate::draft::TAPS * h,
+                            rows,
+                            h,
+                            st,
+                        )?;
                     }
                 }
                 Op::HeadMean => {
@@ -2288,17 +2333,23 @@ impl GlmModel {
         tokens: &[u32],
         want: Option<usize>,
     ) -> Result<Option<Candidates>, ModelError> {
+        // the drafter runs on this chunk after the trunk: a share of its NextN layer outside a group is refused before the trunk's first launch
+        if self.mtp_drafts_slot(slot) {
+            self.mtp_share_refusal()?;
+        }
         let b = RowBatch::from_requests(&[gb_engine::RowRequest { slot, tokens: tokens.to_vec(), first_position: start as u64 }]);
         match want {
             None => {
                 self.forward(&b, Mode::Prefill, Head::None)?;
                 self.mtp_prefill_chunk(slot, start, tokens)?;
+                self.dflash_prefill_chunk(slot, start, tokens.len())?;
                 self.stream.sync()?;
                 Ok(None)
             }
             Some(count) => {
                 self.forward(&b, Mode::Prefill, Head::LastRow)?;
                 self.mtp_prefill_chunk(slot, start, tokens)?;
+                self.dflash_prefill_chunk(slot, start, tokens.len())?;
                 self.candidates_of(1, count).map(Some)
             }
         }

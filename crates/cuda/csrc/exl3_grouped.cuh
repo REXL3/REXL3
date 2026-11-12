@@ -102,6 +102,9 @@ __device__ __forceinline__ void ksweep(float (&acc)[NT][JN][2][4], const uint32_
     constexpr int RD = PF ? PD + 1 : 1;
     uint32_t ring[RD][PF ? SR : 1];
     uint4 anx[AP ? NT : 1];
+    // Loop-invariant lane geometry, hoisted out of the k-tile loop (see linear_kernel).
+    int lane_word = 0, lane_offset = 0;
+    lane_start<K2>(lane, lane_word, lane_offset);
     if constexpr (PF) {
 #pragma unroll
         for (int d = 0; d < PD; ++d)
@@ -139,9 +142,9 @@ __device__ __forceinline__ void ksweep(float (&acc)[NT][JN][2][4], const uint32_
         for (int j = 0; j < JN; ++j) {
             uint32_t w[LW];
             if constexpr (PF) step_lane_words<K2, JN>(ring[0], j, lane, prev, w);
-            else ldg_lane_words<K2>(tile + (size_t)i * stride_k + j * TW, lane, w);
+            else ldg_lane_words_at<K2>(tile + (size_t)i * stride_k + j * TW, lane_word, w);
             uint32_t b0[2], b1[2];
-            decode_lane<K2, CB>(w, lane, b0, b1);
+            decode_lane_at<K2, CB>(w, lane_offset, b0, b1);
 #pragma unroll
             for (int p = 0; p < NT; ++p) {
                 if (p < nt) {

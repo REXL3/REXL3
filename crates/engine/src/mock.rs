@@ -19,7 +19,7 @@
 //! the pages (so the copy of a partial page must carry it) and steers the logits; and a draft carry (the last committed position's tap) that steers
 //! the drafts. Restoring any of them wrongly changes a reply or a speculation counter.
 
-use crate::{Backend, BackendError, Captured, Drafter, PrefixCaps, PrefixHandle, RowOutput, RowRequest};
+use crate::{Backend, BackendError, Captured, Drafter, PoolRoom, PrefixCaps, PrefixHandle, RowOutput, RowRequest};
 use gb_sampling::{top_candidates, Sampling};
 use std::time::Duration;
 
@@ -76,12 +76,16 @@ pub struct MockOptions {
     pub graphs: bool,
     /// State a prefill floor (`Backend::prefill_floor`) of this many microseconds a token (0: none, as before).
     pub prefill_floor_us: u64,
+    /// Score like a backend that reads out only the prompt's last row (`Backend::score_rows_supported` false), so a
+    /// `prompt_logprobs` readout is refused.
+    pub last_row_only: bool,
 }
 
 impl MockOptions {
     /// `key=value,key=value`: `step_ms`, `prefill_ms`, `slice`, `vocab`, `panic_step`, `fatal_step`, `retry_step` (with
     /// `retry_count`, default 1), `panic_prefill`, `poison` (a token id), `panic_boot` (1: panic while building the engine),
-    /// `prefix_cache` (entries of a prefix cache), `graphs` (1: report graph-cache counters), `prefill_floor_us` (a prefill floor a token).
+    /// `prefix_cache` (entries of a prefix cache), `graphs` (1: report graph-cache counters), `prefill_floor_us` (a prefill floor a token),
+    /// `last_row_only` (1: score the prompt's last row only, refusing `prompt_logprobs`).
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut o = Self::default();
         for kv in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -106,6 +110,7 @@ impl MockOptions {
                 "prefix_cache" => o.prefix_cache = n as usize,
                 "graphs" => o.graphs = n != 0,
                 "prefill_floor_us" => o.prefill_floor_us = n,
+                "last_row_only" => o.last_row_only = n != 0,
                 _ => return Err(format!("--mock: unknown option `{k}`")),
             }
         }
@@ -126,6 +131,9 @@ impl MockOptions {
         }
         if self.prefill_floor_us > 0 {
             b = b.with_prefill_floor(Duration::from_micros(self.prefill_floor_us));
+        }
+        if self.last_row_only {
+            b = b.with_last_row_scores_only();
         }
         if self.prefix_cache > 0 {
             let units = self.prefix_cache;
@@ -302,6 +310,8 @@ struct MockCache {
     caps: PrefixCaps,
     snaps: Vec<Option<MockSnap>>,
     fault: PrefixFault,
+    /// A pool-page cache (`with_pool_prefix_cache`): entries live in the KV pool's idle pages, reported by `prefix_pool_room`.
+    pool: bool,
 }
 
 pub struct MockBackend {
@@ -348,6 +358,8 @@ pub struct MockBackend {
     /// (`Backend::take_score_rows`): row `i` is the logits after the scored context's tokens `0..=i`.
     score_rows_on: bool,
     score_rows: Vec<Vec<f32>>,
+    /// Score like a backend that reads out only the prompt's last row (`Backend::score_rows_supported` false).
+    last_row_only: bool,
 }
 
 /// What the GLM shape keeps per slot outside the pages.
@@ -388,9 +400,16 @@ impl MockBackend {
             floor_per_token: None,
             score_rows_on: false,
             score_rows: Vec::new(),
+            last_row_only: false,
         }
     }
     /// State a lower bound on prefill time (`Backend::prefill_floor`) of `per_token` a prompt token, as a family with measured rates does.
+    /// Score like a backend whose readout is the prompt's last row only (`Backend::score_rows_supported` false).
+    pub fn with_last_row_scores_only(mut self) -> Self {
+        self.last_row_only = true;
+        self
+    }
+
     pub fn with_prefill_floor(mut self, per_token: Duration) -> Self {
         self.floor_per_token = Some(per_token);
         self
@@ -410,9 +429,31 @@ impl MockBackend {
             caps: PrefixCaps { namespace: 0x6D6F_636B, budget },
             snaps: (0..budget.snapshot_slots).map(|_| None).collect(),
             fault,
+            pool: false,
         });
         self.deep = true;
         self
+    }
+    /// A pool-page prefix cache: `snapshot_slots` snapshot slots and NO pages of its own; the KV pool is exactly `pool_pages` pages, the
+    /// entries keep idle ones and the engine's room step evicts them for a live sequence (`Backend::prefix_pool_room`). A page the pool
+    /// cannot give panics, so a room step that kept too little shows at once.
+    pub fn with_pool_prefix_cache(mut self, snapshot_slots: usize, pool_pages: usize, fault: PrefixFault) -> Self {
+        let slots = self.ctx.len();
+        let budget =
+            gb_sched::prefix::CacheBudget { snapshot_slots, page_blocks: 0, snapshot_bytes: 141 << 20, page_bytes: 3 << 20 };
+        self.kv = Some(MockKv::new(pool_pages, slots));
+        self.cache = Some(MockCache {
+            caps: PrefixCaps { namespace: 0x6D6F_636B, budget },
+            snaps: (0..snapshot_slots).map(|_| None).collect(),
+            fault,
+            pool: true,
+        });
+        self.deep = true;
+        self
+    }
+    /// Free pages of the paged KV (0 without one).
+    pub fn free_pages(&self) -> usize {
+        self.kv.as_ref().map_or(0, |k| k.free.len())
     }
     /// Drafts come from the draft context ring (kept like the real draft's: prompt rows from `total - 2064`, accepted rows as they commit).
     pub fn with_native_draft(mut self) -> Self {
@@ -754,6 +795,9 @@ impl Backend for MockBackend {
     fn score_supported(&self) -> bool {
         self.glm.is_none()
     }
+    fn score_rows_supported(&self) -> bool {
+        self.score_supported() && !self.last_row_only
+    }
     fn score_all_rows(&mut self, on: bool) {
         self.score_rows_on = on;
         self.score_rows.clear();
@@ -858,6 +902,16 @@ impl Backend for MockBackend {
     }
     fn prefix_free_snapshots(&self) -> usize {
         self.cache.as_ref().map_or(0, |c| c.snaps.iter().filter(|s| s.is_none()).count())
+    }
+    fn prefix_pool_room(&self) -> Option<PoolRoom> {
+        let (c, kv) = (self.cache.as_ref()?, self.kv.as_ref()?);
+        c.pool.then(|| PoolRoom {
+            page_tokens: MOCK_PAGE,
+            pool_pages: kv.refs.len(),
+            free_pages: kv.free.len(),
+            slot_pages: kv.tables.iter().map(|t| t.len()).collect(),
+            write_ahead_tokens: 0,
+        })
     }
     fn prefix_restore(&mut self, slot: usize, handle: &PrefixHandle, len: usize) -> Result<(), String> {
         self.clear_slot(slot);

@@ -41,6 +41,7 @@
 //   g_proj        bf16 [64][4096]
 //   out / gated   T [rows][64*128]
 #include "common.cuh"
+#include <cublas_v2.h>
 #include <type_traits>
 
 namespace {
@@ -427,6 +428,27 @@ gb_mlag_bf16_linear_kernel(const bf16* __restrict__ x, const bf16* __restrict__ 
     if (lane == 0) y[(int64_t)r * n + j] = __float2bfloat16_rn(acc);
 }
 
+// The same reduction, fp32 output (Ling-3.1's router_dtype = "fp32"): identical k order, lane assignment and
+// fp32 accumulation as gb_mlag_bf16_linear_kernel, only the store differs, so the fp32 logit is exactly the
+// value the bf16 kernel would have rounded.
+__global__ void __launch_bounds__(256)
+gb_mlag_bf16_linear_f32_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w,
+                               float* __restrict__ y, int rows, int k, int n) {
+    const int j = blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (j >= n) return;
+    const int r = blockIdx.y;
+    const int lane = threadIdx.x & 31;
+    const int k8 = k >> 3;
+    float acc = 0.0f;
+    for (int c8 = lane; c8 < k8; c8 += 32) {
+        const uint4 xu = *reinterpret_cast<const uint4*>(x + (int64_t)r * k + c8 * 8);
+        const uint4 wu = *reinterpret_cast<const uint4*>(w + (int64_t)j * k + c8 * 8);
+        acc = fma8_bf16(acc, xu, wu);
+    }
+    acc = warp_reduce_sum5(acc);
+    if (lane == 0) y[(int64_t)r * n + j] = acc;
+}
+
 // `gb_mlag_eh_proj_cat_bf16`: y[r][j] = sum_{c<h} e_norm[r][c] * w[j][c] + sum_{c<h} h_norm[r][c] *
 // w[j][h + c] for e_norm/h_norm bf16 [rows, h], w bf16 [h, 2h], y bf16 [rows, h]. Same warp-per-output
 // scheme; the e dot completes before the h dot (both ascending in c).
@@ -481,6 +503,16 @@ template <typename T> int q_prep_t(const void* q, int64_t qs, const void* w_uk,
     int rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
     q_rope_kernel<T><<<dim3(rows, NH), 64, 0, s>>>(qp, qs, cos, sin, table_stride, row_pos, qr, rows);
+    return GB_CHECK_LAUNCH();
+}
+
+// Only the rope half of `q_prep_t` (the tensor-core absorb of `ling_mla_attn.cu` replaces the skinny absorb
+// under the LP2 contract; the rope rotation is not a contraction, so both contracts share this kernel and its
+// bits). Launches are identical to the second launch of `q_prep_t`.
+template <typename T> int q_rope_t(const void* q, int64_t qs, const float* cos, const float* sin,
+                                   int table_stride, const int* row_pos, void* q_rot, int rows,
+                                   cudaStream_t s) {
+    q_rope_kernel<T><<<dim3(rows, NH), 64, 0, s>>>((const T*)q, qs, cos, sin, table_stride, row_pos, (T*)q_rot, rows);
     return GB_CHECK_LAUNCH();
 }
 
@@ -545,6 +577,19 @@ GB_EXPORT int gb_mlag_q_prep(const void* q, int64_t q_row_stride, const void* w_
                                       rows, s);
 }
 
+// Only the rope half of gb_mlag_q_prep (the tensor-core absorb of ling_mla_attn.cu replaces the absorb under
+// the LP2 contract). q: T [rows][q_row_stride] (head h at h*192); q_rot: T [rows][64][64].
+GB_EXPORT int gb_mlag_q_rope(const void* q, int64_t q_row_stride, const float* cos, const float* sin,
+                             int table_stride, const int* row_pos, void* q_rot, int rows, int dtype,
+                             void* stream) {
+    if (rows < 0 || q_row_stride < (int64_t)NH * QK || table_stride < 32 || dtype < 0 || dtype > 1)
+        return (int)cudaErrorInvalidValue;
+    if (rows == 0) return 0;
+    cudaStream_t s = gb_stream(stream);
+    return dtype == 1 ? q_rope_t<bf16>(q, q_row_stride, cos, sin, table_stride, row_pos, q_rot, rows, s)
+                      : q_rope_t<f16>(q, q_row_stride, cos, sin, table_stride, row_pos, q_rot, rows, s);
+}
+
 // Dense causal latent attention: row r attends to keys 0..=row_pos[r] of slot row_slot[r] (already written by
 // gb_mlag_kv_prep); a negative position writes zeros. q_lat: T [rows][64][512]; q_rot: T [rows][64][64]; cache:
 // T [n_blocks][256][576]; out: T [rows][64][512].
@@ -579,16 +624,58 @@ GB_EXPORT int gb_mlag_gate_apply(const void* x, int64_t x_stride, const void* g,
                       : gate_apply_t<f16>(x, x_stride, g, out, out_gated, rows, s);
 }
 
+// cuBLAS BF16 tensor-op GEMM for the row-major bf16 linear y = x @ w^T (x bf16 [rows, k], w bf16
+// [n, k]). y_f32 != 0: y is fp32 [rows, n] (the router's unrounded logit), else bf16 [rows, n].
+// The scalar kernels above remain the numerical reference and the small-row fallback (rows <= 4). cuBLAS picks its algorithm, so the
+// low bits of a row, by M: nothing on a path that must be row-count invariant (Ling's router) may call this. `gb_mlag_bf16_linear`
+// (bf16 output, rows > 4) and `gb_mlag_bf16_router_f32` still do and are not on Ling's forward path (tests and benchmarks only).
+static int bf16_linear_cublas_(const void* x, const void* w, void* y, int rows, int k, int n,
+                               int y_f32, cudaStream_t s) {
+    static thread_local cublasHandle_t h = nullptr;
+    if (!h && cublasCreate(&h) != CUBLAS_STATUS_SUCCESS) h = nullptr;
+    if (!h || cublasSetStream(h, s) != CUBLAS_STATUS_SUCCESS) return (int)cudaErrorUnknown;
+    const float one = 1.f, zero = 0.f;
+    // row-major y = x @ w^T is column-major y^T = w_cm^T @ x_cm.
+    const cublasStatus_t rc = cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, n, rows, k, &one,
+                                            w, CUDA_R_16BF, k, x, CUDA_R_16BF, k, &zero,
+                                            y, y_f32 ? CUDA_R_32F : CUDA_R_16BF, n,
+                                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    return rc == CUBLAS_STATUS_SUCCESS ? 0 : (int)cudaErrorUnknown;
+}
+
 // Direct bf16 linear: x: bf16 [rows, k]; w: bf16 [n, k]; y: bf16 [rows, n]; k % 256 == 0, n >= 1.
-// Row-invariant by construction: one warp computes one (row, output column).
+// Rows > 4 run on tensor cores (cuBLAS); the small-row path keeps the warp-per-output kernel.
 GB_EXPORT int gb_mlag_bf16_linear(const void* x, const void* w, void* y, int rows, int k, int n,
                                    void* stream) {
     if (rows < 0 || n < 1 || k <= 0 || k % 256 != 0) return (int)cudaErrorInvalidValue;
     if (rows == 0) return 0;
     cudaStream_t s = gb_stream(stream);
+    if (rows > 4) return bf16_linear_cublas_(x, w, y, rows, k, n, 0, s);
     gb_mlag_bf16_linear_kernel<<<dim3((n + 7) / 8, rows), 256, 0, s>>>((const bf16*)x, (const bf16*)w,
                                                                          (bf16*)y, rows, k, n);
     return GB_CHECK_LAUNCH();
+}
+
+// The same linear, fp32 y (Ling-3.1's router_dtype = "fp32"): the logit is not rounded through bf16.
+GB_EXPORT int gb_mlag_bf16_linear_f32(const void* x, const void* w, void* y, int rows, int k, int n,
+                                       void* stream) {
+    if (rows < 0 || n < 1 || k <= 0 || k % 256 != 0) return (int)cudaErrorInvalidValue;
+    if (rows == 0) return 0;
+    cudaStream_t s = gb_stream(stream);
+    // Every row count runs the SAME per-(row, column) scalar kernel (one warp per output, a fixed k order): the decode/verify router
+    // logit must not depend on how many rows share the call. (cuBLAS chose its algorithm by M for rows > 4.) Prompt rows use
+    // `gb_mlag_router_mma_f32` below, which is row-invariant for every row count including 1.
+    gb_mlag_bf16_linear_f32_kernel<<<dim3((n + 7) / 8, rows), 256, 0, s>>>((const bf16*)x, (const bf16*)w,
+                                                                             (float*)y, rows, k, n);
+    return GB_CHECK_LAUNCH();
+}
+
+// A large-row fp32 router on cuBLAS BF16 tensor ops. The scalar launcher above is the numerical reference. NOT row-count invariant
+// (cuBLAS chooses by M), so Ling's forward does not use it; kept as a timing and tolerance reference for the tests.
+GB_EXPORT int gb_mlag_bf16_router_f32(const void* x, const void* w, void* y, int rows, int k, int n,
+                                       void* stream) {
+    if (rows < 1 || n < 1 || k <= 0 || k % 256 != 0) return (int)cudaErrorInvalidValue;
+    return bf16_linear_cublas_(x, w, y, rows, k, n, 1, gb_stream(stream));
 }
 
 // Fused eh_proj cat: e_norm, h_norm: bf16 [rows, h]; w: bf16 [h, 2h]; y: bf16 [rows, h]; h % 256 == 0.
@@ -599,5 +686,67 @@ GB_EXPORT int gb_mlag_eh_proj_cat_bf16(const void* e_norm, const void* h_norm, c
     cudaStream_t s = gb_stream(stream);
     gb_mlag_eh_proj_cat_bf16_kernel<<<dim3((h + 7) / 8, rows), 256, 0, s>>>(
         (const bf16*)e_norm, (const bf16*)h_norm, (const bf16*)w, (bf16*)y, rows, h);
+    return GB_CHECK_LAUNCH();
+}
+
+// Ling's PROMPT-row router on tensor cores with a call-shape-independent reduction: y [rows, n] fp32 = x [rows, k] bf16 @ w [n, k]^T bf16.
+//
+// Why a row's logits are the same in a 1-row, a 73-row, a 256-row-chunk or a 4096-row call (chunked == whole, cached == cold):
+//  * the reduction over k is a single chain per output element: k is walked in ascending steps of 16, one `mma.sync.m16n8k16` (bf16
+//    operands, fp32 accumulate) per step per 8 columns, the accumulator carried from step to step. The k order, the step size and the
+//    instruction sequence are fixed constants: nothing depends on `rows`, on which CTA/warp/tile the row lands in, or on a heuristic;
+//  * no split-K and no atomics, so there is no partial-sum merge whose order could change with the grid;
+//  * an MMA output element is a function of its own A row and B column only (the other rows of the 16-row tile never enter it), so a
+//    row's tile mates (other prompt rows, or the padding below) cannot change its bits;
+//  * rows past the call's end are read as the last row (valid memory, never stored), so a short tail slice runs the same instructions.
+// This replaces cuBLAS (`cublasGemmEx`, DEFAULT_TENSOR_OP), whose kernel and reduction order were chosen from M.
+__global__ void __launch_bounds__(128)
+gb_mlag_router_mma_f32_kernel(const bf16* __restrict__ x, const bf16* __restrict__ w, float* __restrict__ y, int rows, int k, int n) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int r0 = (blockIdx.y * 4 + warp) * 16;
+    if (r0 >= rows) return;
+    const int n0 = blockIdx.x * 64;
+    const int ra = min(r0 + g, rows - 1), rb = min(r0 + g + 8, rows - 1);
+    const bf16* xa = x + (int64_t)ra * k + 2 * t;
+    const bf16* xb = x + (int64_t)rb * k + 2 * t;
+    const bf16* wc[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) wc[j] = w + (int64_t)(n0 + j * 8 + g) * k + 2 * t;
+    float acc[8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int c = 0; c < 4; ++c) acc[j][c] = 0.0f;
+#pragma unroll 2
+    for (int kk = 0; kk < k; kk += 16) {
+        uint32_t a[4];
+        a[0] = *reinterpret_cast<const uint32_t*>(xa + kk);
+        a[1] = *reinterpret_cast<const uint32_t*>(xb + kk);
+        a[2] = *reinterpret_cast<const uint32_t*>(xa + kk + 8);
+        a[3] = *reinterpret_cast<const uint32_t*>(xb + kk + 8);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const uint32_t b0 = *reinterpret_cast<const uint32_t*>(wc[j] + kk);
+            const uint32_t b1 = *reinterpret_cast<const uint32_t*>(wc[j] + kk + 8);
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+                : "+f"(acc[j][0]), "+f"(acc[j][1]), "+f"(acc[j][2]), "+f"(acc[j][3])
+                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int col = n0 + j * 8 + 2 * t;
+        if (r0 + g < rows) *reinterpret_cast<float2*>(y + (int64_t)(r0 + g) * n + col) = make_float2(acc[j][0], acc[j][1]);
+        if (r0 + g + 8 < rows) *reinterpret_cast<float2*>(y + (int64_t)(r0 + g + 8) * n + col) = make_float2(acc[j][2], acc[j][3]);
+    }
+}
+
+GB_EXPORT int gb_mlag_router_mma_f32(const void* x, const void* w, void* y, int rows, int k, int n, void* stream) {
+    if (rows < 1 || n < 64 || n % 64 != 0 || k <= 0 || k % 16 != 0) return (int)cudaErrorInvalidValue;
+    if ((reinterpret_cast<uintptr_t>(x) & 15) || (reinterpret_cast<uintptr_t>(w) & 15) || (reinterpret_cast<uintptr_t>(y) & 15))
+        return (int)cudaErrorInvalidValue;
+    gb_mlag_router_mma_f32_kernel<<<dim3(n / 64, (rows + 63) / 64), 128, 0, gb_stream(stream)>>>((const bf16*)x, (const bf16*)w,
+                                                                                                   (float*)y, rows, k, n);
     return GB_CHECK_LAUNCH();
 }

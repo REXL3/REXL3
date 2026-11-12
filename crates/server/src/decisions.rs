@@ -513,7 +513,7 @@ fn wording(input: &str, question: &Map<String, Value>) -> Result<Wording, ApiErr
                     return Err(ApiError::bad(format!("option name {name:?} repeats another name")));
                 }
                 names.push(name.to_string());
-                details.push(optional_text(obj.get("description"))?);
+                details.push(optional_text(obj.get("description"), "description")?);
             }
             lines.push(question_line(question)?);
             for (i, name) in names.iter().enumerate() {
@@ -556,7 +556,7 @@ fn wording(input: &str, question: &Map<String, Value>) -> Result<Wording, ApiErr
             }
             lines.push(format!("Is the following true? {lead}"));
             for (label, key) in [("yes", "yes"), ("no", "no")] {
-                if let Some(d) = optional_text(question.get(key))? {
+                if let Some(d) = optional_text(question.get(key), key)? {
                     lines.push(format!("{label}: {d}"));
                 }
             }
@@ -620,16 +620,51 @@ fn strict_text(value: Option<&Value>, field: &str) -> Result<String, ApiError> {
         _ => Err(ApiError::bad(format!("{field} must be a bounded string"))),
     }
 }
-fn optional_text(value: Option<&Value>) -> Result<Option<String>, ApiError> {
+/// An optional text field: absent or an explicit `null` is no text (as `field_policy::non_null` reads an explicit null
+/// elsewhere), and anything else must be a bounded string, refused under its own `field` name.
+fn optional_text(value: Option<&Value>, field: &str) -> Result<Option<String>, ApiError> {
     match value {
-        None => Ok(None),
-        v => strict_text(v, "description").map(Some),
+        None | Some(Value::Null) => Ok(None),
+        v => strict_text(v, field).map(Some),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An optional text sent as `null` reads as absent: a choice option's `description`, and a yes/no question's `yes` and
+    /// `no`, give the same wording as the field left out. A wrong type is still refused, naming its own field (it always said
+    /// `description`, even for `yes` and `no`).
+    #[test]
+    fn a_null_optional_text_is_absent_and_a_wrong_one_names_its_field() {
+        let wording_of = |q: Value| wording("x", q.as_object().unwrap());
+        let choice =
+            |a: Value| json!({"type": "choice", "question": "Which?", "options": [a, {"name": "b", "description": "bee"}]});
+        let bare = wording_of(choice(json!({"name": "a"}))).unwrap();
+        assert_eq!(wording_of(choice(json!({"name": "a", "description": null}))).unwrap(), bare);
+        let with = wording_of(choice(json!({"name": "a", "description": "ay"}))).unwrap();
+        assert_ne!(with, bare, "a given description is part of the wording");
+        let yes_no = |yes: Option<Value>, no: Option<Value>| {
+            let mut q = json!({"type": "yes_no", "question": "Is it?"});
+            if let Some(v) = yes {
+                q["yes"] = v;
+            }
+            if let Some(v) = no {
+                q["no"] = v;
+            }
+            wording_of(q)
+        };
+        let none = yes_no(None, Some(json!("it is not"))).unwrap();
+        assert_eq!(yes_no(Some(Value::Null), Some(json!("it is not"))).unwrap(), none);
+        assert_eq!(yes_no(Some(json!("it is")), Some(Value::Null)).unwrap(), yes_no(Some(json!("it is")), None).unwrap());
+        for (yes, no, field) in [(Some(json!(3)), None, "yes"), (None, Some(json!(["x"])), "no")] {
+            let e = yes_no(yes, no).unwrap_err();
+            assert!(e.message.contains(&format!("{field} must be a bounded string")), "{field}: {}", e.message);
+        }
+        let e = wording_of(choice(json!({"name": "a", "description": 3}))).unwrap_err();
+        assert!(e.message.contains("description must be a bounded string"), "{}", e.message);
+    }
 
     #[test]
     fn compensated_sums_exact_where_a_plain_loop_drifts() {

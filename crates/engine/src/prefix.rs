@@ -15,6 +15,23 @@ pub struct PrefixCaps {
     pub budget: CacheBudget,
 }
 
+/// What a backend whose prefix cache keeps its entries in the KV pool's IDLE pages reports (a pool-page cache: no pages of its own,
+/// `CacheBudget::page_blocks == 0`; see `Backend::prefix_pool_room`). Physical counts, read when the engine asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolRoom {
+    /// Tokens a page holds.
+    pub page_tokens: usize,
+    /// Pages in the KV pool.
+    pub pool_pages: usize,
+    /// Pages no holder (a slot, an entry, a capture) references now.
+    pub free_pages: usize,
+    /// Pages each sequence slot's table holds now (its own and those it shares by reference with an entry), by slot.
+    pub slot_pages: Vec<usize>,
+    /// Positions a slot may write past its admitted tokens (a drafter that writes its own cache entries ahead of the window that verifies
+    /// them): the room a live slot is owed covers them too.
+    pub write_ahead_tokens: usize,
+}
+
 /// How the engine uses the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrefixConfig {
@@ -34,7 +51,9 @@ pub struct PrefixConfig {
     /// page exists, so no donor continuation can ride into the resumed slot inside a page or a pooled
     /// plane. Families whose snapshots carry per-page derived state whose restore does NOT scrub the
     /// partial page (see e.g. the Flash-Next `copy_page` scrub) can set this to the KV page size; the
-    /// rest keep the default. Flash-Next's restore is exact at any cut, so it leaves this off. The cost
+    /// rest keep the default. Flash-Next's restore is exact at any cut, so it leaves this off. A family
+    /// whose prefill steps a recurrence in fixed-size chunks from each call's first row sets it to that
+    /// chunk (Ling-3.1: 16 rows), so a resumed prefill runs on a cold prefill's chunk grid. The cost
     /// of a hit is up to `align - 1` extra re-prefilled tokens.
     pub cut_align: usize,
 }
@@ -84,6 +103,9 @@ pub struct PrefixStats {
     pub pages_held: u64,
     pub snapshot_slots: u64,
     pub page_blocks: u64,
+    /// A pool-page cache (`Backend::prefix_pool_room`): the KV pool's pages, all of which its entries may hold while idle (`page_blocks` is 0:
+    /// it reserved none of its own). 0 for every other cache.
+    pub pool_pages: u64,
     /// Bytes the entries hold: snapshot slots plus distinct pages.
     pub bytes_held: u64,
     /// Bytes the backend reserved for the cache.

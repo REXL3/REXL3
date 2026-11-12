@@ -204,6 +204,19 @@ mod ffi {
             stream: *mut c_void,
         ) -> i32;
         #[allow(clippy::too_many_arguments)]
+        pub fn gb_mlag_q_rope(
+            q: *const c_void,
+            q_row_stride: i64,
+            cos: *const f32,
+            sin: *const f32,
+            table_stride: i32,
+            row_pos: *const i32,
+            q_rot: *mut c_void,
+            rows: i32,
+            dtype: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        #[allow(clippy::too_many_arguments)]
         pub fn gb_mlag_attend(
             q_lat: *const c_void,
             q_rot: *const c_void,
@@ -237,6 +250,33 @@ mod ffi {
             stream: *mut c_void,
         ) -> i32;
         pub fn gb_mlag_bf16_linear(
+            x: *const c_void,
+            w: *const c_void,
+            y: *mut c_void,
+            rows: i32,
+            k: i32,
+            n: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_mlag_bf16_linear_f32(
+            x: *const c_void,
+            w: *const c_void,
+            y: *mut c_void,
+            rows: i32,
+            k: i32,
+            n: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_mlag_router_mma_f32(
+            x: *const c_void,
+            w: *const c_void,
+            y: *mut c_void,
+            rows: i32,
+            k: i32,
+            n: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_mlag_bf16_router_f32(
             x: *const c_void,
             w: *const c_void,
             y: *mut c_void,
@@ -337,6 +377,43 @@ pub fn q_prep(
     CudaError::check(rc)
 }
 
+/// Only the rope half of [`q_prep`]: rotates each head's 64 rope query columns (q cols 128..192) into
+/// `q_rot` `T [rows][64][64]`, without running the absorb. Used by the LP2 tensor-core path
+/// ([`crate::ling_mla_attn`]), whose absorb is a separate MMA kernel; the rope bits are identical to
+/// [`q_prep`]'s second launch under both contracts.
+#[allow(clippy::too_many_arguments)]
+pub fn q_rope_only(
+    q: &DevBuf,
+    cos: &DevBuf,
+    sin: &DevBuf,
+    rows: &RowIndex,
+    q_rot: &mut DevBuf,
+    n_rows: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    // The rope kernel is dtype-templated but only reads the activations; bf16 is Ling-3.1's dtype. Use the
+    // cache-independent bf16 instantiation of the shared scalar kernel.
+    let qs = N_HEADS * QK_HEAD_DIM;
+    assert!(q.bytes() >= n_rows * qs * 2, "q rows must hold 64 x 192 bf16");
+    assert!(q_rot.bytes() >= n_rows * N_HEADS * ROPE_DIM * 2);
+    assert!(cos.bytes() >= 32 * 4 && sin.bytes() >= 32 * 4);
+    let rc = unsafe {
+        ffi::gb_mlag_q_rope(
+            q.ptr(),
+            qs as i64,
+            cos.ptr() as *const f32,
+            sin.ptr() as *const f32,
+            32,
+            rows.pos.ptr() as *const i32,
+            q_rot.ptr(),
+            n_rows as i32,
+            Dtype::BF16 as i32,
+            stream.raw(),
+        )
+    };
+    CudaError::check(rc)
+}
+
 /// Dense causal latent attention for `n_rows` rows: `q_lat`, `q_rot`, `o_lat` `T [rows][64][512]` (and
 /// `T [rows][64][64]` for `q_rot`). Row `r` attends to keys `0..=row_pos[r]` of slot `row_slot[r]` (already written
 /// by [`kv_prep`]); a negative position is a padding row (its `o_lat` is zeros). Each row's bits depend only on its
@@ -352,6 +429,26 @@ pub fn attend(
     n_rows: usize,
     stream: &Stream,
 ) -> Result<(), CudaError> {
+    attend_from(q_lat, q_rot, cache, table, 0, rows, o_lat, n_rows, stream)
+}
+
+/// [`attend`] over a window of each slot's pages: logical page `j` is the slot's page `first_block + j` and a row's key range
+/// `0..=row_pos[r]` is counted from that page's first position, so a row at absolute position `P` passes `row_pos = P - 256 * first_block`.
+/// The keys are read as they were written (their rope is baked in at the write), so the window changes which keys a row sees and
+/// nothing about their values. `first_block == 0` is [`attend`].
+#[allow(clippy::too_many_arguments)]
+pub fn attend_from(
+    q_lat: &DevBuf,
+    q_rot: &DevBuf,
+    cache: &MlaGatedCache,
+    table: &BlockTable,
+    first_block: usize,
+    rows: &RowIndex,
+    o_lat: &mut DevBuf,
+    n_rows: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    assert!(first_block < table.max_blocks.max(1), "window starts at block {first_block} of {}", table.max_blocks);
     let dt = check_dtype(cache.dtype);
     assert!(n_rows <= rows.rows);
     let row_bytes = N_HEADS * LATENT_DIM * cache.dtype.size();
@@ -362,7 +459,7 @@ pub fn attend(
             q_lat.ptr(),
             q_rot.ptr(),
             cache.buf.ptr(),
-            table.buf.ptr() as *const i32,
+            (table.buf.ptr() as *const i32).add(first_block),
             table.max_blocks as i32,
             rows.slot.ptr() as *const i32,
             rows.pos.ptr() as *const i32,
@@ -426,6 +523,72 @@ pub fn bf16_linear(
     CudaError::check(rc)
 }
 
+/// [`bf16_linear`] with an fp32 output: `y`: fp32 `[rows, n]`. The identical k order, lane assignment and fp32
+/// accumulation, so each logit is the value the bf16 kernel would have rounded — without the round (Ling-3.1's
+/// `router_dtype = "fp32"`).
+pub fn bf16_linear_f32(
+    x: &DevBuf,
+    w: &DevBuf,
+    y: &mut DevBuf,
+    rows: usize,
+    k: usize,
+    n: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    assert!(x.bytes() >= rows * k * 2, "x must be bf16 [rows][k]");
+    assert!(w.bytes() >= n * k * 2, "w must be bf16 [n][k]");
+    assert!(y.bytes() >= rows * n * 4, "y must be fp32 [rows][n]");
+    let rc = unsafe { ffi::gb_mlag_bf16_linear_f32(x.ptr(), w.ptr(), y.ptr(), rows as i32, k as i32, n as i32, stream.raw()) };
+    CudaError::check(rc)
+}
+
+/// The arithmetic id of [`router_rows_f32`] (ascending-k `mma.sync.m16n8k16` chain, fp32 accumulate): part of Ling's P2 prefix-cache
+/// namespace and fingerprint (`router=p2(<id>)`). Bump with any change that moves a bit of `gb_mlag_router_mma_f32` (tile shape, k step,
+/// instruction, accumulation order).
+pub const ROUTER_ARITH: &str = "ling-router-mma16-kasc-fp32-v1";
+
+/// Ling's prompt-row router (`router_dtype = "fp32"`): `y [rows, n]` fp32 = `x [rows, k]` bf16 @ `w [n, k]^T` bf16 on tensor cores
+/// (`mma.sync.m16n8k16`, fp32 accumulate, ascending k, no split-K, no library heuristic). The bits of a row are a function of that row and
+/// the weights alone: a 1-row, a 73-row and a 4096-row call agree exactly, so chunk sizes and prefix-cache cuts change nothing. `n % 64 == 0`,
+/// `k % 16 == 0`, 16-byte aligned operands. NOT the scalar decode kernel's bits ([`bf16_linear_f32`]): prefill and decode routers are
+/// two row-invariant arithmetics.
+pub fn router_rows_f32(
+    x: &DevBuf,
+    w: &DevBuf,
+    y: &mut DevBuf,
+    rows: usize,
+    k: usize,
+    n: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    assert!(rows > 0, "router rows must be positive");
+    assert!(x.bytes() >= rows * k * 2, "x must be bf16 [rows][k]");
+    assert!(w.bytes() >= n * k * 2, "w must be bf16 [n][k]");
+    assert!(y.bytes() >= rows * n * 4, "y must be fp32 [rows][n]");
+    let rc = unsafe { ffi::gb_mlag_router_mma_f32(x.ptr(), w.ptr(), y.ptr(), rows as i32, k as i32, n as i32, stream.raw()) };
+    CudaError::check(rc)
+}
+
+/// BF16 tensor-op GEMM (cuBLAS) with an unrounded fp32 output. Unlike [`bf16_linear_f32`] and [`router_rows_f32`], cuBLAS owns the
+/// reduction order and picks it by the row count, so a row's bits depend on the call: not for Ling's forward (tests and benchmarks only);
+/// the scalar launcher remains the reference for numerical comparisons.
+pub fn bf16_router_f32(
+    x: &DevBuf,
+    w: &DevBuf,
+    y: &mut DevBuf,
+    rows: usize,
+    k: usize,
+    n: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    assert!(rows > 0, "router rows must be positive");
+    assert!(x.bytes() >= rows * k * 2, "x must be bf16 [rows][k]");
+    assert!(w.bytes() >= n * k * 2, "w must be bf16 [n][k]");
+    assert!(y.bytes() >= rows * n * 4, "y must be fp32 [rows][n]");
+    let rc = unsafe { ffi::gb_mlag_bf16_router_f32(x.ptr(), w.ptr(), y.ptr(), rows as i32, k as i32, n as i32, stream.raw()) };
+    CudaError::check(rc)
+}
+
 /// Fused `eh_proj` cat: `y[r][j] = sum_{c<h} e_norm[r][c] * w[j][c] + sum_{c<h} h_norm[r][c] * w[j][h+c]`
 /// in one kernel launch. `e_norm`, `h_norm`: bf16 `[rows, h]`; `w`: bf16 `[h, 2h]`; `y`: bf16
 /// `[rows, h]` (`h % 256 == 0`). Same warp-per-output scheme as [`bf16_linear`].
@@ -482,6 +645,12 @@ pub fn mla_gated_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_router_arithmetic_id_is_pinned() {
+        // The id goes into Ling's P2 prefix namespace and fingerprint; an accidental edit is a silent cache-poisoning hazard.
+        assert_eq!(ROUTER_ARITH, "ling-router-mma16-kasc-fp32-v1");
+    }
 
     #[test]
     fn rope_tables_match_the_interleave_reference() {

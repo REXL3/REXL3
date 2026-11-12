@@ -119,7 +119,7 @@ fn unknown_pack_dir() -> std::path::PathBuf {
 fn qwen_build_pack_validation_refuses_unknown_pack_before_load_callback() {
     let dir = unknown_pack_dir();
     let mut loaded = false;
-    let result = validate_pack_before_load(&dir, false, || {
+    let result = validate_pack_before_load(&dir, None, false, || {
         loaded = true;
         Ok(())
     });
@@ -132,7 +132,7 @@ fn qwen_build_pack_validation_refuses_unknown_pack_before_load_callback() {
 fn qwen_build_pack_validation_records_override_before_load_callback() {
     let dir = unknown_pack_dir();
     let mut loaded = false;
-    validate_pack_before_load(&dir, true, || {
+    validate_pack_before_load(&dir, None, true, || {
         loaded = true;
         Ok(())
     })
@@ -143,6 +143,30 @@ fn qwen_build_pack_validation_records_override_before_load_callback() {
         .find(|(name, _)| *name == "pack_validated")
         .is_some_and(|(_, value)| !value.is_empty()));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// With `--draft`, the pack gate sees the draft too: the listed pair is reported under the pair's name (what `/v1/models` `pack_validated`
+/// says and the release requirements pin), with the draft's verdict, not under the target's name alone.
+#[test]
+fn the_listed_draft_pair_is_validated_under_the_pairs_name() {
+    use crate::fingerprint::{FLASH_NEXT_DFLASH2_Q4_FP, QFN305_FP, VALIDATED_FLASH_NEXT_DRAFT};
+    let geometry: Result<&'static crate::draft::DraftGeom, String> = Ok(&crate::draft::DraftGeom::FLASH_NEXT);
+    let v = crate::serve::pack_verdict(QFN305_FP, Some((FLASH_NEXT_DFLASH2_Q4_FP, &geometry))).unwrap();
+    assert_eq!(v.pack, VALIDATED_FLASH_NEXT_DRAFT[0].0);
+    assert_eq!(v.draft.as_deref(), Some(format!("listed ({})", VALIDATED_FLASH_NEXT_DRAFT[0].0).as_str()));
+    // without the draft the same target keeps its own name
+    assert_ne!(crate::serve::pack_verdict(QFN305_FP, None).unwrap().pack, v.pack);
+}
+
+/// The drafter line's `validated=` label names the pair of THIS target and draft (the GLM bug vcruz305 found in #289; latent here): the
+/// shipped pair's text is the one its gate recipe pins, byte for byte, and the same draft beside any other target is structural.
+#[test]
+fn the_drafter_line_names_the_targets_own_pair_and_never_another_targets() {
+    use crate::fingerprint::{FLASH_NEXT_DFLASH2_Q4_FP, QFN305_FP, VALIDATED_GLM53_DRAFT};
+    let c = crate::draft::DraftCheck { fingerprint: FLASH_NEXT_DFLASH2_Q4_FP.into(), geometry: "qwen38-flash-next" };
+    assert_eq!(c.how(QFN305_FP), "listed (Qwen3.8-Flash-Next-EXL3-3.05bpw + Qwen3.8-Flash-Next-DFlash2 REXL3 4.00bpw)");
+    assert_eq!(c.how(VALIDATED_GLM53_DRAFT[0].1), "structural (qwen38-flash-next)");
+    assert_eq!(c.how("sha256:unlisted"), "structural (qwen38-flash-next)");
 }
 
 #[test]
@@ -760,4 +784,21 @@ fn flash_next_sizes_its_prefix_cache_from_the_window() {
     let q = plan_memory_cached_windowed(&profile, 40 << 30, 2 << 30, 2, 8192, 0, CacheRequest::Fixed(3 << 30), snapshot, 0, 8192)
         .unwrap();
     assert!(q.cache.enabled() && q.cache.bytes() <= 3 << 30 && q.cache.reach_tokens() >= 8192, "{:?}", q.cache);
+}
+
+#[test]
+fn a_draft_is_used_with_spec_auto_refused_with_spec_mtp_and_ignored_without_drafting() {
+    let mut o = crate::serve::ServeOptions::new(std::path::PathBuf::from("/nonexistent"));
+    o.draft_dir = Some(std::path::PathBuf::from("/models/flash-next-dflash2"));
+    o.spec = gb_spec::SpecMode::Auto;
+    assert_eq!(draft_dir_of(&o).unwrap(), Some(std::path::Path::new("/models/flash-next-dflash2")));
+    o.spec = gb_spec::SpecMode::Mtp;
+    let e = draft_dir_of(&o).unwrap_err().to_string();
+    assert!(e.contains("--spec mtp") && e.contains("--spec auto"), "{e}");
+    o.spec = gb_spec::SpecMode::Auto;
+    o.drafting = false;
+    assert_eq!(draft_dir_of(&o).unwrap(), None);
+    o.drafting = true;
+    o.draft_dir = None;
+    assert_eq!(draft_dir_of(&o).unwrap(), None);
 }

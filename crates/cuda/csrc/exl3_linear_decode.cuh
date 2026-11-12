@@ -61,6 +61,15 @@ __device__ __forceinline__ void ldg_lane_words(const uint32_t* tile, int lane, u
     for (int i = 0; i < lane_words<K2>(); ++i) w[i] = __ldg(tile + (word + i) % tile_words<K2>());
 }
 
+// The same with the lane's word index already hoisted out of a k loop: `lane_start` depends only on `lane` and the
+// compile-time K2, so every tile of a sweep reads the same words. Bit-identical to the recomputing form.
+template <int K2>
+__device__ __forceinline__ void ldg_lane_words_at(const uint32_t* tile, int word, uint32_t (&w)[lane_words<K2>()]) {
+    constexpr int TW = tile_words<K2>();
+#pragma unroll
+    for (int i = 0; i < lane_words<K2>(); ++i) w[i] = __ldg(tile + (word + i) % TW);
+}
+
 // Bits [d, d + 16) of the 96-bit big-endian stream hi:mid:lo (d a compile-time constant after unrolling).
 __device__ __forceinline__ uint32_t window16(uint32_t hi, uint32_t mid, uint32_t lo, int d) {
     if (d <= 16) return (hi >> (16 - d)) & 0xffffu;
@@ -71,15 +80,21 @@ __device__ __forceinline__ uint32_t window16(uint32_t hi, uint32_t mid, uint32_t
 
 // The 16-bit states of this lane's 8 values (8 lane + j, j = 0..7) from its words.
 template <int K2>
-__device__ __forceinline__ void lane_states(const uint32_t (&w)[lane_words<K2>()], int lane, uint32_t (&s)[8]) {
-    int word, offset;
-    lane_start<K2>(lane, word, offset);
+__device__ __forceinline__ void lane_states_at(const uint32_t (&w)[lane_words<K2>()], int offset, uint32_t (&s)[8]) {
     const uint32_t c = lane_words<K2>() > 2 ? w[lane_words<K2>() > 2 ? 2 : 0] : 0u;
     const uint32_t hi = __funnelshift_l(w[1], w[0], offset);   // the stream from the lane's first window on
     const uint32_t mid = __funnelshift_l(c, w[1], offset);
     const uint32_t lo = c << offset;
 #pragma unroll
     for (int j = 0; j < 8; ++j) s[j] = window16(hi, mid, lo, stream_end<K2>(j) - stream_end<K2>(0));
+}
+
+// The same with the lane's bit offset hoisted out of a k loop (see ldg_lane_words_at).
+template <int K2>
+__device__ __forceinline__ void lane_states(const uint32_t (&w)[lane_words<K2>()], int lane, uint32_t (&s)[8]) {
+    int word, offset;
+    lane_start<K2>(lane, word, offset);
+    lane_states_at<K2>(w, offset, s);
 }
 
 // Two codebook values from two 16-bit states, as a half2 in a uint32 (the first state in the low half).
@@ -124,6 +139,18 @@ __device__ __forceinline__ void decode_lane(const uint32_t (&w)[lane_words<K2>()
                                             uint32_t (&b1)[2]) {
     uint32_t s[8];
     lane_states<K2>(w, lane, s);
+    b0[0] = decode2<CB>(s[0], s[1]);
+    b0[1] = decode2<CB>(s[2], s[3]);
+    b1[0] = decode2<CB>(s[4], s[5]);
+    b1[1] = decode2<CB>(s[6], s[7]);
+}
+
+// The same with the lane's bit offset hoisted out of a k loop.
+template <int K2, int CB>
+__device__ __forceinline__ void decode_lane_at(const uint32_t (&w)[lane_words<K2>()], int offset, uint32_t (&b0)[2],
+                                               uint32_t (&b1)[2]) {
+    uint32_t s[8];
+    lane_states_at<K2>(w, offset, s);
     b0[0] = decode2<CB>(s[0], s[1]);
     b0[1] = decode2<CB>(s[2], s[3]);
     b1[0] = decode2<CB>(s[4], s[5]);

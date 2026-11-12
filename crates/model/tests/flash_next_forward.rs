@@ -135,6 +135,20 @@ fn the_per_slot_rings_outlast_a_window_and_the_reach_of_what_reads_them() {
     assert_eq!((PLE_RING, QSA_RING, WINDOW_ROWS), (128, 128, 64), "the sizes this file reasons about");
 }
 
+#[test]
+fn pre_chain_multigram_lookup_and_continuation_stay_within_the_committed_prefix() {
+    use gb_model::families::qwen_flash_next::model::{extend_pre_chain_continuation, pld_multigram_bounded};
+    let hist = [10u32, 20, 30, 40, 50, 60, 70, 10, 20, 30, 40];
+    let cont = pld_multigram_bounded(&hist, hist.len(), 7, 4).expect("4-gram match inside committed prefix");
+    assert_eq!(cont, vec![50, 60, 70]);
+    let mut agreed = vec![50u32, 60];
+    extend_pre_chain_continuation(&mut agreed, &cont, 7);
+    assert_eq!(agreed, vec![50, 60, 70]);
+    let mut diverged = vec![50u32, 99];
+    extend_pre_chain_continuation(&mut diverged, &cont, 7);
+    assert_eq!(diverged, vec![50, 99]);
+}
+
 /// A pack is refused by naming what is wrong with it, before a byte is read or a buffer is allocated (so these run with
 /// no CUDA device).
 #[test]
@@ -1030,4 +1044,116 @@ fn lithos_mtp_prefix_complete_run() {
         .unwrap(),
     )
     .unwrap();
+}
+
+// ------------------------------------------------------------------ small_linear_pair (fused GDN / MoE launches)
+
+/// Deterministic xorshift64 PRNG for the GPU-side bit-exact comparison below.
+struct PairRng(u64);
+impl PairRng {
+    fn next(&mut self) -> u32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 32) as u32
+    }
+    fn uniform(&mut self) -> f32 {
+        self.next() as f32 / u32::MAX as f32
+    }
+    fn vec(&mut self, n: usize, lo: f32, hi: f32) -> Vec<f32> {
+        (0..n).map(|_| lo + (hi - lo) * self.uniform()).collect()
+    }
+}
+
+fn pair_rand_bf16(rng: &mut PairRng, n: usize) -> Vec<u16> {
+    (0..n)
+        .map(|_| {
+            let s = rng.uniform();
+            gb_cuda::num::f32_to_bf16((rng.uniform() * 2.0 - 1.0) * (0.05 + 30.0 * s * s * s))
+        })
+        .collect()
+}
+
+fn pair_f16_bits(v: &[f32]) -> Vec<u16> {
+    v.iter()
+        .map(|&f| {
+            let b = f.to_bits();
+            let sign = (b >> 16) & 0x8000;
+            let exp = ((b >> 23) & 0xFF) as i32;
+            let man = b & 0x7FFFFF;
+            if exp == 0xFF {
+                (sign | 0x7C00 | if man != 0 { 0x200 } else { 0 }) as u16
+            } else {
+                let e = exp - 127 + 15;
+                if e >= 0x1F {
+                    (sign | 0x7C00) as u16
+                } else if e <= 0 {
+                    sign as u16
+                } else {
+                    (sign | ((e as u32) << 10) | (man >> 13)) as u16
+                }
+            }
+        })
+        .collect()
+}
+
+/// The fused pair launcher the model uses in every GDN layer and MoE router/shared-gate step must be bit-identical to
+/// two separate `small_linear_f16w` calls on the same x (0 differing bits), across the qfn specialization (rows 1..8,
+/// k = 2560) and the generic path, for both real shapes — the GDN (48, 48) pair and the MoE (512, 1) pair. GPU only;
+/// skips without a device (stub builds).
+#[test]
+fn small_linear_pair_gpu_bit_exact() {
+    if !gb_cuda::device_available() {
+        eprintln!("no CUDA device: skipping");
+        return;
+    }
+    let st = gb_cuda::Stream::new().unwrap();
+    let mut rng = PairRng(0x9E3779B97F4A7C15);
+    let check = |rng: &mut PairRng, st: &gb_cuda::Stream, rows: usize, n0: usize, n1: usize| {
+        let k = 2560usize;
+        let x = pair_rand_bf16(rng, rows * k);
+        let w0 = pair_f16_bits(&rng.vec(n0 * k, -0.2, 0.2));
+        let w1 = pair_f16_bits(&rng.vec(n1 * k, -0.2, 0.2));
+        let (dx, dw0, dw1) = (
+            gb_cuda::DevBuf::from_slice(&x).unwrap(),
+            gb_cuda::DevBuf::from_slice(&w0).unwrap(),
+            gb_cuda::DevBuf::from_slice(&w1).unwrap(),
+        );
+        let y0a = gb_cuda::DevBuf::zeroed(rows * n0 * 2).unwrap();
+        let y1a = gb_cuda::DevBuf::zeroed(rows * n1 * 2).unwrap();
+        let y0b = gb_cuda::DevBuf::zeroed(rows * n0 * 2).unwrap();
+        let y1b = gb_cuda::DevBuf::zeroed(rows * n1 * 2).unwrap();
+        unsafe {
+            gb_cuda::glue::small_linear_f16w(dx.ptr().cast_const(), dw0.ptr().cast_const(), y0a.ptr(), rows, k, n0, st).unwrap();
+            gb_cuda::glue::small_linear_f16w(dx.ptr().cast_const(), dw1.ptr().cast_const(), y1a.ptr(), rows, k, n1, st).unwrap();
+            gb_cuda::glue::small_linear_pair_f16w(
+                dx.ptr().cast_const(),
+                dw0.ptr().cast_const(),
+                dw1.ptr().cast_const(),
+                y0b.ptr(),
+                y1b.ptr(),
+                rows,
+                k,
+                n0,
+                n1,
+                st,
+            )
+            .unwrap();
+        }
+        let y0a: Vec<u16> = y0a.to_vec().unwrap();
+        let y1a: Vec<u16> = y1a.to_vec().unwrap();
+        let y0b: Vec<u16> = y0b.to_vec().unwrap();
+        let y1b: Vec<u16> = y1b.to_vec().unwrap();
+        assert_eq!(y0b, y0a, "pair y0 differs rows={rows} n0={n0} n1={n1}");
+        assert_eq!(y1b, y1a, "pair y1 differs rows={rows} n0={n0} n1={n1}");
+    };
+    for &(n0, n1) in &[(48usize, 48usize), (512, 1)] {
+        for rows in 1..=8 {
+            check(&mut rng, &st, rows, n0, n1); // qfn specialization (k = 2560)
+        }
+        for rows in [9usize, 17, 64] {
+            check(&mut rng, &st, rows, n0, n1); // generic pair path
+        }
+    }
+    st.sync().unwrap();
 }

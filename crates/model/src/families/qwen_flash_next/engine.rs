@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const WINDOW_ROWS: usize = super::memory::WINDOW_ROWS;
-const STEP_MS: &[(usize, f64)] =
+pub const STEP_MS: &[(usize, f64)] =
     &[(1, 29.0), (2, 34.1), (3, 38.7), (4, 43.6), (5, 47.9), (6, 52.0), (8, 59.2), (16, 85.0), (32, 130.0), (64, 220.0)];
 
 /// Budget from reclaimable MemAvailable, not the smaller CUDA MemFree. The model
@@ -172,15 +172,21 @@ fn pack_header_fingerprint(dir: &Path) -> Result<String, ModelError> {
     Ok(format!("sha256:{:x}", h.finalize()))
 }
 
+/// The pack gate before anything is loaded: the target against the validated list and, with `--draft`, the draft beside it (the shared
+/// `serve::check_packs`, which records `target_fingerprint`, `draft_fingerprint`, `pack_validated` (the pair's name for a listed pair)
+/// and `draft_validated` as boot facts, the identity `/metrics` and `/v1/models` report). Returns `load`'s value and the target's
+/// fingerprint.
 fn validate_pack_before_load<T>(
     dir: &Path,
+    draft_dir: Option<&Path>,
     allow_unvalidated: bool,
     load: impl FnOnce() -> Result<T, ModelError>,
-) -> Result<T, ModelError> {
+) -> Result<(T, String), ModelError> {
     let pack = Pack::open(dir)?;
-    crate::serve::check_packs(&pack, None, allow_unvalidated)?;
+    let draft = draft_dir.map(Pack::open).transpose()?;
+    let target = crate::serve::check_packs(&pack, draft.as_ref(), allow_unvalidated)?;
     boot::mark("packs_checked", None);
-    load()
+    Ok((load()?, target))
 }
 
 pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelError> {
@@ -197,7 +203,9 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
         "hcx-fp32-reference"
     };
     let max_context = o.max_model_len.min(cfg.max_position_embeddings);
-    let with_mtp = cfg.mtp_layers > 0;
+    // a DFlash2 draft given with `--draft` drafts instead of the MTP head, which is then left on disk (its KV planes are not planned)
+    let draft_dir = draft_dir_of(o)?;
+    let with_mtp = cfg.mtp_layers > 0 && draft_dir.is_none();
     let profile = super::memory::memory_profile(
         &cfg,
         &MemoryOptions {
@@ -217,7 +225,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
         .map_err(|errors| ModelError::Config(format!("Flash-Next pack: {}", errors.join("; "))))?;
     boot::mark("packs_scanned", None);
     let mode = warm_mode_from_env(std::env::var("REXL3_NGRAM_WARM").ok().as_deref());
-    let (table_bytes, cuda_free) = validate_pack_before_load(&o.model_dir, o.allow_unvalidated_pack, || {
+    let (loaded, target_fp) = validate_pack_before_load(&o.model_dir, draft_dir, o.allow_unvalidated_pack, || {
         let table_bytes = if mode != WarmMode::Off && !cfg.ple_layer_ids.is_empty() {
             let table = NgramTable::open(&o.model_dir, &cfg).map_err(ModelError::Config)?;
             (table.rows as u64)
@@ -230,6 +238,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
         gb_cuda::rt::init_context()?;
         Ok((table_bytes, gb_cuda::rt::mem_info()?.0 as u64))
     })?;
+    let (table_bytes, cuda_free) = loaded;
     boot::mark("cuda_ready", None);
     let mut weight_bytes = weights
         .regions
@@ -246,6 +255,27 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
             weight_bytes.checked_add(extra).ok_or_else(|| ModelError::Config("prefix-head accounting overflow".into()))?;
         eprintln!("rexl3 event=mtp_exact_prefix_plan extra_bytes={extra}");
     }
+    // The DFlash2 draft is loaded before the room that is left is measured (MemAvailable then no longer counts it); its tap buffer, which
+    // the model allocates later, is planned with the weights.
+    let draft = match draft_dir {
+        Some(dir) => {
+            let d = load_draft(dir, &cfg, &weights, o.slots, o.prefill_chunk, o.floor_bytes)?;
+            let tap = super::model::tap_buffer_bytes(o.prefill_chunk.max(WINDOW_ROWS), cfg.hidden);
+            weight_bytes =
+                weight_bytes.checked_add(tap).ok_or_else(|| ModelError::Config("draft tap buffer accounting overflow".into()))?;
+            eprintln!(
+                "rexl3 event=model_drafter drafter=dflash2 draft={} form={} draft_gib={:.2} tap_gib={:.3} validated=\"{}\" mtp=not_loaded",
+                d.check.fingerprint,
+                d.form,
+                gib(d.total_bytes),
+                gib(tap),
+                d.check.how(&target_fp)
+            );
+            boot::fact("model_drafter", "dflash2 (--draft); MTP head not loaded");
+            Some(d)
+        }
+        None => None,
+    };
     let host = MemInfo::read();
     let want_warm = mode != WarmMode::Off
         && !cfg.ple_layer_ids.is_empty()
@@ -264,7 +294,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     boot::fact("ngram_warm", warm_word(want_warm, mode));
     boot::fact("prefill_contract", prefill_contract);
     let kv_tokens_cap = o.kv_tokens.unwrap_or(max_context).min(max_context) as u64;
-    let snapshot_bytes = prefix::snapshot_bytes(&cfg, with_mtp);
+    let snapshot_bytes = prefix::snapshot_bytes_with(&cfg, with_mtp, draft.is_some());
     // the cache is sized from the window, for `auto` and an explicit `--prefix-cache-mib` alike (`docs/PREFIX_CACHE_SIZING.md` section 5)
     let plan_at = |slots: usize| {
         plan_memory_cached_windowed(
@@ -317,7 +347,16 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
         let reason = if o.prefix_cache == PrefixCacheOption::Off { "off" } else { "insufficient spare memory for two entries" };
         eprintln!("rexl3 event=flash_next_prefix_plan entries=0 reason={reason}");
     }
-    let fingerprint = if plan.cache.enabled() { Some(pack_header_fingerprint(&o.model_dir)?) } else { None };
+    // the cache namespace covers the draft too: a snapshot keeps the draft's window
+    let fingerprint = if plan.cache.enabled() {
+        let target = pack_header_fingerprint(&o.model_dir)?;
+        Some(match &draft {
+            Some(d) => format!("{target}|dflash2={}", d.check.fingerprint),
+            None => target,
+        })
+    } else {
+        None
+    };
     let pool_pages = plan
         .kv_blocks
         .checked_add(plan.cache.page_blocks)
@@ -325,9 +364,10 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     boot::fact("slots", slots.to_string());
     boot::fact("kv_pages", plan.kv_blocks.to_string());
     boot::fact("kv_tokens", plan.kv_tokens.to_string());
-    let model = FlashNextModel::load(
+    let mut model = FlashNextModel::load_with(
         &o.model_dir,
         ModelOptions { slots, kv_pages: pool_pages, max_context, prefill_rows: o.prefill_chunk, warm: want_warm },
+        with_mtp,
     )
     .map_err(|e| {
         crate::serve::allocation_error(
@@ -338,6 +378,10 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
             host.as_ref(),
         )
     })?;
+    // the draft joins the model before its snapshot arena (whose slots then keep the draft's window) and before any forward (the taps)
+    if let Some(d) = draft {
+        model.enable_dflash(d.draft, d.weight_bytes)?;
+    }
     let mtp_k = if o.drafting && o.spec.uses_mtp() && model.has_mtp() {
         std::env::var("REXL3_MTP_K").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).min(WINDOW_ROWS - 1)
     } else {
@@ -367,6 +411,77 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
         make,
     );
     Ok(engine.with_prefix_cache(flash_next_prefix_config(&|name| std::env::var(name).ok())?))
+}
+
+/// The DFlash2 draft directory this boot drafts with: `--draft` when drafting is on. `--spec mtp` names the pack's MTP head, so it is
+/// refused with a draft rather than served with another drafter (`--spec copy` never reaches here with one: `serve::draft_dir_for`).
+pub fn draft_dir_of(o: &ServeOptions) -> Result<Option<&Path>, ModelError> {
+    let Some(dir) = o.draft_dir.as_deref().filter(|_| o.drafting && o.spec.drafts()) else { return Ok(None) };
+    if o.spec == gb_spec::SpecMode::Mtp {
+        return Err(ModelError::Config(format!(
+            "--spec mtp drafts with the pack's MTP head, and --draft {} gives a DFlash2 draft instead: pass --spec auto to draft with it, \
+             or leave --draft out to draft with the MTP head",
+            dir.display()
+        )));
+    }
+    Ok(Some(dir))
+}
+
+/// A loaded DFlash2 draft, before it joins the model.
+pub struct LoadedDraft {
+    pub draft: crate::draft::Draft,
+    pub check: crate::draft::DraftCheck,
+    /// Bytes of its weights (the context rings excluded) and of everything it allocated.
+    pub weight_bytes: u64,
+    pub total_bytes: u64,
+    pub form: &'static str,
+}
+
+/// Load the DFlash2 draft at `dir` for a target of `cfg` (whose `lm_head` the pack's `weights` describe) serving `slots` slots in prompt
+/// chunks of `chunk` rows: the structural check first (refused by name), then its weights and context rings.
+pub fn load_draft(
+    dir: &Path,
+    cfg: &FlashNextConfig,
+    weights: &WeightMap,
+    slots: usize,
+    chunk: usize,
+    floor: u64,
+) -> Result<LoadedDraft, ModelError> {
+    let check = super::dflash::check_dir(dir, cfg)?;
+    let pack = Pack::open(dir).map_err(|e| ModelError::Config(format!("{}: {e}", dir.display())))?;
+    let head = weights.groups.get("lm_head").ok_or_else(|| ModelError::Config("missing packed LM head".into()))?;
+    let head_bits = head.bits.twice() as usize / 2;
+    let form = if pack.has_group("fc") { "exl3" } else { "bf16" };
+    let before = MemInfo::read().map(|m| m.available);
+    // one arena block sized to the pack, not the default 1 GiB blocks (their unused tail would be most of a 0.5 GiB draft's footprint)
+    let mut ctx = crate::loadctx::LoadCtx::from_env_with_block(crate::draft::arena_block_bytes(&pack));
+    // the absorbs come in pieces of at most one window (`model_dflash.rs`), so the draft's context scratch is sized for one piece
+    let ctx_rows = chunk.min(super::dflash::WINDOW);
+    let (draft, bytes) = crate::draft::Draft::declare_geom(
+        &mut ctx,
+        &pack,
+        crate::draft::DraftGeom::FLASH_NEXT,
+        head_bits,
+        cfg.vocab,
+        slots,
+        ctx_rows,
+        crate::draft::BLOCK,
+    )?;
+    ctx.finish()?;
+    let ring = gb_cuda::dflash2::DraftCtxLayout::qwen38(slots).total_bytes() as u64;
+    let after = MemInfo::read().map(|m| m.available);
+    let total_bytes = match (before, after) {
+        (Some(b), Some(a)) => b.saturating_sub(a).max(bytes as u64),
+        _ => bytes as u64,
+    };
+    if after.is_some_and(|a| a < floor) {
+        return Err(ModelError::Config(format!(
+            "the DFlash2 draft ({:.2} GiB) leaves MemAvailable below the {:.2} GiB floor: start without --draft",
+            gib(total_bytes),
+            gib(floor)
+        )));
+    }
+    Ok(LoadedDraft { draft, check, weight_bytes: bytes as u64 - ring, total_bytes, form })
 }
 
 /// The Flash-Next prefix config: the interactive cut policy (cuts that serve a second question about a long document and a short tool

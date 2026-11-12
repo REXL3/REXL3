@@ -59,29 +59,20 @@ __global__ void __launch_bounds__(WARPS * 32)
     float sum[RB];
 #pragma unroll
     for (int r = 0; r < RB; ++r) sum[r] = 0.0f;
+    // Load and accumulate fused (identical fmaf order, no wv[]/xv[] arrays): buffering both arrays for the whole UN
+    // tile spilled on the BF16 instantiations (STL/LDL on the stack).
     for (int t0 = 0; t0 * 32 < pairs; t0 += UN) {
-        half2 wv[UN];
-        float2 xv[RB][UN];
 #pragma unroll
         for (int u = 0; u < UN; ++u) {
             const int j = lane + 32 * (t0 + u);
             if (j < pairs) {
-                wv[u] = w2[j];
-#pragma unroll
-                for (int r = 0; r < RB; ++r)
-                    if (row0 + r < rows) xv[r][u] = load_pair<DT>(x, (size_t)(row0 + r) * K + 2 * (size_t)j);
-            }
-        }
-#pragma unroll
-        for (int u = 0; u < UN; ++u) {
-            const int j = lane + 32 * (t0 + u);
-            if (j < pairs) {
-                const float2 wf = __half22float2(wv[u]);
+                const float2 wf = __half22float2(w2[j]);
 #pragma unroll
                 for (int r = 0; r < RB; ++r) {
                     if (row0 + r < rows) {
-                        sum[r] = fmaf(xv[r][u].x, wf.x, sum[r]);
-                        sum[r] = fmaf(xv[r][u].y, wf.y, sum[r]);
+                        const float2 xv = load_pair<DT>(x, (size_t)(row0 + r) * K + 2 * (size_t)j);
+                        sum[r] = fmaf(xv.x, wf.x, sum[r]);
+                        sum[r] = fmaf(xv.y, wf.y, sum[r]);
                     }
                 }
             }

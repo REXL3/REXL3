@@ -39,7 +39,7 @@ use crate::family::BuildCtx;
 use crate::hostmem;
 use crate::lockstep::{self, BootGate, FollowerConfig, FollowerExit, Rendezvous, TpTimeouts};
 use crate::pack::PackError;
-use crate::plan::plan_memory_cached_windowed;
+use crate::plan::{plan_memory_cached_windowed, plan_memory_pool_cached};
 use crate::serve::{gib, interactive_prefix_config_from_env, memory_options, ServeOptions, TpOptions};
 use gb_cuda::moe::ExpertOwnership;
 use gb_cuda::nccl::{NcclComm, NcclUniqueId};
@@ -346,6 +346,9 @@ pub struct RankPlan {
     /// Rank 0 serving images: the features reserve held back from the pool (the encoder's budget; 0 on a follower).
     pub vision_reserve: u64,
     pub free_after_weights: u64,
+    /// The NextN drafter's restricted head this rank builds after the load (`engine::draft_head_planned`; 0 without it): out of the room the KV
+    /// pool is planned from, like the weights.
+    pub draft_head_bytes: u64,
     pub scan_s: f64,
     /// The NextN layer is loaded (`--spec mtp|auto` with drafting on, a pack that has it): its regions (the rank's share of its experts)
     /// are in `weight_bytes`, its cache in the plan's KV bytes per token.
@@ -354,18 +357,23 @@ pub struct RankPlan {
 
 /// Whether a rank (or one node) loads the NextN layer: the same rule as `engine::build_engine`.
 pub fn mtp_wanted(o: &ServeOptions, cfg: &GlmConfig) -> bool {
-    super::MTP_BUILT && o.drafting && o.spec.uses_mtp() && cfg.has_mtp()
+    // a DFlash2 draft given with `--draft` is the model drafter on every rank's say: rank 0 runs it, and no rank loads the NextN layer
+    // (the Hello's `mtp` fact keeps the ranks alike: every rank is started with the same `--draft`)
+    let dflash = o.draft_dir.is_some() && o.drafting && o.spec.drafts();
+    super::MTP_BUILT && o.drafting && o.spec.uses_mtp() && cfg.has_mtp() && !dflash
 }
 
 /// The plan of a rank: the pack scanned and checked, the memory planned from what is free now minus the pack's text weights, at the
 /// pinned slot count and KV cap (`check_tp_options`).
 pub fn plan_rank(o: &ServeOptions) -> Result<RankPlan, ModelError> {
     check_options(o)?;
+    // `--spec mtp` with `--draft` is refused by name on every rank (`engine::draft_dir_of`)
+    super::engine::draft_dir_of(o)?;
     let cfg = GlmConfig::from_dir(&o.model_dir).map_err(ModelError::Config)?;
     let t = std::time::Instant::now();
     let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).map_err(|e| ModelError::Pack(PackError::Io(e.to_string())))?;
     let scan_s = t.elapsed().as_secs_f64();
-    let fingerprint = check_pack(&ck, o.allow_unvalidated_pack)?;
+    let fingerprint = check_pack(&ck, super::engine::draft_check_of(o, &cfg)?.as_ref(), o.allow_unvalidated_pack)?;
     crate::shapes::check_driver(&gb_cuda::rt::versions()).map_err(ModelError::Config)?;
     gb_cuda::rt::init_context()?;
     let (cuda_free, _) = gb_cuda::rt::mem_info()?;
@@ -452,23 +460,30 @@ pub fn plan_from_split(
     let weight_bytes = rank_weight_bytes_with(&pack, mtp);
     // rank 0 serving images: the tower and its scratch are out of the room, the features of the images in flight held back (a follower: 0)
     let (tower_bytes, vision_reserve) = tp_vision::planned_vision(o, &pack, &profile, mem_opts.vision)?;
-    let free = free_now.saturating_sub(weight_bytes + tower_bytes);
+    // the drafter's restricted head, built after the load on every rank that loads the NextN layer (`load_rank_with`)
+    let draft_head_bytes = super::engine::draft_head_planned(mtp, &pack.weights.lm_head, cfg.vocab)?;
+    let free = free_now.saturating_sub(weight_bytes + tower_bytes + draft_head_bytes);
     let kv_cap = o.kv_tokens.unwrap_or(o.max_model_len) as u64;
     // the prefix cache as one node plans it (`engine::build_engine`): a snapshot slot is THIS rank's state (its KDA heads under the split,
     // `cfg` is the rank's), the cache carved out before the KV pool is sized (an explicit size) or out of what the plan leaves (`Auto`)
     let snapshot_bytes = super::prefix::snapshot_bytes(&cfg, mtp).map_err(ModelError::Config)?;
-    let plan = plan_memory_cached_windowed(
-        &profile,
-        free,
-        o.floor_bytes,
-        o.slots,
-        kv_cap,
-        vision_reserve,
-        o.prefix_cache.request(),
-        snapshot_bytes,
-        0,
-        o.max_model_len as u64,
-    )
+    // `--prefix-cache pool`: snapshot slots and no pages of their own on every rank (the entries keep the pool's idle pages)
+    let plan = if o.prefix_pool {
+        plan_memory_pool_cached(&profile, free, o.floor_bytes, o.slots, kv_cap, vision_reserve, snapshot_bytes, 0, o.max_model_len as u64)
+    } else {
+        plan_memory_cached_windowed(
+            &profile,
+            free,
+            o.floor_bytes,
+            o.slots,
+            kv_cap,
+            vision_reserve,
+            o.prefix_cache.request(),
+            snapshot_bytes,
+            0,
+            o.max_model_len as u64,
+        )
+    }
     .map_err(|e| ModelError::Config(format!("this rank cannot plan {} slots: {e} (free {:.1} GiB after the pack's {:.1} GiB and the vision tower's {:.2} GiB, vision reserve {:.2} GiB)", o.slots, gib(free), gib(weight_bytes), gib(tower_bytes), gib(vision_reserve))))?;
     let mm = ModelMemory::from_profile(&profile, 0, 0);
     let admission = plan.admission(mm, o.slots, o.max_model_len).map_err(|e| ModelError::Config(e.to_string()))?;
@@ -492,6 +507,7 @@ pub fn plan_from_split(
         tower_bytes,
         vision_reserve,
         free_after_weights: free,
+        draft_head_bytes,
         scan_s,
         mtp,
     })
@@ -618,8 +634,19 @@ fn gate_of(o: &ServeOptions, p: &RankPlan, tp: &TpOptions) -> Result<BootGate<Gl
     let facts = facts_of(&p.cfg, tp.ranks, p.mtp)?
         .with_vision(tp_vision::holds_tower(o, &p.pack))
         .with_prefill_small(adaptive_small(p.chunk)?, p.chunk)
-        .with_cache(crate::families::nemotron_h_omni::tp_runtime::cache_request_label(o.prefix_cache), &p.cache);
+        .with_cache(cache_request_label(o), &p.cache);
     Ok(tp::gate(pack, &p.mo, p.chunk, facts).at(tp.rank, tp.ranks))
+}
+
+/// The Hello's prefix cache request of this process (`GlmFacts::cache_request`): `pool` under `--prefix-cache pool` (the entries in the KV
+/// pool's idle pages: another arena than `on`'s, so two ranks started with different modes are refused by name at the Hello), otherwise
+/// the label both TP families compare (`nemotron_h_omni::tp_runtime::cache_request_label`), so every other process's Hello keeps its bytes.
+pub fn cache_request_label(o: &ServeOptions) -> String {
+    if o.prefix_pool {
+        "pool".into()
+    } else {
+        crate::families::nemotron_h_omni::tp_runtime::cache_request_label(o.prefix_cache)
+    }
 }
 
 /// The draft head's vocabulary setting of this process (`REXL3_MTP_VOCAB`), refused by name when malformed.
@@ -682,15 +709,45 @@ pub fn build_leader(
 ) -> Result<Box<dyn ServeEngine>, ModelError> {
     let t = timeouts(tp_o);
     default_nccl_channels();
+    // rank 0's DFlash2 draft (`--draft`) is loaded before the rank plans, so the plan is made from what is free with it resident, as one
+    // node's is (its weights, context rings and scratch; the trunk's tap buffer is allocated with the model)
+    let mut draft = load_leader_draft(o)?;
     let p = plan_rank(o)?;
+    if let Some(d) = &draft {
+        // the snapshot slots of rank 0 also keep the draft's window: out of what the plan left spare (the slots' own bytes are the
+        // group's Hello fact, the same on every rank)
+        let windows = p.cache.snapshot_slots as u64 * crate::draft::Draft::window_snapshot_bytes();
+        if p.cache.enabled() && p.spare_bytes < windows {
+            return Err(ModelError::Config(format!(
+                "rank 0's {} prefix-cache entries keep the DFlash2 draft's window ({:.2} GiB in all) and the plan leaves {:.2} GiB spare: lower \
+                 --prefix-cache-mib",
+                p.cache.snapshot_slots,
+                gib(windows),
+                gib(p.spare_bytes)
+            )));
+        }
+        eprintln!(
+            "rexl3 event=dflash2_loaded rank=0 weights_gib={:.3} total_gib={:.3} form={} load_s={:.2} snapshot_windows_gib={:.2}",
+            gib(d.weight_bytes),
+            gib(d.total_bytes),
+            d.form,
+            d.load_s,
+            gib(windows)
+        );
+    }
     let gate = gate_of(o, &p, tp_o)?;
     // rank 0's speculation settings (`REXL3_MTP_DEPTH`, `REXL3_GLM_DRAFT_NOISE`), refused by name BEFORE the group loads
     let spec_cfg = if o.drafting && o.spec.drafts() {
         // a two-rank group prices its rounds with the tables measured on two ranks (lane T: `spec::VERIFY_MS_TP`)
-        Some(super::spec::SpecConfig { two_ranks: tp_o.ranks == 2, ..super::spec::SpecConfig::from_env(o.spec)? })
+        let drafter = match &draft {
+            Some(d) => super::spec::ModelDrafter::Dflash2 { weight_bytes: d.weight_bytes },
+            None => super::spec::ModelDrafter::NextN,
+        };
+        Some(super::spec::SpecConfig { two_ranks: tp_o.ranks == 2, drafter, ..super::spec::SpecConfig::from_env(o.spec)? })
     } else {
         None
     };
+    let draft_fingerprint = draft.as_ref().map(|d| d.fingerprint.clone());
     eprintln!(
         "rexl3 event=tp_leader_waiting family=glm peer={} ranks={} slots={} kv_pages={} max_context={} prefill_rows={} weights_gib={:.2} vision={} tower_gib={:.2} vision_reserve_gib={:.2} free_after_gib={:.2} nccl=\"{}\" collective=\"{}\"",
         tp_o.peer,
@@ -721,7 +778,12 @@ pub fn build_leader(
         &t,
         |rv| make_comm(topo, rv),
         |comm| {
-            let rank = load_rank_with(&dir, &p.cfg, p.pack.clone(), p.own.as_ref(), &p.mo, p.chunk, floor, p.scan_s, comm, mtp)?;
+            let mut rank =
+                load_rank_with(&dir, &p.cfg, p.pack.clone(), p.own.as_ref(), &p.mo, p.chunk, floor, p.scan_s, comm, mtp)?;
+            if let Some(d) = draft.take() {
+                // before the snapshot pool (`EnableSnapshots`, after the boot) and before any forward (the schedule taps)
+                rank.m.enable_dflash(d.draft, d.weight_bytes)?;
+            }
             tower = tp_vision::load_leader_tower(o, &p.pack)?;
             Ok(rank)
         },
@@ -762,14 +824,20 @@ pub fn build_leader(
             p.cache.page_blocks,
             gib(p.cache.bytes()),
             gib(p.spare_bytes),
-            p.cache.reach_tokens(),
+            if o.prefix_pool { p.kv_admitted.1 } else { p.cache.reach_tokens() },
             o.max_model_len,
             tp_o.ranks
         );
         boot::fact("prefix_cache", format!("{} entries, {:.2} GiB a rank", p.cache.snapshot_slots, gib(p.cache.bytes())));
-        boot::fact("prefix_cache_reach_tokens", p.cache.reach_tokens().to_string());
-        let ns = super::prefix::namespace_of(&p.fingerprint, p.mtp);
-        backend = backend.with_prefix_cache(ns, p.cache)?;
+        let reach = if o.prefix_pool { p.kv_admitted.1 } else { p.cache.reach_tokens() };
+        boot::fact("prefix_cache_reach_tokens", reach.to_string());
+        let ns = super::prefix::namespace_of_draft(&p.fingerprint, p.mtp, draft_fingerprint.as_deref());
+        backend = if o.prefix_pool {
+            boot::fact("prefix_cache_mode", "pool");
+            backend.with_pool_prefix_cache(ns, p.cache)?
+        } else {
+            backend.with_prefix_cache(ns, p.cache)?
+        };
     } else {
         eprintln!("rexl3 event=prefix_cache_plan entries=0 reason=\"off\" ranks={}", tp_o.ranks);
         boot::fact("prefix_cache", "off");
@@ -783,6 +851,26 @@ pub fn build_leader(
         tp_vision::publish_encoder(o, t, p.vision_reserve)?;
     }
     Ok(Box::new(engine))
+}
+
+/// Rank 0's DFlash2 draft when `--draft` is given (`engine::draft_dir_of`): checked against the target's config and loaded. A follower
+/// never loads one.
+fn load_leader_draft(o: &ServeOptions) -> Result<Option<super::engine::LoadedDraft>, ModelError> {
+    let Some(dir) = super::engine::draft_dir_of(o)? else { return Ok(None) };
+    let cfg = GlmConfig::from_dir(&o.model_dir).map_err(ModelError::Config)?;
+    super::dflash::check_dir(dir, cfg.hidden, cfg.vocab, cfg.layers.len())?;
+    gb_cuda::rt::init_context()?;
+    // the draft's head is the target's lm_head: its width sizes the draft's head workspace
+    let target =
+        crate::pack::Pack::open(&o.model_dir).map_err(|e| ModelError::Config(format!("{}: {e}", o.model_dir.display())))?;
+    let head_bits = (target.group_meta("lm_head")?.bits.twice() as usize).div_ceil(2);
+    eprintln!(
+        "rexl3 event=model_drafter drafter=dflash2 draft={} nextn=not_loaded rank=0 reason=\"--draft was given: rank 0 drafts with the DFlash2 draft and no rank loads the pack's NextN layer\"",
+        dir.display()
+    );
+    boot::fact("model_drafter", "dflash2 (--draft, rank 0); NextN layer not loaded");
+    let chunk = alloc::prefill_chunk_for(o.prefill_chunk);
+    Ok(Some(super::engine::load_draft(dir, &cfg, head_bits, o.slots, chunk, o.floor_bytes)?))
 }
 
 /// The engine over rank 0's backend: the single-node GLM engine's configuration (`engine::engine_over` without a backend drafter: the
@@ -1063,6 +1151,57 @@ mod tests {
         assert!(p.mo.kv_blocks * 256 >= 32768, "{}", p.mo.kv_blocks);
     }
 
+    /// The NextN drafter's restricted head is in a rank's plan: with the NextN layer loaded (`--spec auto`) the room the KV pool is planned from
+    /// is smaller than with `--spec none` by exactly the NextN layer's own regions plus `engine::draft_head_planned` (the head the rank builds after
+    /// the load, `load_rank_with`), and the head is `model::sub_head_bytes` of the pack's lm_head at the default vocabulary. CPU only, on the real
+    /// pack's headers: `REXL3_GLM_DIR` and/or `REXL3_REDSNOW_DIR`, a build with the kernels (their workspace sizes).
+    #[test]
+    #[ignore]
+    fn the_draft_head_is_charged_to_the_rank_plan() {
+        let dirs: Vec<String> = ["REXL3_GLM_DIR", "REXL3_REDSNOW_DIR"].iter().filter_map(|k| std::env::var(k).ok()).collect();
+        if dirs.is_empty() || !gb_cuda::rt::kernels_built() {
+            eprintln!("REXL3_GLM_DIR / REXL3_REDSNOW_DIR not set, or no kernels in this build: not run");
+            return;
+        }
+        for dir in dirs {
+            let plan = |spec: crate::serve::SpecMode| {
+                let mut o = ServeOptions::new(dir.clone().into());
+                o.slots = 1;
+                o.slots_auto = false;
+                o.max_model_len = 8192;
+                o.kv_tokens = Some(8192);
+                o.prefill_chunk = 4096;
+                o.prefix_cache = PrefixCacheOption::Off;
+                o.vision = None;
+                o.spec = spec;
+                let cfg = GlmConfig::from_dir(&o.model_dir).unwrap();
+                let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).unwrap();
+                let own = ExpertOwnership::range(288, 0, 2).unwrap();
+                plan_from_split(&o, cfg, ck, 116 << 30, 0.0, Some(own), Some((0, 2))).unwrap()
+            };
+            let (off, on) = (plan(crate::serve::SpecMode::None), plan(crate::serve::SpecMode::Auto));
+            assert!(!off.mtp && on.mtp, "--spec none leaves the NextN layer out, --spec auto loads it");
+            assert_eq!(off.draft_head_bytes, 0);
+            let lm = &on.pack.weights.lm_head;
+            let ranges = super::super::model::vocab_ranges(super::super::engine::MTP_VOCAB_PREFIX_STRIPS, on.cfg.vocab);
+            let want = super::super::model::sub_head_bytes(lm.k, lm.bits.twice() as usize / 2, &ranges);
+            assert_eq!(on.draft_head_bytes, want, "the head charged is the head built");
+            assert_eq!(
+                off.free_after_weights - on.free_after_weights,
+                (on.weight_bytes - off.weight_bytes) + on.draft_head_bytes,
+                "the room shrinks by the NextN layer's regions and the draft head, nothing else"
+            );
+            eprintln!(
+                "{dir}: draft head {:.3} GiB ({} bits lm_head), NextN regions {:.3} GiB; room {:.3} -> {:.3} GiB",
+                gib(on.draft_head_bytes),
+                lm.bits.twice() as f64 / 2.0,
+                gib(on.weight_bytes - off.weight_bytes),
+                gib(off.free_after_weights),
+                gib(on.free_after_weights)
+            );
+        }
+    }
+
     /// The two-node prefix cache's plan (`docs/GLM_TP.md` 4.2) at the first profile's geometry, rank 0 of the KDA head split: 1 slot,
     /// 262,144 tokens, the single node's 3,584 MiB pin, at 70 GiB free after nothing else. The cache is planned; a snapshot slot is the rank's
     /// own state (its 32 heads: less than the single node's slot); the pool holds the admitted window AND the pages the cache may keep.
@@ -1084,6 +1223,54 @@ mod tests {
         let mib = 13440;
         let Some(p) = rank0_cache_plan(1048576, mib, 110) else { return };
         assert!(p.cache.reach_tokens() >= 1048576, "a {mib} MiB pin reaches {} tokens, not the window", p.cache.reach_tokens());
+    }
+
+    /// `--prefix-cache pool` at the 1,048,576-token window, rank 0 of the KDA head split, 1 slot: the cache plans snapshot slots and NO pages
+    /// of its own, so the pool is the window once (its pages and the slot's page of rounding), and the plan needs a window of pages less than
+    /// the pinned cache's. CPU only, on the real pack's headers: `REXL3_GLM_DIR` (2.25bpw) and/or `REXL3_REDSNOW_DIR` (4.91bpw, printed).
+    #[test]
+    #[ignore]
+    fn a_pool_page_cache_plans_the_1m_window_once() {
+        for var in ["REXL3_GLM_DIR", "REXL3_REDSNOW_DIR"] {
+            let Ok(dir) = std::env::var(var) else {
+                eprintln!("{var} is not set: not run");
+                continue;
+            };
+            let mut o = ServeOptions::new(dir.into());
+            o.slots = 1;
+            o.slots_auto = false;
+            o.max_model_len = 1_048_576;
+            o.kv_tokens = Some(1_048_576);
+            o.prefix_cache = PrefixCacheOption::On;
+            o.prefix_pool = true;
+            o.vision = None;
+            o.floor_bytes = 4 << 30;
+            let cfg = GlmConfig::from_dir(&o.model_dir).unwrap();
+            let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).unwrap();
+            let own = ExpertOwnership::range(288, 0, 2).unwrap();
+            let p = plan_from_split(&o, cfg, ck, 120 << 30, 0.0, Some(own.clone()), Some((0, 2))).unwrap();
+            eprintln!(
+                "{var}: weights {:.2} GiB, pool {} pages ({} admitted tokens), cache {} entries x {:.1} MiB, {} pages of its own, spare {:.2} GiB",
+                gib(p.weight_bytes),
+                p.mo.kv_blocks,
+                p.kv_admitted.1,
+                p.cache.snapshot_slots,
+                p.cache.snapshot_bytes as f64 / 1048576.0,
+                p.cache.page_blocks,
+                gib(p.spare_bytes)
+            );
+            assert!(p.cache.enabled());
+            assert_eq!(p.cache.page_blocks, 0);
+            assert_eq!(p.mo.kv_blocks, 1_048_576 / 256 + 1, "the window once and the slot's page of rounding");
+            assert!(p.kv_admitted.1 >= 1_048_576);
+            // two slots are refused by name
+            let mut o2 = o.clone();
+            o2.slots = 2;
+            let cfg = GlmConfig::from_dir(&o2.model_dir).unwrap();
+            let ck = gb_exl3::checkpoint::scan(&o2.model_dir, false).unwrap();
+            let e = plan_from_split(&o2, cfg, ck, 120 << 30, 0.0, Some(own), Some((0, 2))).err().unwrap().to_string();
+            assert!(e.contains("--prefix-cache pool"), "{e}");
+        }
     }
 
     /// The plan of rank 0 of a KDA-split two-node group (1 slot, `window` tokens of KV, a `mib` MiB cache pin, no tower) at `free_gib` free

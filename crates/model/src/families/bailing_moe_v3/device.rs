@@ -86,9 +86,13 @@ impl Lin {
         )
     }
 
-    /// `y [m, n] = layer(x [m, k])` on the pinned prefill GEMM (any `m >= 1`, row-invariant, any `x_dtype`/`y_dtype`
-    /// pair the rotate kernels support — e.g. BF16 -> F32 for the KDA qkv, F16 -> BF16 for `o`): the prefill chunk's
-    /// batched path instead of the 8-row decode slicing. `scratch` needs `prefill_scratch_bytes(m, k, n)`.
+    /// `y [m, n] = layer(x [m, k])` on the direct-to-MMA tensor-core prefill GEMM (LP3, `glm_p2::ling_linear_parts`):
+    /// the trellis is decoded straight into the MMA's B fragments (even AND odd `k2`: the 1.5 / 2.5 / 3.5-bit widths
+    /// of Ling's dense projections), so no fp16 `W_q` is reconstructed anywhere. `suh` and `svh` are read in place
+    /// from this `Lin`'s own part slices (multi-part `Exl3Group`s: each part's own `suh`/`svh` offsets), no gather.
+    /// Any `m >= 1`, row-invariant, any `x_dtype`/`y_dtype` pair the rotate kernel supports (BF16 -> F32 for the KDA
+    /// qkv, F16 -> BF16 for `o`). `scratch` needs `glm_p2::workspace_bytes(m, k)` bytes. Uses
+    /// `glm_p2::LING_DEFAULT_VARIANT` (Chain), NOT `DEFAULT_VARIANT` (Fold128 for GLM-5.3).
     #[allow(clippy::too_many_arguments)]
     pub fn forward_prefill_pinned(
         &self,
@@ -100,7 +104,7 @@ impl Lin {
         scratch: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
-        Exl3Weights::prefill_pinned_parts(
+        gb_cuda::glm_p2::ling_linear_parts(
             x,
             y,
             m,
@@ -116,6 +120,22 @@ impl Lin {
             scratch,
             st,
         )
+    }
+
+    /// The prefill linear for the wide-chunk path: the direct-to-MMA GEMM writes `y` straight from the trellis,
+    /// without materializing a reconstructed fp16 `W_q`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prefill_auto(
+        &self,
+        x: &DevBuf,
+        y: &mut DevBuf,
+        m: usize,
+        x_dtype: Dtype,
+        y_dtype: Dtype,
+        xh: &mut DevBuf,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        self.forward_prefill_pinned(x, y, m, x_dtype, y_dtype, xh, st)
     }
 }
 

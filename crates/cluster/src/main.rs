@@ -168,6 +168,11 @@ fn load(o: &Opts) -> Result<Cluster, i32> {
 
 /// The groups a command acts on: `--group`, the only group, every group with `--all` (or by default for read-only commands).
 fn pick<'a>(c: &'a Cluster, o: &Opts, many_ok: bool) -> Result<Vec<&'a Group>, i32> {
+    if o.all && !many_ok {
+        // this command acts on one group: taking every group would act on the first one and drop the rest silently
+        eprintln!("error: --all applies to check, status and validate; `{}` acts on one group: name it with --group", o.command);
+        return Err(exit::USAGE);
+    }
     if o.all || (o.group.is_none() && many_ok) {
         return Ok(c.groups.iter().collect());
     }

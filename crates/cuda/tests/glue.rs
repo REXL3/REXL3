@@ -889,6 +889,46 @@ fn small_linear_bit_exact_and_row_invariant() {
     st.sync().unwrap();
 }
 
+/// The fused pair launcher (`small_linear_pair_f16w`) must be bit-identical to two separate `small_linear_f16w`
+/// calls on the same x, for every row count that hits the qfn specialization (1..8, k == 2560) and the generic pair
+/// path (rows > 8; k != 2560), over both real shapes: the GDN (48, 48) pair and the MoE (512, 1) router/shared-gate
+/// pair.
+#[test]
+fn small_linear_pair_bit_exact() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let mut rng = Rng(11);
+    let check = |rng: &mut Rng, st: &Stream, rows: usize, k: usize, n0: usize, n1: usize| {
+        let x = rand_bf16(rng, rows * k);
+        let w0 = f16_bits(&rng.vec(n0 * k, -0.2, 0.2));
+        let w1 = f16_bits(&rng.vec(n1 * k, -0.2, 0.2));
+        let (dx, dw0, dw1) = (up(&x), up(&w0), up(&w1));
+        let (dy0a, dy1a) = (zeros(rows * n0 * 2), zeros(rows * n1 * 2));
+        let (dy0b, dy1b) = (zeros(rows * n0 * 2), zeros(rows * n1 * 2));
+        unsafe {
+            glue::small_linear_f16w(cp(&dx), cp(&dw0), mp(&dy0a), rows, k, n0, st).unwrap();
+            glue::small_linear_f16w(cp(&dx), cp(&dw1), mp(&dy1a), rows, k, n1, st).unwrap();
+            glue::small_linear_pair_f16w(cp(&dx), cp(&dw0), cp(&dw1), mp(&dy0b), mp(&dy1b), rows, k, n0, n1, st).unwrap();
+        }
+        let (y0a, y1a) = (dl::<u16>(&dy0a), dl::<u16>(&dy1a));
+        let (y0b, y1b) = (dl::<u16>(&dy0b), dl::<u16>(&dy1b));
+        assert_eq!(y0b, y0a, "pair y0 differs k={k} rows={rows} n0={n0} n1={n1}");
+        assert_eq!(y1b, y1a, "pair y1 differs k={k} rows={rows} n0={n0} n1={n1}");
+    };
+    for &(n0, n1) in &[(48usize, 48usize), (512, 1)] {
+        for rows in 1..=8 {
+            check(&mut rng, &st, rows, 2560, n0, n1); // qfn specialization
+        }
+        for rows in [9usize, 17, 64] {
+            check(&mut rng, &st, rows, 2560, n0, n1); // generic pair path
+        }
+        for rows in [1usize, 8, 9, 64] {
+            check(&mut rng, &st, rows, 5120, n0, n1); // generic pair path, k != 2560
+        }
+    }
+    st.sync().unwrap();
+}
+
 // ------------------------------------------------------------------------------------------------ top-k
 
 fn topk_ref(row: &[u16], count: usize) -> Vec<(i32, f32)> {
@@ -1509,4 +1549,115 @@ fn bench_glue() {
             (o.len() * 6) as f64 / s / 1e9
         );
     }
+}
+
+/// Per-round savings of the fused pair launcher over two separate `small_linear_f16w` launches, at the exact shapes
+/// the model uses: the GDN `in_proj_a`+`in_proj_b` pair (48, 48) and the MoE `router`+`shared_gate` pair (512, 1).
+/// rows=1 is the MTP-step shape, rows=8 the decode-window shape, rows=64 a prefill chunk.
+#[test]
+#[ignore = "benchmark: cargo test --release -p gb-cuda --test glue -- --ignored --nocapture"]
+fn bench_small_linear_pair() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let mut rng = Rng(1234);
+    println!("(timings are wall-clock over back-to-back launches on one stream; rows=1 is launch-bound)");
+    for &(k, n0, n1, label) in &[(2560usize, 48usize, 48usize, "gdn (48,48)"), (2560, 512, 1, "moe (512,1)")] {
+        for &rows in &[1usize, 8, 64] {
+            let x = rand_bf16(&mut rng, rows * k);
+            let w0 = f16_bits(&rng.vec(n0 * k, -0.2, 0.2));
+            let w1 = f16_bits(&rng.vec(n1 * k, -0.2, 0.2));
+            let (dx, dw0, dw1) = (up(&x), up(&w0), up(&w1));
+            let (dy0, dy1) = (zeros(rows * n0 * 2), zeros(rows * n1 * 2));
+            let iters = if rows == 1 { 20000 } else { 5000 };
+            let sep = bench(&st, iters, || unsafe {
+                glue::small_linear_f16w(cp(&dx), cp(&dw0), mp(&dy0), rows, k, n0, &st).unwrap();
+                glue::small_linear_f16w(cp(&dx), cp(&dw1), mp(&dy1), rows, k, n1, &st).unwrap();
+            });
+            let pair = bench(&st, iters, || unsafe {
+                glue::small_linear_pair_f16w(cp(&dx), cp(&dw0), cp(&dw1), mp(&dy0), mp(&dy1), rows, k, n0, n1, &st).unwrap();
+            });
+            println!(
+                "{label:14} rows={rows:2}: separate {:7.2} us/round  pair {:7.2} us/round  saves {:6.2} us ({:5.1}%)",
+                sep * 1e6,
+                pair * 1e6,
+                (sep - pair) * 1e6,
+                (sep - pair) / sep * 100.0
+            );
+        }
+    }
+}
+
+/// GLM's two embedding gathers (`mhc::embed_expand`, the trunk's; `glm_mtp::mtp_input`, the NextN layer's) from a table at ANY byte
+/// address equal the aligned device copy bit for bit. A safetensors table read in place may start at an odd byte: the RED-SNOW 4.91 bpw
+/// pack's starts 3,563 bytes into a page (3 mod 8). The odd views take the byte kernels, the copy the aligned ones. Device views at
+/// offsets 1, 3, 6 and 11 and a read-only file mapping at the real pack's in-page offset; decode row, window and prefill rows; ids out
+/// of range give zero rows in both.
+#[test]
+fn glm_embedding_gathers_from_a_table_at_any_byte_address_match_the_aligned_copy() {
+    gpu!();
+    use gb_cuda::{glm_mtp, mhc};
+    let st = Stream::new().unwrap();
+    let mut rng = Rng(23);
+    let (vocab, dim) = (1024usize, mhc::HIDDEN);
+    let table = rand_bf16(&mut rng, vocab * dim);
+    let tbytes: Vec<u8> = table.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let copy = up(&table);
+    // device views of the same bytes at odd and unaligned byte offsets
+    let mut odd: Vec<(String, DevBuf, Option<std::sync::Arc<gb_cuda::rt::Block>>)> = Vec::new();
+    for off in [1usize, 3, 6, 11] {
+        let base = DevBuf::zeroed_view(off + tbytes.len() + 64).unwrap();
+        let mut v = base.subview(off, tbytes.len());
+        v.upload(&tbytes).unwrap();
+        assert_ne!(v.ptr() as usize % 8, 0);
+        odd.push((format!("device view at +{off}"), v, None));
+    }
+    let path = std::env::temp_dir().join(format!("rexl3-glm-embed-any-address-{}.bin", std::process::id()));
+    if gb_cuda::rt::pageable_memory_access() {
+        let offset = 4096 + 3563u64;
+        let mut bytes: Vec<u8> = (0..offset).map(|i| (i % 251) as u8).collect();
+        bytes.extend(&tbytes);
+        bytes.extend((0..999).map(|i| (i % 7) as u8));
+        std::fs::write(&path, &bytes).unwrap();
+        let block = std::sync::Arc::new(gb_cuda::rt::Block::map_file_readonly(&path, offset, tbytes.len()).unwrap());
+        let v = DevBuf::view(&block, 0, tbytes.len());
+        assert_eq!(v.ptr() as usize % 8, 3);
+        odd.push(("file mapping at the pack's in-page offset".into(), v, Some(block)));
+    } else {
+        eprintln!("the device does not read pageable memory: the file-mapping case is skipped");
+    }
+    let eps = 1e-5f32;
+    let we: Vec<f32> = (0..dim).map(|i| 0.5 + (i % 13) as f32 / 16.0).collect();
+    let wh: Vec<f32> = (0..dim).map(|i| 0.75 + (i % 7) as f32 / 8.0).collect();
+    let (dwe, dwh) = (up(&we), up(&wh));
+    let mut cases = 0;
+    for rows in [1usize, 64, 512] {
+        let mut ids: Vec<i32> = (0..rows).map(|_| (rng.next_u64() % vocab as u64) as i32).collect();
+        ids[0] = (vocab - 1) as i32;
+        if rows > 4 {
+            ids[1] = 0;
+            ids[2] = -1;
+            ids[3] = vocab as i32;
+        }
+        let di = up(&ids);
+        let hid: Vec<u16> = (0..rows * dim).map(|_| f64_to_f16(rng.next_u64() as f64 / u64::MAX as f64 - 0.5)).collect();
+        let dh = up(&hid);
+        let run = |t: &DevBuf| -> (Vec<u32>, Vec<u16>) {
+            let x = zeros(rows * mhc::ROW * 4);
+            let mut o = zeros(rows * 2 * dim * 2);
+            unsafe { mhc::embed_expand(cp(t), cp(&di), mp(&x) as *mut f32, rows, vocab, &st).unwrap() };
+            glm_mtp::mtp_input(t, &di, &dh, &dwe, &dwh, &mut o, rows, dim, vocab, eps, &st).unwrap();
+            st.sync().unwrap();
+            (x.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect(), o.to_vec::<u16>().unwrap())
+        };
+        let want = run(&copy);
+        assert!(want.0.iter().any(|&b| b != 0) && want.1.iter().any(|&b| b != 0), "degenerate reference");
+        for (name, t, _) in &odd {
+            let got = run(t);
+            assert!(got.0 == want.0, "{name}, {rows} rows: embed_expand differs from the aligned copy");
+            assert!(got.1 == want.1, "{name}, {rows} rows: mtp_input differs from the aligned copy");
+            cases += 1;
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    eprintln!("GLM embedding gathers from tables at any byte address == the aligned copy, bit for bit ({cases} cases)");
 }

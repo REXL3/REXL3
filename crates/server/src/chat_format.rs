@@ -75,6 +75,15 @@ pub trait ChatFormat: Send + Sync {
         "</think>"
     }
 
+    /// Token ids that, when a reply GENERATES one, open a new turn and so end the reply — beyond the tokenizer's eos list
+    /// (`generation_config.json`). The server adds these to the engine's stop set, so a reply that emits one finishes with
+    /// `finish_reason` `stop` instead of running on into a second turn, and `skip_special_tokens` keeps it out of the content
+    /// as it does for an eos. Only generated tokens are matched: a role token that is part of the prompt (the generation
+    /// prompt) is never a stop. The default is none — the eos list is the whole stop set.
+    fn reply_role_stops(&self, _tok: &Tok) -> Vec<u32> {
+        Vec::new()
+    }
+
     /// The reasoning/thinking controls this family's template offers, as data (`docs/REASONING_CAPABILITIES.md`): which
     /// `chat_template_kwargs`, effort levels and reasoning budget a request may use, the markers, the template's default. The server
     /// checks it against the template at load (`reasoning_caps::derive`). `None` (the default): inferred from [`ChatFormat::chat_template`]

@@ -26,6 +26,13 @@ pub struct ScoreStep {
 pub fn unsupported() -> SubmitError {
     SubmitError::Invalid("this model family does not support decisions scoring".into())
 }
+/// The refusal of a `prompt_logprobs` readout (`ScoreRequest { all_rows: true }`) by a backend that reads out only the
+/// prompt's last row, or that does not score at all.
+pub fn rows_unsupported() -> SubmitError {
+    SubmitError::Invalid(
+        "prompt_logprobs (and logprobs/top_logprobs, which request it) is not supported by this model family".into(),
+    )
+}
 pub fn unsupported_backend() -> BackendError {
     BackendError::retryable("this backend does not support full-row scoring")
 }
@@ -36,7 +43,10 @@ impl<B: Backend> Engine<B> {
     pub fn score_validate(&self, req: &ScoreRequest) -> Result<(), SubmitError> {
         // Capability comes first: unsupported families must never reserve or touch backend state.
         if !self.score_supported() {
-            return Err(unsupported());
+            return Err(if req.all_rows { rows_unsupported() } else { unsupported() });
+        }
+        if req.all_rows && !self.backend.score_rows_supported() {
+            return Err(rows_unsupported());
         }
         if req.prompt.is_empty() {
             return Err(SubmitError::Invalid("empty score prompt".into()));

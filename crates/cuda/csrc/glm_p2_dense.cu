@@ -40,15 +40,15 @@ __device__ __forceinline__ float load_scale(const void* p, int f32, int i) {
 
 __device__ __forceinline__ void load4(const void* p, int dtype, size_t i, float (&v)[4]) {
     if (dtype == F32) {
-        const float4 u = *reinterpret_cast<const float4*>(static_cast<const float*>(p) + i);
+        const float4 u = __ldg(reinterpret_cast<const float4*>(static_cast<const float*>(p) + i));
         v[0] = u.x; v[1] = u.y; v[2] = u.z; v[3] = u.w;
     } else if (dtype == BF16) {
-        const uint2 u = *reinterpret_cast<const uint2*>(static_cast<const __nv_bfloat16*>(p) + i);
+        const uint2 u = __ldg(reinterpret_cast<const uint2*>(static_cast<const __nv_bfloat16*>(p) + i));
         const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
         const float2 b = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
         v[0] = a.x; v[1] = a.y; v[2] = b.x; v[3] = b.y;
     } else {
-        const uint2 u = *reinterpret_cast<const uint2*>(static_cast<const half*>(p) + i);
+        const uint2 u = __ldg(reinterpret_cast<const uint2*>(static_cast<const half*>(p) + i));
         const float2 a = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 b = __half22float2(*reinterpret_cast<const half2*>(&u.y));
         v[0] = a.x; v[1] = a.y; v[2] = b.x; v[3] = b.y;
@@ -93,19 +93,27 @@ __device__ __forceinline__ void ldsm_x4(uint32_t (&a)[4], const void* smem) {
 }
 
 // a [M, K] fp16 = (x * suh) H / sqrt(128), fp32 inside, rounded to fp16 once. One warp a 128-wide block of one row.
+// Each block handles 4 consecutive rows: the suh scales are loaded once per k block and reused across the 4 rows.
 __global__ void __launch_bounds__(128) rotate_kernel(const void* __restrict__ x, int x_dtype, long long ldx, const void* __restrict__ suh,
-                                                     int suh_f32, half* __restrict__ a, int K) {
-    const int blk = blockIdx.y * 4 + (threadIdx.x >> 5), row = blockIdx.x, lane = threadIdx.x & 31;
+                                                     int suh_f32, half* __restrict__ a, int M, int K) {
+    const int blk = blockIdx.y * 4 + (threadIdx.x >> 5), r0 = blockIdx.x * 4, lane = threadIdx.x & 31;
     if (blk * 128 >= K) return;
     const int k = blk * 128 + 4 * lane;
-    float v[4];
-    load4(x, x_dtype, (size_t)row * ldx + k, v);
+    float su[4];
+    load4(suh, suh_f32 ? F32 : F16, k, su);
 #pragma unroll
-    for (int j = 0; j < 4; ++j) v[j] *= load_scale(suh, suh_f32, k + j);
-    fwht128(v, lane);
+    for (int rr = 0; rr < 4; ++rr) {
+        const int row = r0 + rr;
+        if (row >= M) break;
+        float v[4];
+        load4(x, x_dtype, (size_t)row * ldx + k, v);
 #pragma unroll
-    for (int j = 0; j < 4; ++j) v[j] *= HAD_SCALE;
-    store4(a, F16, (size_t)row * K + k, v);
+        for (int j = 0; j < 4; ++j) v[j] *= su[j];
+        fwht128(v, lane);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) v[j] *= HAD_SCALE;
+        store4(a, F16, (size_t)row * K + k, v);
+    }
 }
 
 struct GemmArgs {
@@ -216,27 +224,48 @@ __global__ void __launch_bounds__(kThreads, (BM == 64 && !(FOLD && SN == 2)) ? 2
     }
 
     const int lr = (lane & 7) + 8 * ((lane >> 3) & 1), lc = lane >> 4;
+    int l_word, l_offset;
+    lane_start<K2>(lane, l_word, l_offset);
+    int w_idx[LW];
+#pragma unroll
+    for (int i = 0; i < LW; ++i) w_idx[i] = (l_word + i) % TW;
 
+    int stg_r = 0, stg_w = (kStages - 1) % kStages;
 #pragma unroll 1
     for (int kc = 0; kc < KC; ++kc) {
         cp_async_wait<kStages - 2>();
         __syncthreads();
         {
             const int nk = kc + kStages - 1;
-            if (nk < KC) load_stage(nk % kStages, nk);
+            if (nk < KC) load_stage(stg_w, nk);
             cp_async_commit();
         }
+        const int cur_s = stg_r;
+        stg_r = (stg_r == kStages - 1) ? 0 : (stg_r + 1);
+        stg_w = (stg_w == kStages - 1) ? 0 : (stg_w + 1);
         if (!active) continue;
-        const half* sa = stage_a(kc % kStages);
-        const uint32_t* sb = stage_b(kc % kStages);
+        const half* sa = stage_a(cur_s);
+        const uint32_t* sb = stage_b(cur_s);
 #pragma unroll
         for (int kk = 0; kk < kBK / 16; ++kk) {
             uint32_t b[SN][2][2];
 #pragma unroll
             for (int j = 0; j < SN; ++j) {
+                const uint32_t* tile_ptr = sb + (kk * TN + warp * SN + j) * TW;
                 uint32_t w[LW];
-                load_lane_words<K2>(sb + (kk * TN + warp * SN + j) * TW, lane, w);
-                decode_lane<K2, CB>(w, lane, b[j][0], b[j][1]);
+#pragma unroll
+                for (int i = 0; i < LW; ++i) w[i] = tile_ptr[w_idx[i]];
+                const uint32_t c_w = LW > 2 ? w[LW > 2 ? 2 : 0] : 0u;
+                const uint32_t hi = __funnelshift_l(w[1], w[0], l_offset);
+                const uint32_t mid = __funnelshift_l(c_w, w[1], l_offset);
+                const uint32_t lo = c_w << l_offset;
+                uint32_t s[8];
+#pragma unroll
+                for (int q = 0; q < 8; ++q) s[q] = window16(hi, mid, lo, stream_end<K2>(q) - stream_end<K2>(0));
+                b[j][0][0] = decode2<CB>(s[0], s[1]);
+                b[j][0][1] = decode2<CB>(s[2], s[3]);
+                b[j][1][0] = decode2<CB>(s[4], s[5]);
+                b[j][1][1] = decode2<CB>(s[6], s[7]);
             }
 #pragma unroll
             for (int p = 0; p < MT; ++p) {
@@ -351,7 +380,7 @@ int launch_gemm(const GemmArgs& g, cudaStream_t st) {
 // node 4 over the 18 GLM shapes at 512 and 2,048 rows, crates/cuda/tests/glm_p2_dense.rs bench): 128 rows by 1 strip for a big layer
 // (K x N of 32 Mi or more) at 1,024 rows or more (2-5 % over 64 x 1 there: the decoded tile feeds twice the rows), else 64 by 1 (two
 // blocks an SM; the narrow and the short-K layers: 128 x 1 lost up to 12 % on q_b). Its 64 x 2 tile holds twice the accumulators.
-int pick_tile(int m, int k, int n, int fold, int force, int& bm, int& sn) {
+int pick_tile(int m, int k, int n, int fold, int force, int& bm, int& sn, int k2 = 0) {
     if (force) {
         bm = force / 10;
         sn = force % 10;
@@ -362,6 +391,16 @@ int pick_tile(int m, int k, int n, int fold, int force, int& bm, int& sn) {
     if (fold) {
         bm = (m >= 1024 && (long long)k * n >= (32LL << 20)) ? 128 : 64;
         sn = 1;
+        return 0;
+    }
+    // Ling's direct chain at prefill scale: 128 rows by two strips shares each decoded A tile across 256
+    // columns, for the big layers only (2-5 % over 64 x 1 there). Measured on GB10 (Ling-3.1 cold 4K):
+    // 920 tok/s versus 882 at 128 x 1 and 862 on fold128; the narrow and short-K layers lose to 64 x 1.
+    // kda o (4096 x 4096, k2 = 10) also wins at 128 x 2 (3.675 ms vs 3.944 at 64 x 2 in bench_ling_direct_tiles),
+    // while kda f/g (k2 = 7) still prefers 64 x 2 — so wide k2 layers get 128 x 2 from 16 Mi.
+    if (m >= 1024 && ((long long)k * n >= (32LL << 20) || (k2 >= 9 && (long long)k * n >= (16LL << 20)))) {
+        bm = 128;
+        sn = 2;
         return 0;
     }
     const long long blocks2 = (long long)((m + 63) / 64) * ((strips + 1) / 2);
@@ -377,8 +416,9 @@ int dispatch(int bits, int cb, int bm, int sn, const GemmArgs& g, cudaStream_t s
     if (bm == 64) return sn == 1 ? launch_gemm<K2_, CB_, 64, 1, FOLD>(g, st) : launch_gemm<K2_, CB_, 64, 2, FOLD>(g, st); \
     if constexpr (FOLD) return launch_gemm<K2_, CB_, 128, 1, FOLD>(g, st);                                                   \
     else return sn == 1 ? launch_gemm<K2_, CB_, 128, 1, FOLD>(g, st) : launch_gemm<K2_, CB_, 128, 2, FOLD>(g, st);
-    if (cb != CB_MUL1) return (int)cudaErrorInvalidValue;  // GLM's packs are Mul1 throughout
+    if (cb != CB_MUL1) return (int)cudaErrorInvalidValue;  // GLM's and Ling's dense packs are Mul1 throughout
     switch (bits) {
+        case 1: { GP2_T(2, CB_MUL1) }
         case 2: { GP2_T(4, CB_MUL1) }
         case 3: { GP2_T(6, CB_MUL1) }
         case 4: { GP2_T(8, CB_MUL1) }
@@ -386,12 +426,25 @@ int dispatch(int bits, int cb, int bm, int sn, const GemmArgs& g, cudaStream_t s
         case 6: { GP2_T(12, CB_MUL1) }
         case 7: { GP2_T(14, CB_MUL1) }
         case 8: { GP2_T(16, CB_MUL1) }
+        // odd K2 (Ling-3.1's half-integer widths: K2 = 3 is 1.5 bits, 5 is 2.5, 7 is 3.5, 9 is 4.5), named directly so no
+        // integer bit count can alias them. load_lane_words / lane_start / lane_states in exl3_linear_decode.cuh handle the
+        // odd-K2 bit-stream (two values packed into three bits) exactly as gb_exl3_linear_k2 and fmoe's unpack do.
+        case 102: { GP2_T(3, CB_MUL1) }
+        case 103: { GP2_T(5, CB_MUL1) }
+        case 104: { GP2_T(7, CB_MUL1) }
+        case 105: { GP2_T(9, CB_MUL1) }
         default: return (int)cudaErrorInvalidValue;
     }
 #undef GP2_T
 }
 
 bool dtype_ok(int d) { return d >= 0 && d <= 2; }
+
+// maps a Ling K2 (twice the bits) to the dispatch argument of dispatch(): even K2 -> the integer bits; odd K2 -> the 100+case
+// encoding above (101 + bits). GLM callers pass the integer bits themselves (gb_glm_p2_gemm), so their switch is unchanged.
+int bits_code(int k2) {
+    return (k2 & 1) ? 100 + (k2 + 1) / 2 : k2 / 2;
+}
 
 }  // namespace
 
@@ -401,12 +454,37 @@ GB_EXPORT int gb_glm_p2_supported(int k, int n, int bits, int codebook) {
     return shape && bits >= 2 && bits <= 8 && codebook == CB_MUL1;
 }
 
+// The Ling variant: K and N multiples of 128, the Mul1 codebook at any K2 the pack holds, even or odd (1.0 through 8.0 bits,
+// the half-integer widths included; the EXL3 widths 4.5..7.5 bits are accepted by the same stream geometry, only 1.5..3.5
+// appear in Ling's dense packs).
+GB_EXPORT int gb_ling_p2_supported(int k, int n, int k2, int codebook) {
+    const bool shape = k > 0 && n > 0 && k % 128 == 0 && n % 128 == 0;
+    return shape && k2 >= 2 && k2 <= 16 && codebook == CB_MUL1;
+}
+
+// y [m, ldy] = the EXL3 layer of a Ling-3.1 Lin (its trellis/suh/svh parts), any k2, fold128 K order. `ldy` is in elements;
+// `bias` may be null (Ling's dense projections have none). Workspace: the caller runs gb_glm_p2_rotate on its x into an
+// fp16 [m, k] buffer, then calls this (two launches, no W_q reconstruction anywhere).
+GB_EXPORT int gb_ling_p2_gemm(const void* a, const void* trellis, const void* svh, const void* bias, int scale_f32, void* y,
+                              int y_dtype, long long ldy, int m, int k, int n, int k2, int codebook, int fold, int tile_force,
+                              void* stream) {
+    if (m < 1 || !gb_ling_p2_supported(k, n, k2, codebook) || !dtype_ok(y_dtype) || !a || !trellis || !svh || !y || ldy < n)
+        return (int)cudaErrorInvalidValue;
+    GemmArgs g{static_cast<const half*>(a), static_cast<const uint32_t*>(trellis), svh, bias, scale_f32, y, y_dtype, ldy, m, k, n};
+    int bm = 0, sn = 0;
+    const int rc = pick_tile(m, k, n, fold, tile_force, bm, sn, k2);
+    if (rc) return rc;
+    const int bits = bits_code(k2);
+    return fold ? dispatch<true>(bits, codebook, bm, sn, g, gb_stream(stream))
+                : dispatch<false>(bits, codebook, bm, sn, g, gb_stream(stream));
+}
+
 // a [m, k] fp16 = (x * suh) H / sqrt(128); x [m, ldx] of x_dtype (F16 0, BF16 1, F32 2), suh [k] f32 (suh_f32) or fp16.
 GB_EXPORT int gb_glm_p2_rotate(const void* x, int x_dtype, long long ldx, const void* suh, int suh_f32, void* a, int m, int k,
                                void* stream) {
     if (m < 1 || k <= 0 || k % 128 || ldx < k || !dtype_ok(x_dtype) || !x || !suh || !a) return (int)cudaErrorInvalidValue;
-    const dim3 grid((unsigned)m, (unsigned)((k / 128 + 3) / 4));
-    rotate_kernel<<<grid, 128, 0, gb_stream(stream)>>>(x, x_dtype, ldx, suh, suh_f32, static_cast<half*>(a), k);
+    const dim3 grid((unsigned)((m + 3) / 4), (unsigned)((k / 128 + 3) / 4));
+    rotate_kernel<<<grid, 128, 0, gb_stream(stream)>>>(x, x_dtype, ldx, suh, suh_f32, static_cast<half*>(a), m, k);
     return GB_CHECK_LAUNCH();
 }
 

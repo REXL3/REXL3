@@ -6,12 +6,14 @@
 pub mod backend;
 pub mod config;
 pub mod device;
+pub mod dflash;
 pub mod engine;
 pub mod inventory;
 pub mod memory;
 pub mod model;
 pub mod ngram;
 pub mod prefix;
+pub mod spec;
 pub mod weights;
 
 use crate::error::ModelError;

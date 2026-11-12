@@ -498,14 +498,14 @@ dependencies = [
 
 [[package]]
 name = "gb-cluster"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "gb-cuda"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gb-exl3",
  "gb-sampling",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "gb-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gb-sampling",
  "gb-sched",
@@ -523,14 +523,14 @@ dependencies = [
 
 [[package]]
 name = "gb-exl3"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "gb-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "gb-cuda",
@@ -546,8 +546,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gb-quant"
+version = "0.1.1"
+dependencies = [
+ "gb-cuda",
+ "gb-exl3",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "gb-router"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -559,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "gb-sampling"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "sha2",
@@ -567,11 +578,11 @@ dependencies = [
 
 [[package]]
 name = "gb-sched"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "gb-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -601,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "gb-spec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gb-sampling",
  "serde_json",
@@ -609,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "gb-vision"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image-webp",
  "png",

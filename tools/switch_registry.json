@@ -1,0 +1,3253 @@
+{
+ "version": 1,
+ "generated_from": "code scan of crates/ (drift checked by tools/check_switches.py --ci)",
+ "switches": [
+  {
+   "name": "REXL3_ALLOW_UNGATED_COMPONENTS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/serve.rs:715",
+   "controls": "REXL3_ALLOW_UNGATED_COMPONENTS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BENCH_FILTER",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:2334",
+   "controls": "REXL3_BENCH_FILTER",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BENCH_GRID",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:6",
+   "controls": "REXL3_BENCH_GRID",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BENCH_MS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:2301",
+   "controls": "REXL3_BENCH_MS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BENCH_ROUNDS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:2418",
+   "controls": "REXL3_BENCH_ROUNDS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BENCH_SHAPES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs_grid_tree.rs:1",
+   "controls": "REXL3_BENCH_SHAPES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BOOT_DIAG",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/bootdiag.rs:1",
+   "controls": "REXL3_BOOT_DIAG",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_BUILD_COMMIT",
+   "kind": "env",
+   "default": null,
+   "accepted": "not read as the commit (the stamp's variable is REXL3_COMMIT): when set without REXL3_COMMIT the build warns and names REXL3_COMMIT",
+   "reader": "crates/server/build.rs:289",
+   "controls": "build_commit_name_warning",
+   "deprecated": true
+  },
+  {
+   "name": "REXL3_CLUSTER_FILE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/main.rs:33",
+   "controls": "REXL3_CLUSTER_FILE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_COMMIT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/lockstep.rs:544",
+   "controls": "REXL3_COMMIT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_COSTS_WIDE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/spec.rs:613",
+   "controls": "REXL3_COSTS_WIDE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_COST_VOCAB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/spec.rs:298",
+   "controls": "REXL3_COST_VOCAB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_CUDA_ARCH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/build.rs:4",
+   "controls": "REXL3_CUDA_ARCH",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DEBUG_TOKENS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/engine/src/lib.rs:661",
+   "controls": "REXL3_DEBUG_TOKENS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DISABLE_TOKS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/tokenizer.rs:186",
+   "controls": "REXL3_DISABLE_TOKS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DRAFT_BLOCK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dflash2.rs:386",
+   "controls": "REXL3_DRAFT_BLOCK",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DRAFT_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dflash2.rs:1067",
+   "controls": "REXL3_DRAFT_DIR",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DRAFT_PACK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dflash2.rs:1067",
+   "controls": "REXL3_DRAFT_PACK",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DRAFT_VOCAB",
+   "kind": "env",
+   "default": null,
+   "accepted": "full (pre-B6 behaviour)",
+   "reader": "crates/model/src/costs.rs:120",
+   "controls": "draft_vocab",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DSV41_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:93",
+   "controls": "REXL3_DSV41_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_ALLOW_LONG_CTX",
+   "kind": "env",
+   "default": null,
+   "accepted": "1 enables >1M ctx",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:322",
+   "controls": "dsv41_allow_long_ctx",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_CED_REPLAY",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:2510",
+   "controls": "REXL3_DSV41_CED_REPLAY",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_DEVICE_BYTES",
+   "kind": "env",
+   "default": null,
+   "accepted": "integer bytes",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:83",
+   "controls": "dsv41_device_bytes",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_DUMP_FEATS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/vision.rs:370",
+   "controls": "REXL3_DSV41_DUMP_FEATS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_DUMP_HIDDEN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:2643",
+   "controls": "REXL3_DSV41_DUMP_HIDDEN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_DUMP_IX",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dsv4_attn.rs:3598",
+   "controls": "REXL3_DSV41_DUMP_IX",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_ENGRAM_SHARDS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1168",
+   "controls": "REXL3_DSV41_ENGRAM_SHARDS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_ENGRAM_TOKEN_MAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1231",
+   "controls": "REXL3_DSV41_ENGRAM_TOKEN_MAP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_FAST_MOE",
+   "kind": "env",
+   "default": null,
+   "accepted": "1 enables",
+   "reader": "crates/model/src/families/deepseek_v41/device.rs:1000",
+   "controls": "dsv41_fast_moe",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_FLOOR_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "positive float GiB",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:196",
+   "controls": "dsv41_memory_floor",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_FORCE_INDEXER",
+   "kind": "env",
+   "default": null,
+   "accepted": "1/0",
+   "reader": "crates/cuda/src/dsv4_attn.rs:3017",
+   "controls": "dsv41_force_indexer",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_FORWARD_RESERVE_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "float GiB",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:438",
+   "controls": "dsv41_forward_reserve_gib",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_HEADROOM_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "float GiB",
+   "reader": "crates/model/src/families/deepseek_v41/plan.rs:51",
+   "controls": "dsv41_headroom_gib",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_KNOBS_FILE",
+   "kind": "env",
+   "default": null,
+   "accepted": "path to knob JSON",
+   "reader": "crates/cuda/src/dsv4_moe.rs:463",
+   "controls": "dsv41_knobs_file",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_KV",
+   "kind": "env",
+   "default": "q4",
+   "accepted": "fp16|q4",
+   "reader": "crates/cuda/src/dsv4_kvq4.rs:164",
+   "controls": "kv_dtype_dsv41",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_MOE_DUMP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dsv4_moe.rs:1339",
+   "controls": "REXL3_DSV41_MOE_DUMP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_MOE_TOPP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dsv4_moe.rs:460",
+   "controls": "REXL3_DSV41_MOE_TOPP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_MTP_DRAFTS",
+   "kind": "env",
+   "default": null,
+   "accepted": "int",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1040",
+   "controls": "dsv41_mtp_drafts",
+   "deprecated": false,
+   "capability": "spec",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "REXL3_DSV41_MTP_FULL_MARKOV",
+   "kind": "env",
+   "default": null,
+   "accepted": "1 disables heuristic acceptance",
+   "reader": "crates/cuda/src/dsv4_mtp_gpu.rs:1633",
+   "controls": "dsv41_mtp_full_markov",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DSV41_MTP_SCHED",
+   "kind": "env",
+   "default": null,
+   "accepted": "1/0",
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:2336",
+   "controls": "dsv41_mtp_sched",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DSV41_MTP_THRESHOLD",
+   "kind": "env",
+   "default": "0.38",
+   "accepted": "float 0..1",
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:2266",
+   "controls": "dsv41_mtp_threshold",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DSV41_NO_DSA",
+   "kind": "env",
+   "default": null,
+   "accepted": "presence skips compressed attention half",
+   "reader": "crates/cuda/src/dsv4_attn.rs:2653",
+   "controls": "dsv41_no_dsa",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_OP_NAN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:1414",
+   "controls": "REXL3_DSV41_OP_NAN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_OP_TIMING",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:1410",
+   "controls": "REXL3_DSV41_OP_TIMING",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_POST_READY_MARGIN_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "float GiB",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:430",
+   "controls": "dsv41_post_ready_margin_gib",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_PREFIX_SNAPSHOTS",
+   "kind": "env",
+   "default": null,
+   "accepted": "int",
+   "reader": "crates/model/src/families/deepseek_v41/backend.rs:39",
+   "controls": "dsv41_prefix_snapshots",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_DSV41_PROFILE_SLICES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:399",
+   "controls": "REXL3_DSV41_PROFILE_SLICES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_RUNTIME_RESERVE_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "float GiB",
+   "reader": "crates/model/src/families/deepseek_v41/plan.rs:89",
+   "controls": "dsv41_runtime_reserve_gib",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_SPEC_LEARN",
+   "kind": "env",
+   "default": null,
+   "accepted": "1/true/on, 0/false/off",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:309",
+   "controls": "dsv41_spec_learn",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_DSV41_SPEC_TREE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/backend.rs:567",
+   "controls": "REXL3_DSV41_SPEC_TREE",
+   "deprecated": false,
+   "capability": "spec",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "REXL3_DSV41_STEP_TIMING",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:2182",
+   "controls": "REXL3_DSV41_STEP_TIMING",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_TRACE_ALLOC",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/load.rs:880",
+   "controls": "REXL3_DSV41_TRACE_ALLOC",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_DSV41_WINDOW_ROWS",
+   "kind": "env",
+   "default": null,
+   "accepted": "1..=128",
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:305",
+   "controls": "dsv41_window_rows",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ENV",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/script.rs:465",
+   "controls": "REXL3_ENV",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_EXIT_TEST_CHILD",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/exit.rs:57",
+   "controls": "REXL3_EXIT_TEST_CHILD",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_FAST",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/model.rs:361",
+   "controls": "REXL3_FAST",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_FLASH_NEXT_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/inventory.rs:4",
+   "controls": "REXL3_FLASH_NEXT_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_FN_DRAFT_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/dflash.rs:57",
+   "controls": "REXL3_FN_DRAFT_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_FN_REAL",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/model.rs:2010",
+   "controls": "REXL3_FN_REAL",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_FLASH_NEXT_GROUPED_MOE_PREFILL",
+   "kind": "env",
+   "default": "1",
+   "accepted": "0=off (debug opt-out), unset/any other value=on",
+   "reader": "crates/model/src/families/qwen_flash_next/model.rs:440",
+   "controls": "REXL3_FLASH_NEXT_GROUPED_MOE_PREFILL",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_ADAPTIVE_PREFILL",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp.rs:67",
+   "controls": "REXL3_GLM_ADAPTIVE_PREFILL",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_CHUNK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/dump.rs:113",
+   "controls": "REXL3_GLM_CHUNK",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_CHUNK_ROWS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model.rs:738",
+   "controls": "REXL3_GLM_CHUNK_ROWS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_COST_LOG",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/spec.rs:378",
+   "controls": "REXL3_GLM_COST_LOG",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_DIGEST_LOG",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/backend.rs:62",
+   "controls": "REXL3_GLM_DIGEST_LOG",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:959",
+   "controls": "REXL3_GLM_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_DRAFT_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:41",
+   "controls": "REXL3_GLM_DRAFT_GRAPHS",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_GLM_DRAFT_NOISE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/engine/src/mock.rs:1072",
+   "controls": "REXL3_GLM_DRAFT_NOISE",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_GLM_EMBED_IN_PLACE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/bind.rs:858",
+   "controls": "REXL3_GLM_EMBED_IN_PLACE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_FREE_BEFORE_LOAD_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1360",
+   "controls": "REXL3_GLM_FREE_BEFORE_LOAD_GIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:70",
+   "controls": "REXL3_GLM_GRAPHS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_GRAPH_AT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:72",
+   "controls": "REXL3_GLM_GRAPH_AT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_GRAPH_MUTANT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:171",
+   "controls": "REXL3_GLM_GRAPH_MUTANT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_GRAPH_MUTANT_SPIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:149",
+   "controls": "REXL3_GLM_GRAPH_MUTANT_SPIN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_GRAPH_MUTANT_SPIN_AT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:153",
+   "controls": "REXL3_GLM_GRAPH_MUTANT_SPIN_AT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_LONGCTX",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1181",
+   "controls": "REXL3_GLM_LONGCTX",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_LONGCTX_CHUNKS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1291",
+   "controls": "REXL3_GLM_LONGCTX_CHUNKS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_LONGCTX_SHAPES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1353",
+   "controls": "REXL3_GLM_LONGCTX_SHAPES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_OVERLAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:255",
+   "controls": "REXL3_GLM_OVERLAP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_P2_KDA_PIECE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model.rs:201",
+   "controls": "REXL3_GLM_P2_KDA_PIECE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_P2_SHARED_SIDE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model.rs:192",
+   "controls": "REXL3_GLM_P2_SHARED_SIDE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_PDL",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:227",
+   "controls": "REXL3_GLM_PDL",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_PREFILL_CONTRACT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/contract.rs:3",
+   "controls": "REXL3_GLM_PREFILL_CONTRACT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_PROFILE_SLICES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/model.rs:399",
+   "controls": "REXL3_GLM_PROFILE_SLICES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_PW1_SLOTS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1552",
+   "controls": "REXL3_GLM_PW1_SLOTS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_RESERVE_MARGIN_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/memory.rs:62",
+   "controls": "REXL3_GLM_RESERVE_MARGIN_GIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_SC410_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:1107",
+   "controls": "REXL3_GLM_SC410_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_TP_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:483",
+   "controls": "REXL3_GLM_TP_GRAPHS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_TP_SPLIT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/config.rs:73",
+   "controls": "REXL3_GLM_TP_SPLIT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GOLDEN_OUT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:2224",
+   "controls": "REXL3_GOLDEN_OUT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/model.rs:643",
+   "controls": "REXL3_GRAPHS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GRAPH_MUTANT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/graphs.rs:112",
+   "controls": "REXL3_GRAPH_MUTANT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_KERNEL_HASH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/build.rs:8",
+   "controls": "REXL3_KERNEL_HASH",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_KV_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:69",
+   "controls": "REXL3_KV_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_KV_DTYPE",
+   "kind": "env",
+   "default": "fp16",
+   "accepted": "fp16|int8",
+   "reader": "crates/cuda/src/nemotron_attn.rs:114",
+   "controls": "kv_dtype",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/loadctx.rs:6",
+   "controls": "REXL3_LOAD",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD_DIRECT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/loader.rs:97",
+   "controls": "REXL3_LOAD_DIRECT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD_SLOTS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/loader.rs:96",
+   "controls": "REXL3_LOAD_SLOTS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD_SPAN_MIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/loader.rs:96",
+   "controls": "REXL3_LOAD_SPAN_MIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD_THREADS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:1261",
+   "controls": "REXL3_LOAD_THREADS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LOAD_WORKERS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/loader.rs:96",
+   "controls": "REXL3_LOAD_WORKERS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LING_MLA_CONTRACT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/bailing_moe_v3/contract.rs:3",
+   "controls": "REXL3_LING_MLA_CONTRACT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_LING_PREFILL_CONTRACT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/bailing_moe_v3/contract.rs:38",
+   "controls": "REXL3_LING_MLA_CONTRACT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MALLOC_REEXEC",
+   "kind": "env",
+   "default": null,
+   "accepted": "0|off|false|no (disable)",
+   "reader": "crates/server/src/main.rs:673",
+   "controls": "malloc_reexec",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MCV_ROPE_SWEEP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/mrope_canvas.rs:1252",
+   "controls": "REXL3_MCV_ROPE_SWEEP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MEMORY_FLOOR_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/serve.rs:410",
+   "controls": "REXL3_MEMORY_FLOOR_GIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MIMO_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/mimo/inventory.rs:4",
+   "controls": "REXL3_MIMO_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_DOWNSAMPLE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/vision.rs:68",
+   "controls": "REXL3_MINICPM_DOWNSAMPLE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_DRAFT_K",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/spec.rs:444",
+   "controls": "REXL3_MINICPM_DRAFT_K",
+   "deprecated": false,
+   "capability": "spec",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "REXL3_MINICPM_FEATURE_CACHE_MIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/vision.rs:356",
+   "controls": "REXL3_MINICPM_FEATURE_CACHE_MIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_LOGITS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/backend.rs:271",
+   "controls": "REXL3_MINICPM_LOGITS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_MAX_SLICE_NUMS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/vision.rs:65",
+   "controls": "REXL3_MINICPM_MAX_SLICE_NUMS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_PREFILL_MOE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/model.rs:21",
+   "controls": "REXL3_MINICPM_PREFILL_MOE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_RESIZE_PROFILE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/vision.rs:62",
+   "controls": "REXL3_MINICPM_RESIZE_PROFILE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_VIDEO_MAX_SLICE_NUMS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/vision.rs:70",
+   "controls": "REXL3_MINICPM_VIDEO_MAX_SLICE_NUMS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MINICPM_VISION_MAX_PATCHES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/minicpmv4_7/memory.rs:270",
+   "controls": "REXL3_MINICPM_VISION_MAX_PATCHES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_MTP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:69",
+   "controls": "REXL3_MTP",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_MTP_ADAPT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/backend.rs:135",
+   "controls": "REXL3_MTP_ADAPT",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_MTP_CONF",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/model.rs:789",
+   "controls": "REXL3_MTP_CONF",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_MTP_DEPTH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/spec.rs:32",
+   "controls": "REXL3_MTP_DEPTH",
+   "deprecated": false,
+   "capability": "spec",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "REXL3_MTP_K",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/engine.rs:215",
+   "controls": "REXL3_MTP_K",
+   "deprecated": false,
+   "capability": "spec",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "REXL3_MTP_VOCAB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/engine.rs:50",
+   "controls": "REXL3_MTP_VOCAB",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_NCCL_LIB",
+   "kind": "env",
+   "default": null,
+   "accepted": "path to libnccl",
+   "reader": "crates/cluster/src/check.rs:274",
+   "controls": "nccl_lib",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:69",
+   "controls": "REXL3_NEMO_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_ARB_CHAIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/spec.rs:1217",
+   "controls": "REXL3_NEMO_ARB_CHAIN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_ARB_DECAY",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/spec.rs:1218",
+   "controls": "REXL3_NEMO_ARB_DECAY",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_ARB_TABLE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:559",
+   "controls": "REXL3_NEMO_ARB_TABLE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_COSTS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:687",
+   "controls": "REXL3_NEMO_COSTS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_DENSE_MMA",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/nemotron_dense_mma.rs:13",
+   "controls": "REXL3_NEMO_DENSE_MMA",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_DRAFT_GRAPH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/mtp.rs:231",
+   "controls": "REXL3_NEMO_DRAFT_GRAPH",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_NEMO_DRAFT_NOISE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:559",
+   "controls": "REXL3_NEMO_DRAFT_NOISE",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_NEMO_FUSED_DECODE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:83",
+   "controls": "REXL3_NEMO_FUSED_DECODE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/check.rs:730",
+   "controls": "REXL3_NEMO_GRAPHS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_GRAPH_PARTS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/model.rs:1007",
+   "controls": "REXL3_NEMO_GRAPH_PARTS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_HEAD_ON_PREFIX",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/mtp.rs:581",
+   "controls": "REXL3_NEMO_HEAD_ON_PREFIX",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_LAG",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:131",
+   "controls": "REXL3_NEMO_LAG",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_MIXEDK_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/weights.rs:1423",
+   "controls": "REXL3_NEMO_MIXEDK_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_OMNI_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/bridge.rs:1604",
+   "controls": "REXL3_NEMO_OMNI_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_runtime.rs:367",
+   "controls": "REXL3_NEMO_P2TP_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_COMBINE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:261",
+   "controls": "REXL3_NEMO_P2TP_COMBINE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_FUSESPLIT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:259",
+   "controls": "REXL3_NEMO_P2TP_FUSESPLIT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_INPROJ",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:257",
+   "controls": "REXL3_NEMO_P2TP_INPROJ",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_MAMBA_HG",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:243",
+   "controls": "REXL3_NEMO_P2TP_MAMBA_HG",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_OVERLAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:260",
+   "controls": "REXL3_NEMO_P2TP_OVERLAP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_RESID",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/model.rs:856",
+   "controls": "REXL3_NEMO_P2TP_RESID",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_ROUTER",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:238",
+   "controls": "REXL3_NEMO_P2TP_ROUTER",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_SHARED",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:240",
+   "controls": "REXL3_NEMO_P2TP_SHARED",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_YGATHER",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:258",
+   "controls": "REXL3_NEMO_P2TP_YGATHER",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2TP_YOVERLAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/arm_moe.rs:91",
+   "controls": "REXL3_NEMO_P2TP_YOVERLAP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_FUSE_RESID",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/model.rs:841",
+   "controls": "REXL3_NEMO_P2_FUSE_RESID",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_FUSE_SPLIT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/arm_mamba.rs:35",
+   "controls": "REXL3_NEMO_P2_FUSE_SPLIT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_GATED_ROT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/arm_mamba.rs:71",
+   "controls": "REXL3_NEMO_P2_GATED_ROT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_NORM_ROT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/arm_mamba.rs:52",
+   "controls": "REXL3_NEMO_P2_NORM_ROT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_ROUTER_TILED",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/nemotron_moe_mma.rs:210",
+   "controls": "REXL3_NEMO_P2_ROUTER_TILED",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_P2_ZX_BF16",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/arm_mamba.rs:64",
+   "controls": "REXL3_NEMO_P2_ZX_BF16",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_ABSENT_FAST",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/nemotron_moe_prefill.rs:198",
+   "controls": "REXL3_NEMO_PREFILL_ABSENT_FAST",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_BURST",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:863",
+   "controls": "REXL3_NEMO_PREFILL_BURST",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_CONTRACT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/backend.rs:264",
+   "controls": "REXL3_NEMO_PREFILL_CONTRACT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_MMA",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/nemotron_moe_mma.rs:3",
+   "controls": "REXL3_NEMO_PREFILL_MMA",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_ROUTER_MMA",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/contract.rs:55",
+   "controls": "REXL3_NEMO_PREFILL_ROUTER_MMA",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_PREFILL_ROWS_MAX",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/backend.rs:189",
+   "controls": "REXL3_NEMO_PREFILL_ROWS_MAX",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_TAP_DUMP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tapdump.rs:1",
+   "controls": "REXL3_NEMO_TAP_DUMP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_WIDE_DEPTH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/spec.rs:107",
+   "controls": "REXL3_NEMO_WIDE_DEPTH",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NEMO_WINDOW_ROWS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/engine.rs:60",
+   "controls": "REXL3_NEMO_WINDOW_ROWS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NGRAM_WARM",
+   "kind": "env",
+   "default": "auto",
+   "accepted": "0=off, auto=headroom decision, any other value=on",
+   "reader": "crates/model/src/families/qwen_flash_next/engine.rs:179",
+   "controls": "REXL3_NGRAM_WARM",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_NO_CUDA",
+   "kind": "env",
+   "default": null,
+   "accepted": "presence forces stub (CPU) build",
+   "reader": "crates/cuda/build.rs:4",
+   "controls": "build_cuda_stub",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_NVCC_VERSION",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/build.rs:8",
+   "controls": "REXL3_NVCC_VERSION",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_PLE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/device.rs:194",
+   "controls": "REXL3_PLE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_PREFILL_BATCH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:227",
+   "controls": "REXL3_PREFILL_BATCH",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_PREFILL_BURST",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:194",
+   "controls": "REXL3_PREFILL_BURST",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_PREFIX_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:67",
+   "controls": "REXL3_PREFIX_",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_CHECKPOINT",
+   "kind": "env",
+   "default": "0",
+   "accepted": "0 or multiple of 256 tokens",
+   "reader": "crates/cluster/src/schema.rs:1242",
+   "controls": "prefix_cache_checkpoint",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_EVICTION",
+   "kind": "env",
+   "default": "lru",
+   "accepted": "lru|size",
+   "reader": "crates/cluster/src/schema.rs:1242",
+   "controls": "prefix_cache_policy",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_GHOST_GAIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1091",
+   "controls": "REXL3_PREFIX_GHOST_GAIN",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_MIN_CUT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1085",
+   "controls": "REXL3_PREFIX_MIN_CUT",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_MIN_GAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1094",
+   "controls": "REXL3_PREFIX_MIN_GAP",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_PREFIX_TAIL",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/engine.rs:1088",
+   "controls": "REXL3_PREFIX_TAIL",
+   "deprecated": false,
+   "capability": "prefix_cache"
+  },
+  {
+   "name": "REXL3_QSA",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/qwen_flash_next/device.rs:84",
+   "controls": "REXL3_QSA",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_QWEN_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dflash2.rs:2282",
+   "controls": "REXL3_QWEN_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_QWEN_GRAPHS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/window_graph.rs:44",
+   "controls": "REXL3_QWEN_GRAPHS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_QWEN_GRAPH_AT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/window_graph.rs:46",
+   "controls": "REXL3_QWEN_GRAPH_AT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_QWEN_PREFILL_GEMM",
+   "kind": "env",
+   "default": null,
+   "accepted": "pinned (the opt-out: reconstruct W_q + cuBLAS); fused or unset is the default",
+   "reader": "crates/model/src/prefill_p2.rs:28",
+   "controls": "REXL3_QWEN_PREFILL_GEMM",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_REDSNOW_DIR",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:996",
+   "controls": "REXL3_REDSNOW_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_REQUIRE_GPU",
+   "kind": "env",
+   "default": null,
+   "accepted": "1 makes skips fail",
+   "reader": "crates/cuda/src/exl3_linear.rs:1551",
+   "controls": "require_gpu",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp.rs:336",
+   "controls": "REXL3_ROCE_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_BULK_BLOCKS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:232",
+   "controls": "REXL3_ROCE_BULK_BLOCKS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_BULK_MIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:226",
+   "controls": "REXL3_ROCE_BULK_MIN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_CHUNK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:229",
+   "controls": "REXL3_ROCE_CHUNK",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_CHUNK_MIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:229",
+   "controls": "REXL3_ROCE_CHUNK_MIN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_CPU",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:219",
+   "controls": "REXL3_ROCE_CPU",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_GID_INDEX",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:215",
+   "controls": "REXL3_ROCE_GID_INDEX",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_HCA",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:213",
+   "controls": "REXL3_ROCE_HCA",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_ISOLATE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:221",
+   "controls": "REXL3_ROCE_ISOLATE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_MAX_BYTES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:239",
+   "controls": "REXL3_ROCE_MAX_BYTES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_MIN_BYTES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_roce.rs:27",
+   "controls": "REXL3_ROCE_MIN_BYTES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_STRIPE_MIN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:224",
+   "controls": "REXL3_ROCE_STRIPE_MIN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_SUM_MAX_BYTES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:168",
+   "controls": "REXL3_ROCE_SUM_MAX_BYTES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_TC",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:217",
+   "controls": "REXL3_ROCE_TC",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_TIMEOUT_MS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/roce.rs:235",
+   "controls": "REXL3_ROCE_TIMEOUT_MS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROCE_ZERO_COPY",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/model/tp/p2.rs:35",
+   "controls": "REXL3_ROCE_ZERO_COPY",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_ROUTER_ADMIN_TOKEN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/router/src/main.rs:58",
+   "controls": "REXL3_ROUTER_ADMIN_TOKEN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_RUN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/ops.rs:991",
+   "controls": "REXL3_RUN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_SPEC_BUDGET",
+   "kind": "env",
+   "default": null,
+   "accepted": "legacy (pre-B6 behaviour)",
+   "reader": "crates/model/src/costs.rs:115",
+   "controls": "spec_budget",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_SPEC_LEARN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:241",
+   "controls": "REXL3_SPEC_LEARN",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_SPEC_TREE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/forward.rs:624",
+   "controls": "REXL3_SPEC_TREE",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_SWEEP_FULL",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/exl3_linear.rs:1903",
+   "controls": "REXL3_SWEEP_FULL",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TARGET_PACK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cuda/src/dflash2.rs:2282",
+   "controls": "REXL3_TARGET_PACK",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TEST_EXPECT_WORKERS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/vision/src/resize.rs:570",
+   "controls": "REXL3_TEST_EXPECT_WORKERS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:69",
+   "controls": "REXL3_TP_",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_ATTN",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/memory.rs:412",
+   "controls": "REXL3_TP_ATTN",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_COLLECTIVE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp.rs:81",
+   "controls": "REXL3_TP_COLLECTIVE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_COMM",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/tp_arm.rs:64",
+   "controls": "REXL3_TP_COMM",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_CONNECT_TIMEOUT_S",
+   "kind": "env",
+   "default": null,
+   "accepted": "seconds",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:42",
+   "controls": "tp_connect_timeout",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_EXPERT_MAP",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/examples/expert_balance.rs:344",
+   "controls": "REXL3_TP_EXPERT_MAP",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_HEAD",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/mtp.rs:1055",
+   "controls": "REXL3_TP_HEAD",
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "REXL3_TP_INPROJ",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/memory.rs:412",
+   "controls": "REXL3_TP_INPROJ",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_NCCL_PER_NODE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/lockstep.rs:669",
+   "controls": "REXL3_TP_NCCL_PER_NODE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_ONESHOT_MAX_BYTES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:115",
+   "controls": "REXL3_TP_ONESHOT_MAX_BYTES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_PACK",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/exl3/src/tp.rs:442",
+   "controls": "REXL3_TP_PACK",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_PEER",
+   "kind": "env",
+   "default": null,
+   "accepted": "HOST:PORT",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:41",
+   "controls": "tp_peer",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_PEER_TIMEOUT_S",
+   "kind": "env",
+   "default": null,
+   "accepted": "seconds",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:43",
+   "controls": "tp_peer_timeout",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_RANK",
+   "kind": "env",
+   "default": null,
+   "accepted": "int in 0..ranks-1",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:40",
+   "controls": "tp_rank",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_RANKS",
+   "kind": "env",
+   "default": null,
+   "accepted": "positive int",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:40",
+   "controls": "tp_ranks",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_READY_TIMEOUT_S",
+   "kind": "env",
+   "default": null,
+   "accepted": "seconds",
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:42",
+   "controls": "tp_ready_timeout",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_ROCE_FAULT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_roce.rs:21",
+   "controls": "REXL3_TP_ROCE_FAULT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_SPIN_US",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_runtime.rs:886",
+   "controls": "REXL3_TP_SPIN_US",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_TEST_TIMEOUT_S",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_comm.rs:1497",
+   "controls": "REXL3_TP_TEST_TIMEOUT_S",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_TRACE",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/hosttrace.rs:1",
+   "controls": "REXL3_TP_TRACE",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_TRANSPORT",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/deepseek_v41/tp_boot.rs:175",
+   "controls": "REXL3_TP_TRANSPORT",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_VISION_FLAGS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:998",
+   "controls": "REXL3_TP_VISION_FLAGS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_VISION_FREE_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/tp_boot.rs:997",
+   "controls": "REXL3_TP_VISION_FREE_GIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TP_WIRE_BLESS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/nemotron_h_omni/tp_runtime.rs:3250",
+   "controls": "REXL3_TP_WIRE_BLESS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TREE_BRANCH",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:247",
+   "controls": "REXL3_TREE_BRANCH",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TREE_COPY",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:248",
+   "controls": "REXL3_TREE_COPY",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TREE_KERNELS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/forward.rs:194",
+   "controls": "REXL3_TREE_KERNELS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_TREE_NODES",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/costs.rs:247",
+   "controls": "REXL3_TREE_NODES",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_VISION_THREADS",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/vision/src/glm.rs:113",
+   "controls": "REXL3_VISION_THREADS",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_WQ_RESIDENT_GIB",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/plan.rs:52",
+   "controls": "REXL3_WQ_RESIDENT_GIB",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_X",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/cluster/src/schema.rs:1128",
+   "controls": "REXL3_X",
+   "deprecated": false
+  },
+  {
+   "name": "--allow-unvalidated-pack",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:362",
+   "controls": "pack_validation_bypass",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": true,
+   "deprecated": false
+  },
+  {
+   "name": "--backend",
+   "kind": "flag",
+   "default": "cuda",
+   "accepted": "mock|cuda",
+   "reader": "crates/server/src/main.rs:253",
+   "controls": "backend",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--chat-format",
+   "kind": "flag",
+   "default": null,
+   "accepted": "registered format id",
+   "reader": "crates/server/src/main.rs:364",
+   "controls": "chat_format",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--decision-timeout",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds 1..86400",
+   "reader": "crates/server/src/main.rs:370",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--default-max-tokens",
+   "kind": "flag",
+   "default": "16384",
+   "accepted": "int (0 = whole window)",
+   "reader": "crates/server/src/main.rs:264",
+   "controls": "default_max_tokens",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--default-thinking",
+   "kind": "flag",
+   "default": "off",
+   "accepted": "off|template",
+   "reader": "crates/server/src/main.rs:268",
+   "controls": "default_thinking",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--default-reasoning-effort",
+   "kind": "flag",
+   "default": null,
+   "accepted": "effort level the model takes",
+   "reader": "crates/server/src/main.rs:277",
+   "controls": "default_reasoning_effort",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--draft",
+   "kind": "flag",
+   "default": null,
+   "accepted": "pack dir",
+   "reader": "crates/server/src/main.rs:246",
+   "controls": "draft",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--exit-after",
+   "kind": "flag",
+   "default": "10",
+   "accepted": "int >= unready-after",
+   "reader": "crates/server/src/main.rs:402",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--header-read-timeout",
+   "kind": "flag",
+   "default": "30",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:392",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--heartbeat-stale-secs",
+   "kind": "flag",
+   "default": "60",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:383",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--help",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:446",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--host",
+   "kind": "flag",
+   "default": "127.0.0.1",
+   "accepted": "host",
+   "reader": "crates/server/src/main.rs:247",
+   "controls": "host",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--image-preparation-backlog",
+   "kind": "flag",
+   "default": "64",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:327",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-preparation-bytes",
+   "kind": "flag",
+   "default": "2147483648",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:315",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-preparation-deadline",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:335",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-preparation-wait",
+   "kind": "flag",
+   "default": "300",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:331",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-preparation-workers",
+   "kind": "flag",
+   "default": "2",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:323",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-retained-bytes",
+   "kind": "flag",
+   "default": "134217728",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:319",
+   "controls": "image_preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-url-connect-timeout",
+   "kind": "flag",
+   "default": "10",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:306",
+   "controls": "image_urls",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-url-max-bytes",
+   "kind": "flag",
+   "default": "10485760",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:303",
+   "controls": "image_urls",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-url-total-timeout",
+   "kind": "flag",
+   "default": "30",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:311",
+   "controls": "image_urls",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--image-urls",
+   "kind": "flag",
+   "default": "off",
+   "accepted": "on|off",
+   "reader": "crates/server/src/main.rs:296",
+   "controls": "image_urls",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--intervention",
+   "kind": "flag",
+   "default": null,
+   "accepted": "dir",
+   "reader": "crates/server/src/main.rs:363",
+   "controls": "intervention",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--kv-dtype",
+   "kind": "flag",
+   "default": null,
+   "accepted": "fp16|int8|q4 (family-picked)",
+   "reader": "crates/server/src/main.rs:280",
+   "controls": [
+    "kv_dtype",
+    "kv_dtype_dsv41"
+   ],
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--kv-headroom-tokens",
+   "kind": "flag",
+   "default": "0",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:358",
+   "controls": "kv_pool",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--kv-tokens",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:357",
+   "controls": "kv_pool",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--loading-budget",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:386",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-body-mib",
+   "kind": "flag",
+   "default": "64",
+   "accepted": "positive MiB",
+   "reader": "crates/server/src/main.rs:223",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-image-tokens",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:340",
+   "controls": "vision",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-json-depth",
+   "kind": "flag",
+   "default": "128",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:236",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-json-nodes",
+   "kind": "flag",
+   "default": "300000",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:233",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-model-len",
+   "kind": "flag",
+   "default": "262144",
+   "accepted": "positive int",
+   "reader": "crates/server/src/main.rs:249",
+   "controls": "max_model_len",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--max-rendered-prompt-mib",
+   "kind": "flag",
+   "default": null,
+   "accepted": "positive MiB (16 bytes/window token, min 1)",
+   "reader": "crates/server/src/main.rs:225",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-total-request-mib",
+   "kind": "flag",
+   "default": "128",
+   "accepted": "positive MiB",
+   "reader": "crates/server/src/main.rs:224",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-video-frames",
+   "kind": "flag",
+   "default": "32",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:344",
+   "controls": "video",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--max-video-tokens",
+   "kind": "flag",
+   "default": "4096",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:348",
+   "controls": "video",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--mock",
+   "kind": "flag",
+   "default": null,
+   "accepted": "key=value,... (test only)",
+   "reader": "crates/server/src/main.rs:403",
+   "controls": "mock",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--model",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:221",
+   "controls": "model",
+   "boolean": false,
+   "repeatable": false,
+   "required": true,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--model-alias",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:222",
+   "controls": "model_alias",
+   "boolean": false,
+   "repeatable": true,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--no-drafts",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:258",
+   "controls": "drafting",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "capability": "spec",
+   "disables_when_present": true
+  },
+  {
+   "name": "--no-spec-tree",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:369",
+   "controls": "spec_tree",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "capability": "spec",
+   "disables_when_present": true
+  },
+  {
+   "name": "--no-video",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:343",
+   "controls": "video",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--no-vision",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:273",
+   "controls": "vision",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "capability": "vision"
+  },
+  {
+   "name": "--port",
+   "kind": "flag",
+   "default": "8889",
+   "accepted": "port 1..65535",
+   "reader": "crates/server/src/main.rs:248",
+   "controls": "port",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--prefill-budget",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:389",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--prefill-chunk",
+   "kind": "flag",
+   "default": "4096",
+   "accepted": "positive int",
+   "reader": "crates/server/src/main.rs:260",
+   "controls": "prefill_chunk",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--prefix-cache",
+   "kind": "flag",
+   "default": "on",
+   "accepted": "on|off|pool",
+   "reader": "crates/server/src/main.rs:404",
+   "controls": "prefix_cache",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true,
+   "capability": "prefix_cache",
+   "disabling_values": [
+    "off",
+    "auto"
+   ]
+  },
+  {
+   "name": "--prefix-cache-mib",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int MiB (0 disables)",
+   "reader": "crates/server/src/main.rs:411",
+   "controls": "prefix_cache_mib",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "capability": "prefix_cache",
+   "disabling_values": [
+    "0"
+   ]
+  },
+  {
+   "name": "--preparation-concurrency",
+   "kind": "flag",
+   "default": "2",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:242",
+   "controls": "preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--preparation-queue",
+   "kind": "flag",
+   "default": "64",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:239",
+   "controls": "preparation",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--print-crc32",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:366",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--print-fingerprints",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:365",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--processing-reserve-mib",
+   "kind": "flag",
+   "default": null,
+   "accepted": "positive MiB",
+   "reader": "crates/server/src/main.rs:229",
+   "controls": "request_limits",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--queue-depth",
+   "kind": "flag",
+   "default": "64",
+   "accepted": "positive int",
+   "reader": "crates/server/src/main.rs:374",
+   "controls": "queue",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--queue-timeout",
+   "kind": "flag",
+   "default": "300",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:375",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--reasoning-unverified",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:272",
+   "controls": "reasoning_unverified",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": true,
+   "deprecated": false
+  },
+  {
+   "name": "--request-timeout",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:379",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--served-model-name",
+   "kind": "flag",
+   "default": null,
+   "accepted": "model name",
+   "reader": "crates/server/src/main.rs:252",
+   "controls": "served_model_name",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--shutdown-grace",
+   "kind": "flag",
+   "default": "8",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:395",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--slots",
+   "kind": "flag",
+   "default": "8",
+   "accepted": "positive int (family may shrink when unset)",
+   "reader": "crates/server/src/main.rs:254",
+   "controls": "slots",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true
+  },
+  {
+   "name": "--spec",
+   "kind": "flag",
+   "default": "auto",
+   "accepted": "auto|mtp|copy|none",
+   "reader": "crates/server/src/main.rs:259",
+   "controls": "spec_mode",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "contract": true,
+   "capability": "spec",
+   "disabling_values": [
+    "none",
+    "off"
+   ]
+  },
+  {
+   "name": "--spec-tree",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:368",
+   "controls": "spec_tree",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false,
+   "capability": "spec"
+  },
+  {
+   "name": "--tp-connect-timeout",
+   "kind": "flag",
+   "default": "900",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:428",
+   "controls": "tp_connect_timeout",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--tp-peer",
+   "kind": "flag",
+   "default": null,
+   "accepted": "HOST:PORT",
+   "reader": "crates/server/src/main.rs:427",
+   "controls": "tp_peer",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--tp-peer-timeout",
+   "kind": "flag",
+   "default": "15",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:436",
+   "controls": "tp_peer_timeout",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--tp-rank",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int 0..ranks-1",
+   "reader": "crates/server/src/main.rs:423",
+   "controls": "tp_rank",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--tp-ranks",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int (1 = no group)",
+   "reader": "crates/server/src/main.rs:416",
+   "controls": "tp_ranks",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--tp-ready-timeout",
+   "kind": "flag",
+   "default": "1800",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:432",
+   "controls": "tp_ready_timeout",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--unready-after",
+   "kind": "flag",
+   "default": "3",
+   "accepted": "int",
+   "reader": "crates/server/src/main.rs:399",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--verify-pack",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:367",
+   "controls": "verify_pack",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--version",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:440",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--video-evs-strict",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:356",
+   "controls": "video",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--video-pruning-rate",
+   "kind": "flag",
+   "default": "0",
+   "accepted": "float 0..1",
+   "reader": "crates/server/src/main.rs:352",
+   "controls": "video",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--window-rows",
+   "kind": "flag",
+   "default": null,
+   "accepted": "int up to 128",
+   "reader": "crates/server/src/main.rs:263",
+   "controls": "window_rows",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "--write-stall",
+   "kind": "flag",
+   "default": "30",
+   "accepted": "seconds",
+   "reader": "crates/server/src/main.rs:382",
+   "controls": "timeouts",
+   "boolean": false,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "-V",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:440",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  },
+  {
+   "name": "-h",
+   "kind": "flag",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/server/src/main.rs:446",
+   "controls": "diagnostics",
+   "boolean": true,
+   "repeatable": false,
+   "required": false,
+   "gate_bypass": false,
+   "deprecated": false
+  }
+ ]
+}

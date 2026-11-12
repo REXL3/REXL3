@@ -8,6 +8,7 @@
 //! The decode and prefill kernels run against the packed-weight CPU reference and bit-exact row invariance (one row's
 //! result is the same in a call of 1, 7 or 32 rows, at any position, whatever the other rows pick). GPU tests skip when
 //! there is no device.
+#![cfg(not(gb_no_cuda))]
 mod common;
 
 const H: usize = 4096;
@@ -176,9 +177,9 @@ struct Inputs {
 fn inputs() -> Inputs {
     let mut r = Rng(0x51e31);
     Inputs {
-        x: (0..32 * H).map(|_| bf(r.uniform(-2.0, 2.0))).collect(),
-        logits: (0..32 * NE).map(|_| bf(r.uniform(-2.0, 2.0))).collect(),
-        sg: (0..32).map(|_| bf(r.uniform(-1.0, 1.0))).collect(),
+        x: (0..96 * H).map(|_| bf(r.uniform(-2.0, 2.0))).collect(),
+        logits: (0..96 * NE).map(|_| bf(r.uniform(-2.0, 2.0))).collect(),
+        sg: (0..96).map(|_| bf(r.uniform(-1.0, 1.0))).collect(),
         bias: (0..NE).map(|_| r.uniform(-0.5, 0.5)).collect(),
     }
 }
@@ -276,13 +277,18 @@ fn run(o: &Owned, inp: &Inputs, t: usize, routed_limit: f32, shared_limit: f32, 
     let bias = DevBuf::from_slice(&inp.bias).unwrap();
     let gr = fmoe::GroupRoute { expert_bias: Some(&bias), n_group: N_GROUP, topk_group: TOPK_GROUP, scale: SCALE };
     let limits = fmoe::SwigluLimit { routed: routed_limit, shared: shared_limit };
-    let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 32 };
+    let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 96 };
+    // the decode path caps T at 64; t = 80 and 96 are prefill-only, so frost stays empty there
     let mut frost = DevBuf::zeroed(t * H * 2).unwrap();
-    let mut ws = fmoe::workspace(32, TK, H, I, KC).unwrap();
-    fmoe::forward(&x, &logits, &sg, &o.tables(), &mut frost, shape, Some(gr), limits, &mut ws, st).unwrap();
+    if t <= 64 {
+        let mut ws = fmoe::workspace(96, TK, H, I, KC).unwrap();
+        fmoe::forward(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut frost, shape, Some(gr), limits, &mut ws, st)
+            .unwrap();
+    }
     let mut prefill = DevBuf::zeroed(t * H * 2).unwrap();
-    let mut pws = fmoe::prefill_workspace(32, TK, NE, H, I).unwrap();
-    fmoe::prefill(&x, &logits, &sg, &o.tables(), &mut prefill, shape, Some(gr), limits, &mut pws, st).unwrap();
+    let mut pws = fmoe::prefill_workspace(96, TK, NE, H, I).unwrap();
+    fmoe::prefill(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut prefill, shape, Some(gr), limits, &mut pws, st)
+        .unwrap();
     (dl(&frost, st), dl(&prefill, st))
 }
 
@@ -309,14 +315,14 @@ fn legacy_router_row_invariance_probe() {
     let sg = DevBuf::from_slice(&inp.sg).unwrap();
     let mut ws = fmoe::workspace(32, TK, H, I, KC).unwrap();
     let mut out32 = DevBuf::zeroed(32 * H * 2).unwrap();
-    fmoe::forward(&x, &logits, &sg, &o.tables(), &mut out32, shape, None, limits, &mut ws, &st).unwrap();
+    fmoe::forward(&x, &logits, fmoe::LogitsDtype::Bf16, &sg, &o.tables(), &mut out32, shape, None, limits, &mut ws, &st).unwrap();
     let full = dl::<u16>(&out32, &st);
     let shape1 = fmoe::Shape { t: 1, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 32 };
     let x1 = DevBuf::from_slice(&inp.x[..H]).unwrap();
     let l1 = DevBuf::from_slice(&inp.logits[..NE]).unwrap();
     let g1 = DevBuf::from_slice(&inp.sg[..1]).unwrap();
     let mut out1 = DevBuf::zeroed(H * 2).unwrap();
-    fmoe::forward(&x1, &l1, &g1, &o.tables(), &mut out1, shape1, None, limits, &mut ws, &st).unwrap();
+    fmoe::forward(&x1, &l1, fmoe::LogitsDtype::Bf16, &g1, &o.tables(), &mut out1, shape1, None, limits, &mut ws, &st).unwrap();
     let one = dl::<u16>(&out1, &st);
     assert_eq!(&one[..H], &full[..H], "legacy router: row0 of a 1-row call must equal row0 of a 32-row call");
 }
@@ -334,7 +340,9 @@ fn ling31_mixed_k_moe_group_route_swiglu_limit() {
     let sg = DevBuf::from_slice(&inp.sg).unwrap();
     let bias = DevBuf::from_slice(&inp.bias).unwrap();
     let mut ws = DevBuf::zeroed(32 * (TK + 1) * 8 + (NE + 1) * 4).unwrap();
-    let (sel, wts) = fmoe::group_route(&logits, &sg, &bias, SCALE, 32, NE, TK, N_GROUP, TOPK_GROUP, &mut ws, &st).unwrap();
+    let (sel, wts) =
+        fmoe::group_route(&logits, fmoe::LogitsDtype::Bf16, &sg, &bias, SCALE, 32, NE, TK, N_GROUP, TOPK_GROUP, &mut ws, &st)
+            .unwrap();
     for row in 0..32 {
         let l: Vec<f32> = (0..NE).map(|e| bff(inp.logits[row * NE + e])).collect();
         let (want_sel, want_w) = cpu_route_group(&l, &inp.bias, TK, N_GROUP, TOPK_GROUP, SCALE);
@@ -346,28 +354,42 @@ fn ling31_mixed_k_moe_group_route_swiglu_limit() {
         assert!((wts[row * (TK + 1) + TK] - 1.0 / (1.0 + (-bff(inp.sg[row])).exp())).abs() < 1e-6, "shared weight of row {row}");
     }
     for (routed_limit, shared_limit) in [(LIMIT, LIMIT), (0.0, LIMIT), (LIMIT, 0.0), (0.0, 0.0)] {
+        // the 96-row call is the prefill bit-exact baseline: the shared expert holds all 96 entries in one prefill
+        // tile, so n = 96 > 64 exercises the PT = 80 epilogue's upper token half (rows 64..95). Decode caps T at
+        // 64, so its baseline is the 32-row call (the prefill path is the one under the HNJ fix)
+        let (_, prefill96) = run(&o, &inp, 96, routed_limit, shared_limit, &st);
         let (frost, prefill) = run(&o, &inp, 32, routed_limit, shared_limit, &st);
-        // row invariance: a call of t rows equals the first t rows of the 32-row call
-        for t in [1usize, 7, 32] {
+        // row invariance: a call of t rows equals the first t rows of the baseline. t = 80 and t = 96 put the
+        // shared expert at n > 64 (HNJ = 5 at PT = 80), and every routed expert with > 64 entries splits across
+        // tiles exactly as it does at 96 rows
+        for t in [1usize, 7, 32, 64, 80, 96] {
             let (f_s, p_s) = run(&o, &inp, t, routed_limit, shared_limit, &st);
-            if &f_s[..t * H] != &frost[..t * H] {
-                let n = f_s[..t * H].iter().zip(&frost[..t * H]).take_while(|(a, b)| a == b).count();
-                eprintln!(
-                    "decode diff at t={t} limits ({routed_limit},{shared_limit}): first diff elem {n} (f_s={} frost={})",
-                    f_s[n], frost[n]
+            if t <= 64 {
+                // frost is the 32-row decode baseline: compare only the first min(t, 32) rows
+                let td = if t < 32 { t } else { 32 };
+                if &f_s[..td * H] != &frost[..td * H] {
+                    let n = f_s[..td * H].iter().zip(&frost[..td * H]).take_while(|(a, b)| a == b).count();
+                    eprintln!(
+                        "decode diff at t={t} limits ({routed_limit},{shared_limit}): first diff elem {n} (f_s={} frost={})",
+                        f_s[n], frost[n]
+                    );
+                }
+                assert_eq!(
+                    &f_s[..td * H],
+                    &frost[..td * H],
+                    "decode row invariance at t={t} limits ({routed_limit},{shared_limit})"
                 );
             }
-            if &p_s[..t * H] != &prefill[..t * H] {
-                let n = p_s[..t * H].iter().zip(&prefill[..t * H]).take_while(|(a, b)| a == b).count();
+            if &p_s[..t * H] != &prefill96[..t * H] {
+                let n = p_s[..t * H].iter().zip(&prefill96[..t * H]).take_while(|(a, b)| a == b).count();
                 eprintln!(
-                    "prefill diff at t={t} limits ({routed_limit},{shared_limit}): first diff elem {n} (p_s={} prefill={})",
-                    p_s[n], prefill[n]
+                    "prefill diff at t={t} limits ({routed_limit},{shared_limit}): first diff elem {n} (p_s={} prefill96={})",
+                    p_s[n], prefill96[n]
                 );
             }
-            assert_eq!(&f_s[..t * H], &frost[..t * H], "decode row invariance at t={t} limits ({routed_limit},{shared_limit})");
             assert_eq!(
                 &p_s[..t * H],
-                &prefill[..t * H],
+                &prefill96[..t * H],
                 "prefill row invariance at t={t} limits ({routed_limit},{shared_limit})"
             );
         }
@@ -417,6 +439,37 @@ fn ling31_mixed_k_unpack_matches_cpu() {
     let _ = &o.keep;
 }
 
+/// One Ling-shaped MoE layer at cold-prefill scale. This is a timing lane, not a correctness gate:
+/// `cargo test --release -p gb-cuda --test ling31_moe bench_ling31_moe_4096 -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_ling31_moe_4096() {
+    let Some(st) = gpu() else { return };
+    let o = Owned::new();
+    let mut r = Rng(0x51e34);
+    let t = 4096;
+    let x: Vec<u16> = (0..t * H).map(|_| bf(r.uniform(-2.0, 2.0))).collect();
+    let logits: Vec<u16> = (0..t * NE).map(|_| bf(r.uniform(-2.0, 2.0))).collect();
+    let sg: Vec<u16> = (0..t).map(|_| bf(r.uniform(-1.0, 1.0))).collect();
+    let bias: Vec<f32> = (0..NE).map(|_| r.uniform(-0.5, 0.5)).collect();
+    let xb = DevBuf::from_slice(&x).unwrap();
+    let lb = DevBuf::from_slice(&logits).unwrap();
+    let sgb = DevBuf::from_slice(&sg).unwrap();
+    let bb = DevBuf::from_slice(&bias).unwrap();
+    let mut out = DevBuf::zeroed(t * H * 2).unwrap();
+    let mut pws = fmoe::prefill_workspace(t, TK, NE, H, I).unwrap();
+    let gr = fmoe::GroupRoute { expert_bias: Some(&bb), n_group: N_GROUP, topk_group: TOPK_GROUP, scale: SCALE };
+    let limits = fmoe::SwigluLimit { routed: LIMIT, shared: LIMIT };
+    let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: t };
+    for i in 0..8 {
+        let begin = std::time::Instant::now();
+        fmoe::prefill(&xb, &lb, fmoe::LogitsDtype::Bf16, &sgb, &o.tables(), &mut out, shape, Some(gr), limits, &mut pws, &st)
+            .unwrap();
+        st.sync().unwrap();
+        eprintln!("BENCH Ling MoE rows {t} iter {i}: {:.3} ms", begin.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
 /// The server's prefill call shape: T=34 rows with a max_tokens=64 workspace, plus a NaN-logit run that must not fault.
 #[test]
 #[ignore]
@@ -438,10 +491,12 @@ fn ling31_moe_prefill_size34_probe() {
     let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 64 };
     let mut ws = fmoe::workspace(64, TK, H, I, KC).unwrap();
     let mut frost = DevBuf::zeroed(t * H * 2).unwrap();
-    fmoe::forward(&xb, &lb, &sgb, &o.tables(), &mut frost, shape, Some(gr), limits, &mut ws, &st).unwrap();
+    fmoe::forward(&xb, &lb, fmoe::LogitsDtype::Bf16, &sgb, &o.tables(), &mut frost, shape, Some(gr), limits, &mut ws, &st)
+        .unwrap();
     // NaN logits must not fault (the guards clamp bg/bi), even though the weights become NaN
     let lnan: Vec<u16> = (0..t * NE).map(|_| bf(f32::NAN)).collect();
     let lnb = DevBuf::from_slice(&lnan).unwrap();
     let mut frost2 = DevBuf::zeroed(t * H * 2).unwrap();
-    fmoe::forward(&xb, &lnb, &sgb, &o.tables(), &mut frost2, shape, Some(gr), limits, &mut ws, &st).unwrap();
+    fmoe::forward(&xb, &lnb, fmoe::LogitsDtype::Bf16, &sgb, &o.tables(), &mut frost2, shape, Some(gr), limits, &mut ws, &st)
+        .unwrap();
 }

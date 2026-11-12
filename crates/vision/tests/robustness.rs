@@ -389,6 +389,11 @@ fn mutate_webp(seed: &[u8], r: &mut Rng) -> Vec<u8> {
     b
 }
 
+/// The longest one decode of a seeded mutation may take before the run calls it a hang. 10 s in an optimised build, where the
+/// slowest mutation decodes in well under a second; 40 s in the unoptimised build plain `cargo test` makes, where the slowest
+/// JPEG mutation takes 11 to 13 s on an x86 host. Either bound still catches a decoder that never returns.
+const MUTATION_BUDGET: Duration = if cfg!(debug_assertions) { Duration::from_secs(40) } else { Duration::from_secs(10) };
+
 /// All the decoders the server can reach, on `bytes`. Fails the test (naming `what`) on a panic or on a call that takes longer than `budget`.
 fn run(bytes: &[u8], what: &str, budget: Duration) -> Vec<Result<(usize, usize), VisionError>> {
     let q = Preprocessing::qwen38();
@@ -506,7 +511,7 @@ fn seeded_mutations_of_png_files_never_panic_or_hang() {
         let seed = read(n);
         for case in 0..cases() {
             let m = mutate_png(&seed, &mut r);
-            run(&m, &format!("{n} PNG mutation {case}"), Duration::from_secs(10));
+            run(&m, &format!("{n} PNG mutation {case}"), MUTATION_BUDGET);
         }
     }
 }
@@ -518,7 +523,7 @@ fn seeded_mutations_of_jpeg_files_never_panic_or_hang() {
         let seed = read(n);
         for case in 0..cases() {
             let m = mutate_jpeg(&seed, &mut r);
-            run(&m, &format!("{n} JPEG mutation {case}"), Duration::from_secs(10));
+            run(&m, &format!("{n} JPEG mutation {case}"), MUTATION_BUDGET);
         }
     }
 }
@@ -530,7 +535,7 @@ fn seeded_mutations_of_webp_files_never_panic_or_hang() {
         let seed = read(n);
         for case in 0..cases() {
             let m = mutate_webp(&seed, &mut r);
-            run(&m, &format!("{n} WebP mutation {case}"), Duration::from_secs(10));
+            run(&m, &format!("{n} WebP mutation {case}"), MUTATION_BUDGET);
         }
     }
 }

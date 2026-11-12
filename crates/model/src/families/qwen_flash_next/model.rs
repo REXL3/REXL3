@@ -46,10 +46,15 @@ use gb_cuda::{fmoe, fn_glue, fn_moe, glue, hcx, mtpk, ple, qfn_verify, qsa, Cuda
 use gb_engine::RowRequest;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Positions of the PLE conv ring and of the QSA raw-key rings, per slot (both indexed by absolute position mod this).
+#[path = "model_dflash.rs"]
+mod dflash;
+pub use dflash::{tap_buffer_bytes, DflashAsk, DflashState};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Positions of the PLE conv ring and of the QSA raw-key rings, per slot (both indexed by absolute position mod this).
 pub const PLE_RING: usize = 128;
 pub const QSA_RING: usize = 128;
 
@@ -263,12 +268,27 @@ struct WindowKey {
     seq_ends: u64,
     candidates: usize,
     sparse: u64,
+    /// Whether the window kernel folds the previous window's accepted rows in (`gdn::window_owed`).
+    owed: bool,
+    /// Which record set the window fills: the two alternating sets (`recs_pool[0]` / `recs_pool[1]`), and a
+    /// captured graph bakes the record pointers, so the parity is part of the key.
+    rec_par: bool,
     features: GraphFeatures,
     grid: AttnGrid,
 }
 
 impl WindowKey {
     fn for_batch(b: &RowBatch, candidates: usize, grid: AttnGrid, features: GraphFeatures) -> Self {
+        Self::for_batch_owed(b, candidates, grid, features, false, false)
+    }
+    fn for_batch_owed(
+        b: &RowBatch,
+        candidates: usize,
+        grid: AttnGrid,
+        features: GraphFeatures,
+        owed: bool,
+        rec_par: bool,
+    ) -> Self {
         let seq_ends = b.seq_start.iter().skip(1).fold(0, |bits, &end| bits | (1u64 << (end as usize - 1)));
         Self {
             rows: b.rows,
@@ -276,6 +296,8 @@ impl WindowKey {
             seq_ends,
             candidates,
             sparse: sparse_rows(&b.positions, features.qsa_trunk),
+            owed,
+            rec_par,
             features,
             grid,
         }
@@ -363,6 +385,8 @@ pub struct FlashNextModel {
     /// for the columns `mtpk::pick` reads, without evaluating the columns it never reads. `None` when the pack has no
     /// MTP head (the full head is then used and the `pick` domain is still the same prefix).
     draft_lm_head: Option<Exl3Weights>,
+    /// The DFlash2 draft (`--draft`), when one drafts instead of the MTP head ([`FlashNextModel::enable_dflash`]).
+    dflash: Option<DflashState>,
     /// Rows the scratch was sized for: `max(WINDOW_ROWS, opts.prefill_rows)`.
     rows: usize,
     rowidx: RowIndex,
@@ -406,7 +430,23 @@ pub struct FlashNextModel {
     hcx_scratch: DevBuf,
     /// Per GDN layer, the window's record and the raw qkv rows its commit replays.
     win_qkv: Vec<DevBuf>,
-    recs: Vec<Record>,
+    /// Two alternating GDN record sets. The window of parity `p` fills `recs_pool[p]` and replays the previous
+    /// window's accepted rows from `recs_pool[1 - p]` when a commit is deferred into it. The sets are fixed
+    /// allocations (never swapped), so a captured window graph's baked record pointers are stable for a parity.
+    recs_pool: [Vec<Record>; 2],
+    /// A deferred state commit (the S half of `flush`) waiting for the next window kernel: the keep counts, the
+    /// window's row starts (`owed_row0[i]` = where sequence i's rows begin in the previous record) and its slots.
+    /// Contents are stable until the owed replay consumes them (or `apply_owed_state` runs them eagerly).
+    owed_keep: DevBuf,
+    owed_row0: DevBuf,
+    owed_seq_slot: DevBuf,
+    owed_pending: bool,
+    owed_n_seq: usize,
+    owed_rows: usize,
+    owed_slots: Vec<i32>,
+    /// Which of the two record sets the last window filled: alternates every window so the captured window graphs
+    /// (which bake the record pointers) stay consistent with the ping-pong sets.
+    window_par: bool,
     logits: DevBuf,
     topk_ws: DevBuf,
     topk_ids: DevBuf,
@@ -724,9 +764,33 @@ fn g_embed(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn g_small_linear(x: &DevBuf, w: &DevBuf, y: &DevBuf, rows: usize, k: usize, n: usize, st: &Stream) -> Result<(), ModelError> {
-    // SAFETY: bf16 x `[rows, k]`, f16 w `[n, k]`, bf16 y `[rows, n]`.
-    unsafe { glue::small_linear_f16w(x.ptr().cast_const(), w.ptr().cast_const(), y.ptr(), rows, k, n, st) }?;
+fn g_small_linear_pair(
+    x: &DevBuf,
+    w0: &DevBuf,
+    y0: &DevBuf,
+    w1: &DevBuf,
+    y1: &DevBuf,
+    rows: usize,
+    k: usize,
+    n0: usize,
+    n1: usize,
+    st: &Stream,
+) -> Result<(), ModelError> {
+    // SAFETY: bf16 x `[rows, k]`, f16 w0/w1 `[n0, k]`/`[n1, k]`, bf16 y0/y1 `[rows, n0]`/`[rows, n1]`.
+    unsafe {
+        glue::small_linear_pair_f16w(
+            x.ptr().cast_const(),
+            w0.ptr().cast_const(),
+            w1.ptr().cast_const(),
+            y0.ptr(),
+            y1.ptr(),
+            rows,
+            k,
+            n0,
+            n1,
+            st,
+        )
+    }?;
     Ok(())
 }
 
@@ -790,6 +854,11 @@ fn g_attn_prep(
 impl FlashNextModel {
     /// Load the pack in `dir` (weights through `WeightMap`, the n-gram table, its warm read) and allocate every buffer.
     pub fn load(dir: &Path, opts: ModelOptions) -> Result<Self, ModelError> {
+        Self::load_with(dir, opts, true)
+    }
+
+    /// [`FlashNextModel::load`], with the MTP head loaded only when `mtp` (a boot that drafts with a DFlash2 draft leaves it on disk).
+    pub fn load_with(dir: &Path, opts: ModelOptions, mtp: bool) -> Result<Self, ModelError> {
         check_opts(&opts)?;
         let cfg = FlashNextConfig::from_dir(dir).map_err(ModelError::Config)?;
         cfg.check_shapes().map_err(ModelError::Config)?;
@@ -799,7 +868,7 @@ impl FlashNextModel {
                 cfg.rms_norm_eps
             )));
         }
-        let w = FlashNextWeights::load(dir, &cfg, opts.warm, |_, _| {})?;
+        let w = FlashNextWeights::load_with(dir, &cfg, opts.warm, mtp, |_, _| {})?;
         Self::new(cfg, w, opts)
     }
 
@@ -978,7 +1047,18 @@ impl FlashNextModel {
             fmoe_ws: fmoe::workspace(WINDOW_ROWS, top_k, h, interm, fmoe::DEFAULT_KC)?,
             hcx_scratch: DevBuf::zeroed(hcx::scratch_bytes(hc, rank))?,
             win_qkv: (0..lin_layers).map(|_| DevBuf::zeroed(WINDOW_ROWS * gdn::CONV_DIM * 2)).collect::<Result<Vec<_>, _>>()?,
-            recs: (0..lin_layers).map(|_| Record::alloc(WINDOW_ROWS)).collect::<Result<Vec<_>, _>>()?,
+            recs_pool: [
+                (0..lin_layers).map(|_| Record::alloc(WINDOW_ROWS)).collect::<Result<Vec<_>, _>>()?,
+                (0..lin_layers).map(|_| Record::alloc(WINDOW_ROWS)).collect::<Result<Vec<_>, _>>()?,
+            ],
+            owed_keep: DevBuf::zeroed((slots + 1) * 4)?,
+            owed_row0: DevBuf::zeroed((slots + 1) * 4)?,
+            owed_seq_slot: DevBuf::zeroed((slots + 1) * 4)?,
+            owed_pending: false,
+            owed_n_seq: 0,
+            owed_rows: 0,
+            owed_slots: Vec::new(),
+            window_par: false,
             logits: DevBuf::zeroed(WINDOW_ROWS * cfg.vocab * 2)?,
             topk_ws: DevBuf::zeroed(glue::topk_workspace_bytes(WINDOW_ROWS, cfg.vocab, MAX_CANDIDATES))?,
             topk_ids: DevBuf::zeroed(WINDOW_ROWS * MAX_CANDIDATES * 4)?,
@@ -1012,13 +1092,14 @@ impl FlashNextModel {
             conf_dev: DevBuf::zeroed(MAX_DRAFTS * 4)?,
             zero_kv: DevBuf::zeroed(one(has_mtp, KvHeads::Two.token_elems() * 2))?,
             one_row: RowIndex { slot: DevBuf::zeroed(4)?, pos: DevBuf::zeroed(4)?, rows: 1 },
-            mtp_conf: std::env::var("REXL3_MTP_CONF").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            mtp_conf: std::env::var("REXL3_MTP_CONF").ok().and_then(|v| v.parse().ok()).unwrap_or(0.60),
             stack_pos0: 0,
             stack_rows: 0,
             stack_slot: 0,
             mixed_rows: 0,
             last_window: None,
             pending: BTreeMap::new(),
+            dflash: None,
             graphs: HashMap::new(),
             mtp_graphs: HashMap::new(),
             attn_ctx: None,
@@ -1067,6 +1148,7 @@ impl FlashNextModel {
         self.flush()?;
         self.mtp_done.remove(&slot);
         self.pending.remove(&slot);
+        self.dflash_begin(slot);
         self.stack_rows = 0;
         self.mixed_rows = 0;
         self.pools.reset_slot(slot, &self.stream)?;
@@ -1126,6 +1208,7 @@ impl FlashNextModel {
         self.forward(b, Mode::Prefill(path))?;
         self.note_stack(b);
         self.mixed_rows = b.rows;
+        self.dflash_prefill_chunk(b.seq_slot[0] as usize, b.positions[0] as usize, b.rows)?;
         let Some(count) = want else { return Ok(None) };
         self.candidates_of_last_row(b.rows, count)
     }
@@ -1143,14 +1226,30 @@ impl FlashNextModel {
             return Err(ModelError::Request("a Flash-Next window of trees is not built".into()));
         }
         let rows = b.rows;
-        self.flush()?;
+        // commit the previous window: deferred into this window's graph when the sequences match (gdn::window_owed),
+        // eagerly otherwise
+        let owed = self.prepare_owed_for_window(b)?;
         self.last_window = Some(b.clone());
+        self.dflash_new_window();
         self.prepare_batch(b)?;
         self.prepare_ple(b)?;
         self.note_stack(b);
         let live = Self::live_of(b);
-        let key = WindowKey::for_batch(b, count, AttnGrid::cover(live, self.opts.max_context), self.graph_features());
-        self.run_graph(Self::window_graphs, key, live, |m| m.window_body(b, count))?;
+        let key = WindowKey::for_batch_owed(
+            b,
+            count,
+            AttnGrid::cover(live, self.opts.max_context),
+            self.graph_features(),
+            owed,
+            self.window_par,
+        );
+        self.run_graph(Self::window_graphs, key, live, |m| m.window_body(b, count, owed))?;
+        if owed {
+            self.owed_pending = false;
+        }
+        // the completed window's record is now the one a future deferred commit owes; toggle the record parity (the
+        // sets are fixed allocations and the graph key carries the parity, so replayed graphs keep consistent pointers)
+        self.window_par = !self.window_par;
         self.mixed_rows = rows;
         self.sync()?;
         let mut ids = vec![0i32; rows * count];
@@ -1181,14 +1280,30 @@ impl FlashNextModel {
             return Err(ModelError::Request("a Flash-Next window of trees is not built".into()));
         }
         let rows = b.rows;
-        self.flush()?;
+        // commit the previous window: deferred into this window's graph when the sequences match (gdn::window_owed),
+        // eagerly otherwise
+        let owed = self.prepare_owed_for_window(b)?;
         self.last_window = Some(b.clone());
+        self.dflash_new_window();
         self.prepare_batch(b)?;
         self.prepare_ple(b)?;
         self.note_stack(b);
         let live = Self::live_of(b);
-        let key = WindowKey::for_batch(b, count, AttnGrid::cover(live, self.opts.max_context), self.graph_features());
-        self.run_graph(Self::window_graphs, key, live, |m| m.window_body(b, count))?;
+        let key = WindowKey::for_batch_owed(
+            b,
+            count,
+            AttnGrid::cover(live, self.opts.max_context),
+            self.graph_features(),
+            owed,
+            self.window_par,
+        );
+        self.run_graph(Self::window_graphs, key, live, |m| m.window_body(b, count, owed))?;
+        if owed {
+            self.owed_pending = false;
+        }
+        // the completed window's record is now the one a future deferred commit owes; toggle the record parity (the
+        // sets are fixed allocations and the graph key carries the parity, so replayed graphs keep consistent pointers)
+        self.window_par = !self.window_par;
         self.mixed_rows = rows;
         self.sync()?;
         // the window's top-k table is on the device: pack its argmax column and read back only that
@@ -1247,8 +1362,14 @@ impl FlashNextModel {
         self.pending.insert(slot, keep);
     }
 
-    /// Apply pending commits now (before anything reads a slot's state).
+    /// Apply pending commits now (before anything reads a slot's state). A deferred state commit (see
+    /// [`FlashNextModel::prepare_owed_for_window`]) that no window consumed is applied eagerly first.
     pub fn flush(&mut self) -> Result<(), ModelError> {
+        if self.owed_pending {
+            self.apply_owed_state()?;
+        }
+        // the draft's context takes the kept rows before the window is consumed (once per window and slot)
+        self.dflash_absorb_pending()?;
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -1270,10 +1391,11 @@ impl FlashNextModel {
             rows: win.rows,
             n_slots: self.pools.slots,
         };
-        for li in 0..self.recs.len() {
+        let prev = 1 - self.window_par as usize;
+        for li in 0..self.recs_pool[prev].len() {
             gdn::commit(
                 &self.stream,
-                &self.recs[li],
+                &self.recs_pool[prev][li],
                 &self.win_qkv[li],
                 &mut self.pools.s[li],
                 &mut self.pools.conv[li],
@@ -1283,6 +1405,77 @@ impl FlashNextModel {
         }
         self.sync()?;
         Ok(())
+    }
+
+    /// Apply a deferred state commit now (the S half of the commit the previous window still owes), replaying the
+    /// owed rows of each sequence from the previous window's record. Used when no window consumed the defer (a prefill
+    /// or a window over a different batch) or when the defer is explicitly abandoned.
+    fn apply_owed_state(&mut self) -> Result<(), ModelError> {
+        if !self.owed_pending {
+            return Ok(());
+        }
+        let batch = Batch {
+            seq_start: &self.owed_row0,
+            slot: &self.owed_seq_slot,
+            n_seq: self.owed_n_seq,
+            rows: self.owed_rows,
+            n_slots: self.pools.slots,
+        };
+        let prev = 1 - self.window_par as usize;
+        for li in 0..self.recs_pool[prev].len() {
+            gdn::commit_state(&self.stream, &self.recs_pool[prev][li], &mut self.pools.s[li], &batch, &self.owed_keep)?;
+        }
+        self.owed_pending = false;
+        Ok(())
+    }
+
+    /// The single place a window's commit is either deferred into the window's own graph (`gdn::window_owed`,
+    /// which replays the accepted rows while it reads S for the window: S is read once and written once per round
+    /// instead of read by the window and read and written again by a separate commit pass) or run eagerly.
+    /// Returns whether the commit was deferred (the window must run with `owed = true`).
+    ///
+    /// The deferred commit is only safe when the new window's sequences are exactly the previous window's (same
+    /// per-sequence slots and order; the row counts may differ). Otherwise the commit runs eagerly here.
+    fn prepare_owed_for_window(&mut self, b: &RowBatch) -> Result<bool, ModelError> {
+        if self.owed_pending {
+            // a defer from an earlier round was never consumed: apply it before anything else
+            self.apply_owed_state()?;
+        }
+        self.dflash_absorb_pending()?;
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        let Some(win) = self.last_window.as_ref() else {
+            self.pending.clear();
+            return Ok(false);
+        };
+        if win.n_seq() != b.n_seq() || win.seq_slot != b.seq_slot {
+            // the window batch differs from the committed window's: eager commit, no defer
+            self.flush()?;
+            return Ok(false);
+        }
+        let keep: Vec<i32> =
+            win.seq_slot.iter().map(|&sl| self.pending.get(&(sl as usize)).copied().unwrap_or(0) as i32).collect();
+        self.pending.clear();
+        put(&mut self.stage, &mut self.owed_keep, &keep, &self.stream)?;
+        put(&mut self.stage, &mut self.owed_row0, &win.seq_start, &self.stream)?;
+        put(&mut self.stage, &mut self.owed_seq_slot, &win.seq_slot, &self.stream)?;
+        let batch = Batch {
+            seq_start: &self.owed_row0,
+            slot: &self.owed_seq_slot,
+            n_seq: win.n_seq(),
+            rows: win.rows,
+            n_slots: self.pools.slots,
+        };
+        // the conv half runs now: the next window's `pre` reads the conv pool before the window kernel starts
+        for li in 0..self.win_qkv.len() {
+            gdn::commit_conv(&self.stream, &self.win_qkv[li], &mut self.pools.conv[li], &batch, &self.owed_keep)?;
+        }
+        self.owed_pending = true;
+        self.owed_n_seq = win.n_seq();
+        self.owed_rows = win.rows;
+        self.owed_slots = win.seq_slot.clone();
+        Ok(true)
     }
 
     /// After a prefill chunk of `slot` at `first..first + chunk.len()`: the MTP head over every row whose next token is
@@ -1326,12 +1519,15 @@ impl FlashNextModel {
     /// first catches up on every trunk row still in `x_streams` it has not seen (each paired with the token that followed
     /// it), then chains on its own output with the token and position of every step staged on the device, so the whole
     /// chain is one replayable graph and one host read. Drafts after the first one below `REXL3_MTP_CONF` are dropped.
+    /// The default threshold is 0.60 (the decode-benchmark optimum for the shipped 3.35 bpw pack); an explicit
+    /// `REXL3_MTP_CONF` env var overrides it. Greedy verification is lossless regardless of the threshold: it only
+    /// truncates how many draft tokens are proposed.
     pub fn mtp_propose(&mut self, slot: usize, tokens: &[u32], k: usize) -> Result<Vec<u32>, ModelError> {
-        let k = k.min(MAX_DRAFTS);
+        let k_max = k.min(MAX_DRAFTS);
+        let k = k_max;
         if !self.has_mtp() || k == 0 || tokens.len() < 2 || self.stack_rows == 0 || self.stack_slot != slot {
             return Ok(Vec::new());
         }
-        self.flush()?;
         let end = tokens.len() - 1; // trunk positions [start, end) still need their MTP rows
         let start = self.mtp_done.get(&slot).copied().unwrap_or(0).max(self.stack_pos0);
         if end <= start || end > self.stack_pos0 + self.stack_rows || end - start > WINDOW_ROWS || end + k > self.opts.max_context
@@ -1347,6 +1543,17 @@ impl FlashNextModel {
             tokens: tokens[start + 1..=end].to_vec(),
         }]);
         self.prepare_batch(&b)?;
+        // Candidate 1(a): pre-chain multi-gram short-circuit. When the last 4 or 5 committed tokens repeat an
+        // earlier n-gram, the draft chain very likely repeats the same continuation. Truncating the chain to its first two steps still runs
+        // every catch-up MTP row and produces d0 (and usually d1),
+        // skipping k - 2 serial MTP steps (~210.6 MiB of draft weights each). A short-circuit that fails verification costs exactly one verify round,
+        // so the risk is bounded; the win is measured on the decode benchmark.
+        let mut k_chain = k;
+        let pre = if k >= 3 && tokens.len() >= 5 { pld_multigram_bounded(tokens, tokens.len(), k_max, 4) } else { None };
+        if pre.is_some() {
+            k_chain = 2.min(k);
+        }
+        let k = k_chain;
         // pages for the whole chain, and its step positions
         let tail = RowBatch::from_requests(&[RowRequest { slot, first_position: (end + k - 1) as u64, tokens: vec![0] }]);
         self.ensure_pages(&tail)?;
@@ -1370,6 +1577,22 @@ impl FlashNextModel {
                 break;
             }
             drafts.push(ids[j] as u32);
+        }
+        // Preserve the pre-chain continuation whenever every GPU draft agrees with it. In particular, the usual
+        // two-draft case must hand off just like the one-draft low-confidence case; cap the result at `k_max`.
+        if let Some(cont) = pre {
+            extend_pre_chain_continuation(&mut drafts, &cont, k_max);
+        }
+        // Candidate 1(b): multi-gram prompt-lookup continuation (5-gram -> up to 4 tokens, 4-gram -> up to 3, a
+        // high-confidence lone `d0` 3-gram -> up to 2). The continuation is taken strictly from the committed tokens,
+        // never the unverified draft tail. Greedy verification is lossless regardless of match quality.
+        if drafts.len() < k_max && tokens.len() >= 4 && !drafts.is_empty() {
+            let history: Vec<u32> = tokens.iter().copied().chain(drafts.iter().copied()).collect();
+            let room = k_max - drafts.len();
+            let min_gram = if drafts.len() == 1 && conf[0] >= 0.80 { 3 } else { 4 };
+            if let Some(cont) = pld_multigram_bounded(&history, tokens.len(), room, min_gram) {
+                drafts.extend(cont);
+            }
         }
         Ok(drafts)
     }
@@ -1467,14 +1690,19 @@ impl FlashNextModel {
             &self.one_row.slot,
             &self.one_row.pos,
             &self.table.buf,
+            &self.owed_keep,
+            &self.owed_row0,
+            &self.owed_seq_slot,
         ] {
             n += b.bytes() as u64;
         }
+        for pool in &self.recs_pool {
+            for r in pool {
+                n += (r.q.bytes() + r.k.bytes() + r.v.bytes() + r.g_decay.bytes() + r.beta.bytes()) as u64;
+            }
+        }
         for b in &self.win_qkv {
             n += b.bytes() as u64;
-        }
-        for r in &self.recs {
-            n += (r.q.bytes() + r.k.bytes() + r.v.bytes() + r.g_decay.bytes() + r.beta.bytes()) as u64;
         }
         if let Some(p) = &self.moe_pf {
             n += p.bytes() as u64;
@@ -1618,10 +1846,11 @@ impl FlashNextModel {
         self.flush()?;
         if mode == Mode::Window {
             self.last_window = Some(b.clone());
+            self.dflash_new_window();
         }
         self.prepare_batch(b)?;
         self.prepare_ple(b)?;
-        self.compute_layers(b, mode)?;
+        self.compute_layers(b, mode, false)?;
         self.sync()?;
         Ok(())
     }
@@ -1677,6 +1906,7 @@ impl FlashNextModel {
         b: &RowBatch,
         mode: Mode,
         moe_layer: Option<usize>,
+        owed: bool,
     ) -> Result<(), ModelError> {
         let rows = b.rows;
         let h = self.cfg.hidden;
@@ -1696,16 +1926,32 @@ impl FlashNextModel {
                 let qkv_buf = if window { &mut self.win_qkv[li] } else { &mut self.qkv };
                 lin(&m.in_proj_qkv, &self.x_mixed, qkv_buf, rows, mode, &mut self.ws, &mut self.prefill_ws, st)?;
                 lin(&m.in_proj_z, &self.x_mixed, &mut self.z, rows, mode, &mut self.ws, &mut self.prefill_ws, st)?;
-                g_small_linear(&self.x_mixed, &m.in_proj_a, &self.ga, rows, h, gdn::VALUE_HEADS, st)?;
-                g_small_linear(&self.x_mixed, &m.in_proj_b, &self.gb, rows, h, gdn::VALUE_HEADS, st)?;
+                g_small_linear_pair(
+                    &self.x_mixed,
+                    &m.in_proj_a,
+                    &self.ga,
+                    &m.in_proj_b,
+                    &self.gb,
+                    rows,
+                    h,
+                    gdn::VALUE_HEADS,
+                    gdn::VALUE_HEADS,
+                    st,
+                )?;
 
                 let batch =
                     Batch { seq_start: &self.seq_start, slot: &self.seq_slot, n_seq: b.n_seq(), rows, n_slots: self.pools.slots };
                 let wts = PreWeights { conv_w: &m.conv_w, a_log: &m.a_log, dt_bias: &m.dt_bias };
                 if window {
                     let inp = PreInputs { qkv: &self.win_qkv[li], a: &self.ga, b: &self.gb };
-                    gdn::pre(st, &inp, &wts, &self.pools.conv[li], &batch, &mut self.recs[li])?;
-                    gdn::window(st, &self.recs[li], &self.pools.s[li], &batch, &mut self.mixer_out)?;
+                    let cur = self.window_par as usize;
+                    gdn::pre(st, &inp, &wts, &self.pools.conv[li], &batch, &mut self.recs_pool[cur][li])?;
+                    if owed {
+                        let ow = gdn::Owed { rec: &self.recs_pool[1 - cur][li], row0: &self.owed_row0, keep: &self.owed_keep };
+                        gdn::window_owed(st, &self.recs_pool[cur][li], &ow, &mut self.pools.s[li], &batch, &mut self.mixer_out)?;
+                    } else {
+                        gdn::window(st, &self.recs_pool[cur][li], &self.pools.s[li], &batch, &mut self.mixer_out)?;
+                    }
                 } else {
                     let inp = PreInputs { qkv: &self.qkv, a: &self.ga, b: &self.gb };
                     gdn::prefill(
@@ -1896,8 +2142,18 @@ impl FlashNextModel {
 
         // 5. router and shared-expert gate: per row on every path, so a chunk's routing never depends on its row count
         let st = &self.stream;
-        g_small_linear(&self.x_mixed, &layer.moe.router, &self.router_logits, rows, h, num_experts, st)?;
-        g_small_linear(&self.x_mixed, &layer.moe.shared_gate, &self.sh_gate_scalar, rows, h, 1, st)?;
+        g_small_linear_pair(
+            &self.x_mixed,
+            &layer.moe.router,
+            &self.router_logits,
+            &layer.moe.shared_gate,
+            &self.sh_gate_scalar,
+            rows,
+            h,
+            num_experts,
+            1,
+            st,
+        )?;
 
         // 6. the experts. A window groups them across its rows (FrostMoE); a prefill chunk always routes on the device
         // and runs the CoopMK decode, the shared expert riding along as slot `num_experts`.
@@ -1908,6 +2164,7 @@ impl FlashNextModel {
             fmoe::forward(
                 &self.x_mixed,
                 &self.router_logits,
+                fmoe::LogitsDtype::Bf16,
                 &self.sh_gate_scalar,
                 &tables,
                 &mut self.moe_out,
@@ -1979,7 +2236,7 @@ impl FlashNextModel {
         Ok(())
     }
 
-    fn compute_layers(&mut self, b: &RowBatch, mode: Mode) -> Result<(), ModelError> {
+    fn compute_layers(&mut self, b: &RowBatch, mode: Mode, owed: bool) -> Result<(), ModelError> {
         let rows = b.rows;
         let (h, hc) = (self.cfg.hidden, self.cfg.hc_streams);
         let w = Arc::clone(&self.w);
@@ -1995,22 +2252,26 @@ impl FlashNextModel {
             let moe_layer = self.moe_pf.as_ref().map(|_| i);
             match layer.mixer {
                 MixerWeights::Linear(_) => {
-                    self.run_layer(layer, li, None, b, mode, moe_layer)?;
+                    self.run_layer(layer, li, None, b, mode, moe_layer, owed)?;
                     li += 1;
                 }
                 MixerWeights::Full(_) => {
-                    self.run_layer(layer, 0, Some(fi), b, mode, moe_layer)?;
+                    self.run_layer(layer, 0, Some(fi), b, mode, moe_layer, owed)?;
                     fi += 1;
                 }
             }
+            // the DFlash2 draft's tap of this layer's output (nothing without a draft)
+            self.dflash_tap(i, rows)?;
         }
         self.collapse(&w.head_hc.mixer(), mode, rows)
     }
 
     /// The device work of one window: every layer, the full LM head, top-`count` per row. No host sync, no upload.
-    fn window_body(&mut self, b: &RowBatch, count: usize) -> Result<(), ModelError> {
+    /// `owed` folds the previous window's accepted rows into the window kernel (`gdn::window_owed`) instead of a
+    /// separate eager commit pass.
+    fn window_body(&mut self, b: &RowBatch, count: usize, owed: bool) -> Result<(), ModelError> {
         let rows = b.rows;
-        self.compute_layers(b, Mode::Window)?;
+        self.compute_layers(b, Mode::Window, owed)?;
         self.w.lm_head.forward(&self.x_mixed, &mut self.logits, rows, Dtype::BF16, Dtype::BF16, &mut self.ws, &self.stream)?;
         g_topk(&self.logits, rows, self.cfg.vocab, count, &self.topk_ids, &self.topk_vals, &self.topk_ws, &self.stream)
     }
@@ -2105,7 +2366,7 @@ impl FlashNextModel {
         // the decoder layer and the collapse run on the head's stack, swapped into x_streams
         std::mem::swap(&mut self.x_streams, &mut self.mtp_streams);
         let mix = mtp.mixer.as_ref().unwrap_or(&w.head_hc).mixer();
-        let r = self.run_layer(&mtp.layer, 0, None, b, mode, None).and_then(|_| self.collapse(&mix, mode, rows));
+        let r = self.run_layer(&mtp.layer, 0, None, b, mode, None, false).and_then(|_| self.collapse(&mix, mode, rows));
         std::mem::swap(&mut self.x_streams, &mut self.mtp_streams);
         r?;
         // The draft reads only the first MTP_HEAD_N columns; the model's exact draft-head copy evaluates exactly those
@@ -2637,6 +2898,82 @@ mod tests {
         assert_eq!(replayed, eager, "replayed windows / MTP chains differ bit for bit from eager");
     }
 
+    /// Real-pack gate: Finding 5 of the P0-A adversarial review. Consecutive
+    /// `window_candidates_dv` + `commit` + `mtp_propose` rounds: the second window on (and every
+    /// window after it) defers the previous window's commit into its own in-graph `gdn::window_owed`
+    /// fold (`prepare_owed_for_window` returns owed when the pending commit's sequences match the new
+    /// window), so the S-half commit never runs as a standalone pass. `window_par` flips on every
+    /// window, so two deferred windows cover both record parities. The deferred stream must match an
+    /// eager `flush()`-per-round reference bit for bit, across capture and replay, with a stable
+    /// graph count (replay really happens).
+    #[test]
+    fn real_pack_deferred_commit_replay_equals_eager_mtp_rounds() {
+        use std::path::PathBuf;
+        if std::env::var("REXL3_FN_REAL").ok().as_deref() != Some("1") {
+            eprintln!("not run: REXL3_FN_REAL=1 and REXL3_FLASH_NEXT_DIR are required for deferred-commit parity");
+            return;
+        }
+        let dir = PathBuf::from(std::env::var("REXL3_FLASH_NEXT_DIR").expect("set the real-pack directory"));
+        assert!(dir.join("config.json").exists(), "missing real-pack config.json");
+        assert_ne!(std::env::var("REXL3_QSA").ok().as_deref(), Some("0"), "graph threshold parity requires QSA");
+        assert!(gb_cuda::device_available(), "real-pack graph parity needs an idle CUDA device");
+        let opts = ModelOptions { slots: 1, kv_pages: 64, max_context: 8192, prefill_rows: 1024, warm: false };
+
+        // One round = verify window (device-side greedy gather) + commit + MTP propose.
+        // `eager_flush`: run `flush()` between rounds so each window's commit runs eagerly
+        // (`owed=false`); without it the next window defers the commit in-graph (`owed=true`).
+        // Each run loads a fresh model so the record parity (`window_par`) and the deferred-commit
+        // bookkeeping start from the same state, like separate processes would.
+        const N: usize = 128;
+        const ROWS: usize = 3;
+        const KEEP: usize = 2;
+        const CNT: usize = 4;
+        let run = |dir: &PathBuf, graphs: bool, eager_flush: bool| {
+            let mut m = FlashNextModel::load(dir, opts).unwrap();
+            m.use_graphs = graphs;
+            m.begin_slot(0).unwrap();
+            let vocab = m.vocab_size() as u64;
+            let prompt: Vec<u32> = (0..N).map(|i| ((i as u64 * 2_654_435_761) % (vocab - 16) + 8) as u32).collect();
+            let path = PrefillPath::for_prompt(N);
+            let mut last = None;
+            for first in (0..N).step_by(m.opts.prefill_rows) {
+                let end = (first + m.opts.prefill_rows).min(N);
+                let chunk = &prompt[first..end];
+                let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: first as u64, tokens: chunk.to_vec() }]);
+                last = m.prefill_chunk(&b, path, (end == N).then_some(1)).unwrap();
+                m.mtp_after_prefill(0, first, chunk, prompt.get(end).copied(), path).unwrap();
+            }
+            let next = last.unwrap().ids[0] as u32;
+            let mut history = prompt;
+            history.push(next);
+            let _first = m.mtp_propose(0, &history, 4).unwrap();
+            let mut outs: Vec<Vec<(u32, u32)>> = Vec::new();
+            let mut pos = N;
+            for _round in 0..3 {
+                if eager_flush {
+                    m.flush().unwrap(); // consume the pending commit eagerly before the next window
+                }
+                let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: pos as u64, tokens: vec![next; ROWS] }]);
+                let c = m.window_candidates_dv(&b, CNT).unwrap().expect("dv window returns candidates");
+                m.commit(0, KEEP);
+                outs.push(c.ids.iter().zip(&c.vals).map(|(&i, &v)| (i as u32, v.to_bits())).collect());
+                history.extend(vec![next; ROWS]);
+                m.mtp_propose(0, &history, 4).unwrap();
+                pos += ROWS;
+            }
+            (outs, m.graphs.len(), m.mtp_graphs.len())
+        };
+
+        let eager = run(&dir, false, true).0;
+        let captured = run(&dir, true, false);
+        let (gcap, mgcap) = (captured.1, captured.2);
+        assert!(gcap > 0 && mgcap > 0, "capture refused; parity would be vacuous");
+        assert_eq!(captured.0, eager, "deferred commit differs bit for bit from eager flush across MTP rounds");
+        let replayed = run(&dir, true, false);
+        assert_eq!((replayed.1, replayed.2), (gcap, mgcap), "expected replay, not new captures");
+        assert_eq!(replayed.0, eager, "replayed deferred windows differ bit for bit from eager flush");
+    }
+
     /// The one switch a prefill chunk is allowed to make, and the row counts that must not change it.
     #[test]
     fn the_prefill_path_follows_the_prompt_total_and_not_the_chunk() {
@@ -2822,5 +3159,143 @@ mod tests {
         let (a, b, one_round, separate) = differs.unwrap();
         assert_ne!(one_round, separate, "the single cast and a pre-rounded shared differ at ({a}, {b})");
         assert_eq!(bf16_bits(a + b * sig), one_round, "the kernel's expression is the one cast");
+    }
+}
+
+/// Append the unused part of a committed pre-chain continuation only after all GPU drafts agree with its prefix.
+pub fn extend_pre_chain_continuation(drafts: &mut Vec<u32>, cont: &[u32], k_max: usize) {
+    if !drafts.is_empty() && drafts.len() <= cont.len() && drafts.iter().zip(cont).all(|(a, b)| a == b) {
+        let room = k_max.saturating_sub(drafts.len());
+        drafts.extend(cont[drafts.len()..].iter().take(room).copied());
+    }
+}
+
+/// Bounded multi-gram lookup: `committed` is the length of the verified prefix of `history` (the committed tokens).
+/// The matched continuation slice is taken strictly from that prefix (`m + gram + take <= committed`), so a lookup can
+/// never copy out of the unverified draft tail appended to `history` (adversarial review, finding 2.1.2).
+pub fn pld_multigram_bounded(history: &[u32], committed: usize, max_add: usize, min_gram: usize) -> Option<Vec<u32>> {
+    let n = history.len();
+    let committed = committed.min(n);
+    let lo = n.saturating_sub(4096 + 4);
+    for gram in [5usize, 4, 3] {
+        if gram < min_gram || n < gram + 2 || max_add == 0 {
+            continue;
+        }
+        let cap = match gram {
+            5 => 4,
+            4 => 3,
+            _ => 2,
+        };
+        let q = &history[n - gram..];
+        // the match must start early enough that at least one continuation token is committed
+        if committed < gram + 1 {
+            continue;
+        }
+        let hi = (n - gram - 1).min(committed - gram - 1);
+        if lo > hi {
+            continue;
+        }
+        let mut m = hi;
+        loop {
+            if history[m..m + gram] == *q {
+                let take = max_add.min(committed - (m + gram)).min(cap);
+                if take > 0 {
+                    return Some(history[m + gram..m + gram + take].to_vec());
+                }
+                return None;
+            }
+            if m == lo {
+                break;
+            }
+            m -= 1;
+        }
+    }
+    None
+}
+
+/// Multi-gram prompt lookup: try the longest suffix repeat first (5-gram, then 4-gram, then — only when `min_gram`
+/// allows it — 3-gram), returning the tokens that followed the most recent earlier occurrence of the suffix ending at
+/// the last token of `history` (= tokens || drafts). Caps: 4 tokens from a 5-gram, 3 from a 4-gram, 2 from a 3-gram.
+/// A longer match is a stronger predictor of the continuation; a 3-gram match is weak, so it is only used for a
+/// high-confidence lone `d0` (see the caller). Greedy verification is lossless regardless of match quality.
+fn pld_multigram(history: &[u32], max_add: usize, min_gram: usize) -> Option<Vec<u32>> {
+    pld_multigram_bounded(history, history.len(), max_add, min_gram)
+}
+
+#[cfg(test)]
+mod pld_tests {
+    use super::{extend_pre_chain_continuation, pld_multigram, pld_multigram_bounded};
+
+    #[test]
+    fn pre_chain_handoff_accepts_one_or_two_agreeing_gpu_drafts() {
+        for mut drafts in [vec![10], vec![10, 11]] {
+            extend_pre_chain_continuation(&mut drafts, &[10, 11, 12, 13], 6);
+            assert_eq!(drafts, vec![10, 11, 12, 13]);
+        }
+    }
+
+    #[test]
+    fn pre_chain_handoff_rejects_disagreement_and_respects_capacity() {
+        let mut drafts = vec![10, 99];
+        extend_pre_chain_continuation(&mut drafts, &[10, 11, 12], 6);
+        assert_eq!(drafts, vec![10, 99]);
+        let mut drafts = vec![10, 11];
+        extend_pre_chain_continuation(&mut drafts, &[10, 11, 12, 13], 3);
+        assert_eq!(drafts, vec![10, 11, 12]);
+        let mut empty = Vec::new();
+        extend_pre_chain_continuation(&mut empty, &[10, 11], 6);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn bounded_lookup_never_copies_the_draft_tail() {
+        // tokens = [1,2,3,4] with drafts = [5] appended: the only 4-gram match for (1,2,3,4) sits at m = 0 and its
+        // continuation (index 4) is the DRAFT token, not a committed one. The bounded lookup must refuse it.
+        let history = [1u32, 2, 3, 4, 5];
+        assert_eq!(pld_multigram_bounded(&history, 4, 3, 4), None);
+        // with the continuation committed, the same lookup returns it
+        let history = [1u32, 2, 3, 4, 5, 1, 2, 3, 4];
+        assert_eq!(pld_multigram_bounded(&history, 5, 3, 4), Some(vec![5]));
+        // and the continuation is truncated at the committed boundary even when the draft tail extends the match
+        let history = [1u32, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4];
+        assert_eq!(pld_multigram_bounded(&history, 5, 3, 4), Some(vec![5]));
+        assert_eq!(pld_multigram_bounded(&history, 6, 3, 4), Some(vec![5, 6]));
+        assert_eq!(pld_multigram_bounded(&history, 7, 3, 4), Some(vec![5, 6, 7]));
+    }
+
+    #[test]
+    fn multigram_prefers_the_longest_match() {
+        // history = [9, 1,2,3,4,5, 8, 1,2,3,4,5]: both a 4-gram and a 5-gram repeat; the 5-gram's continuation is 8.
+        let h = [9u32, 1, 2, 3, 4, 5, 8, 1, 2, 3, 4, 5];
+        assert_eq!(pld_multigram(&h, 3, 4), Some(vec![8, 1, 2]));
+    }
+
+    #[test]
+    fn multigram_four_gram_caps_at_three() {
+        let h = [7u32, 1, 2, 3, 4, 10, 11, 12, 13, 0, 1, 2, 3, 4];
+        assert_eq!(pld_multigram(&h, 6, 4), Some(vec![10, 11, 12]));
+    }
+
+    #[test]
+    fn multigram_three_gram_needs_the_gate() {
+        let h = [7u32, 1, 2, 3, 10, 11, 12, 0, 1, 2, 3];
+        assert_eq!(pld_multigram(&h, 3, 4), None);
+        assert_eq!(pld_multigram(&h, 3, 3), Some(vec![10, 11]));
+    }
+
+    #[test]
+    fn multigram_never_repeats_the_suffix_itself() {
+        // the only occurrence of the suffix is the query's own tail: no continuation is available.
+        let h = [1u32, 2, 3, 4];
+        assert_eq!(pld_multigram(&h, 3, 3), None);
+        let h = [1u32, 2, 3, 4, 1, 2, 3, 4];
+        assert_eq!(pld_multigram(&h, 3, 4), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn multigram_respects_max_add() {
+        let h = [7u32, 1, 2, 3, 4, 10, 11, 12, 0, 1, 2, 3, 4];
+        assert_eq!(pld_multigram(&h, 1, 4), Some(vec![10]));
+        assert_eq!(pld_multigram(&h, 0, 4), None);
     }
 }

@@ -66,6 +66,8 @@ pub enum Problem {
     },
     /// Something the scan noticed that is not the benign duplicate-resolved-by-the-index case.
     HeaderIssue(String),
+    /// A setting the mapper reads (`load::EMBED_IN_PLACE_ENV`) has a value it does not take.
+    Setting(String),
 }
 
 impl std::fmt::Display for Problem {
@@ -85,6 +87,7 @@ impl std::fmt::Display for Problem {
             Problem::NonUniform { layer, what } => write!(f, "layer {layer}'s routed experts are not uniform: {what}"),
             Problem::Refused { prefix, why } => write!(f, "EXL3 group `{prefix}` was refused by the pack scan: {why}"),
             Problem::HeaderIssue(m) => write!(f, "pack header issue: {m}"),
+            Problem::Setting(m) => write!(f, "{m}"),
         }
     }
 }
@@ -852,6 +855,21 @@ impl GlmWeights {
         own: &gb_cuda::moe::ExpertOwnership,
         vision: bool,
     ) -> Result<GlmWeights, LayoutError> {
+        let in_place = super::load::embed_in_place_from(|k| std::env::var(k).ok())
+            .map_err(|why| LayoutError { problems: vec![Problem::Setting(why)] })?;
+        Self::map_with_embed(inv, cfg, own, vision, in_place)
+    }
+
+    /// [`GlmWeights::map_with`] with the embedding's placement given: `embed_in_place` puts the table in a region of its own that the
+    /// boot maps from its shard instead of allocating (`RegionKind::Mapped`, `load::EMBED_IN_PLACE_ENV`); false is `map_with`'s plan
+    /// exactly as before (the table in the `Global` region).
+    pub fn map_with_embed(
+        inv: &PackInventory,
+        cfg: &GlmConfig,
+        own: &gb_cuda::moe::ExpertOwnership,
+        vision: bool,
+        embed_in_place: bool,
+    ) -> Result<GlmWeights, LayoutError> {
         let mut b = Binder {
             inv,
             cfg,
@@ -880,8 +898,15 @@ impl GlmWeights {
         }
 
         let global = b.region(RegionKind::Global);
-        let embed_tokens =
-            b.plain(&format!("{P}embed_tokens.weight"), PlainDtype::Bf16, &[cfg.vocab, cfg.hidden], global, Category::Embedding);
+        // the embedding read in place (opt-in): a region of its own that the boot maps instead of allocating (`RegionKind::Mapped`)
+        let embed_region = if embed_in_place { b.region(RegionKind::Mapped) } else { global };
+        let embed_tokens = b.plain(
+            &format!("{P}embed_tokens.weight"),
+            PlainDtype::Bf16,
+            &[cfg.vocab, cfg.hidden],
+            embed_region,
+            Category::Embedding,
+        );
         let final_norm =
             b.plain_x(&format!("{P}norm.weight"), PlainDtype::Bf16, &[cfg.hidden], Xform::Bf16ToF32, global, Category::Other);
         let lm_head = b.group("lm_head", cfg.hidden, cfg.vocab, Some(global), Category::Head);

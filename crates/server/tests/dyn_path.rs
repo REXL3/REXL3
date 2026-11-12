@@ -267,9 +267,11 @@ fn a_fatal_backend_error_ends_everything_the_same_way_through_the_erased_and_the
 
 /// An engine whose `quiesce` fails, as a tensor-parallel leader's does when its group was lost while it idled (the device state is
 /// lost), and which says when it is dropped: the engine's destructor is what frees the device buffers, the graphs and the communicator.
+/// With `panics` the `quiesce` panics instead of returning the error.
 struct QuiesceFails {
     inner: Engine<MockBackend>,
     dropped: Arc<std::sync::atomic::AtomicBool>,
+    panics: bool,
 }
 
 impl Drop for QuiesceFails {
@@ -280,6 +282,9 @@ impl Drop for QuiesceFails {
 
 impl ServeEngine for QuiesceFails {
     fn quiesce(&mut self) -> Result<(), String> {
+        if self.panics {
+            panic!("injected panic in quiesce");
+        }
         Err("device state lost: tensor-parallel group lost: the connection to rank 1 failed".into())
     }
     fn validate(&self, req: &Request) -> Result<(), gb_engine::SubmitError> {
@@ -338,8 +343,10 @@ fn drained_with_failing_quiesce(leak: bool) -> (Vec<FatalInfo>, bool) {
     };
     let d = dropped.clone();
     let mock = MockOptions { vocab: VOCAB, ..Default::default() };
-    let (handle, thread) =
-        spawn_with(Box::new(move || Box::new(QuiesceFails { inner: engine(&mock, 2), dropped: d }) as Box<dyn ServeEngine>), cfg);
+    let (handle, thread) = spawn_with(
+        Box::new(move || Box::new(QuiesceFails { inner: engine(&mock, 2), dropped: d, panics: false }) as Box<dyn ServeEngine>),
+        cfg,
+    );
     runtime().block_on(async {
         ready(&handle).await;
         handle.drain(Duration::from_millis(500));
@@ -365,6 +372,115 @@ fn a_failed_quiescence_leaks_the_engine_of_a_group_like_every_other_fatal_exit()
     let (told, dropped) = drained_with_failing_quiesce(false);
     assert_eq!(told.len(), 1);
     assert!(dropped, "a single-process engine is dropped");
+}
+
+/// How an engine thread ends in [`a_panic_leaks_the_engine_of_a_group_like_every_other_fatal_exit`].
+#[derive(Clone, Copy, Debug)]
+enum Panic {
+    /// A step panics (an engine assert, as REXL3/REXL3#91's was) with one request running.
+    InStep,
+    /// `quiesce` panics after a drain of an idle engine.
+    InQuiesce,
+}
+
+/// Runs an engine thread to a panic; returns (what `on_fatal` was told, whether the engine was dropped).
+fn panicked(at: Panic, leak: bool) -> (Vec<FatalInfo>, bool) {
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen: Arc<Mutex<Vec<FatalInfo>>> = Default::default();
+    let hook = seen.clone();
+    let cfg = RuntimeConfig {
+        on_fatal: Arc::new(move |info| hook.lock().unwrap().push(info.clone())),
+        leak_engine_on_fatal: leak,
+        ..Default::default()
+    };
+    let faults = match at {
+        Panic::InStep => Faults { panic_at_step: Some(2), ..Default::default() },
+        Panic::InQuiesce => Faults::default(),
+    };
+    let mock = MockOptions { step_ms: 5, vocab: VOCAB, faults, ..Default::default() };
+    let (d, panics) = (dropped.clone(), matches!(at, Panic::InQuiesce));
+    let (handle, thread) = spawn_with(
+        Box::new(move || Box::new(QuiesceFails { inner: engine(&mock, 2), dropped: d, panics }) as Box<dyn ServeEngine>),
+        cfg,
+    );
+    runtime().block_on(async {
+        ready(&handle).await;
+        match at {
+            Panic::InStep => {
+                let (tx, rx) = unbounded_channel();
+                handle.submit(gen_request(100, 500), tx).await.expect("queued");
+                let r = collect(rx).await;
+                assert!(r.end.contains("EngineDown") && r.end.contains("injected panic at step 2"), "{r:?}");
+            }
+            Panic::InQuiesce => handle.drain(Duration::from_millis(500)),
+        }
+        fatal_reported(&seen).await;
+    });
+    thread.join().unwrap();
+    let told = seen.lock().unwrap().clone();
+    (told, dropped.load(Relaxed))
+}
+
+#[test]
+fn a_panic_leaks_the_engine_of_a_group_like_every_other_fatal_exit() {
+    // REXL3/REXL3#101: the `forget` of a group's engine ran only when `run` or `quiesce` RETURNED a fatal exit. A panic in either
+    // unwound out of the closure past it and dropped the engine (its device buffers, its graphs, the communicator) before `die` had
+    // answered a single request, the drop the flag exists to avoid: on a rank whose peer is lost it can block on the device.
+    // mutation: make `Held::drop` do nothing and the engine is dropped by the unwind here, for both panics.
+    for at in [Panic::InStep, Panic::InQuiesce] {
+        let (told, dropped) = panicked(at, true);
+        assert_eq!(told.len(), 1, "{at:?}: {told:?}");
+        assert!(told[0].panicked && told[0].reason.contains("injected panic"), "{at:?}: {:?}", told[0]);
+        assert_eq!(told[0].exit_code(), 101, "{at:?}");
+        assert!(!dropped, "{at:?}: a group's engine is leaked after a panic too, not dropped by the unwind");
+        // without the flag (every single-process family) nothing changes: the unwind drops the engine, as before
+        let (told, dropped) = panicked(at, false);
+        assert_eq!(told.len(), 1, "{at:?}: {told:?}");
+        assert!(told[0].panicked, "{at:?}: {:?}", told[0]);
+        assert!(dropped, "{at:?}: a single-process engine is dropped");
+    }
+}
+
+#[test]
+fn a_boot_cancelled_after_the_engine_is_built_drops_it_even_in_a_group() {
+    // The guard that leaks a group's engine on a panic starts after the boot's last checkpoint: a stop that arrives while `make` runs
+    // ends at that checkpoint (a `Cancelled` unwind, not a failure), and the engine that was just built is dropped, flag or not.
+    // mutation: hold the engine before that checkpoint and the group's engine is leaked here.
+    for leak in [true, false] {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen: Arc<Mutex<Vec<FatalInfo>>> = Default::default();
+        let hook = seen.clone();
+        let cfg = RuntimeConfig {
+            on_fatal: Arc::new(move |info| hook.lock().unwrap().push(info.clone())),
+            leak_engine_on_fatal: leak,
+            ..Default::default()
+        };
+        let (building_tx, building) = std::sync::mpsc::channel::<()>();
+        let d = dropped.clone();
+        let (handle, thread) = spawn_with(
+            Box::new(move || {
+                let e = QuiesceFails {
+                    inner: engine(&MockOptions { vocab: VOCAB, ..Default::default() }, 2),
+                    dropped: d,
+                    panics: false,
+                };
+                // the build ends only after the stop was asked for (bounded: the test fails below if it never is)
+                building_tx.send(()).unwrap();
+                let t0 = std::time::Instant::now();
+                while !gb_engine::boot::cancel_requested() && t0.elapsed() < Duration::from_secs(30) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Box::new(e) as Box<dyn ServeEngine>
+            }),
+            cfg,
+        );
+        building.recv_timeout(Duration::from_secs(30)).expect("the build started");
+        handle.shutdown();
+        thread.join().unwrap();
+        assert!(seen.lock().unwrap().is_empty(), "leak {leak}: a cancelled boot is not a failure");
+        assert_ne!(handle.metrics.state(), State::Ready, "leak {leak}");
+        assert!(dropped.load(Relaxed), "leak {leak}: the engine of a cancelled boot is dropped");
+    }
 }
 
 #[test]

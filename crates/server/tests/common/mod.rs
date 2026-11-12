@@ -245,10 +245,12 @@ pub fn start(o: Opts) -> Server {
     handle.metrics.observability.slots.store(o.slots as u64, std::sync::atomic::Ordering::Relaxed);
     let reasoning_caps =
         Arc::new(gb_server::reasoning_caps::ReasoningSupport::for_format(&*format, &tok, o.reasoning_unverified));
+    let reply_stop = gb_server::http::reply_stop_set(&tok, &*format);
     let state = Arc::new(AppState {
         handle,
         tok,
         format,
+        reply_stop,
         defaults: GenDefaults::from_dir(&d),
         model_name: "mock".into(),
         model_aliases: o.model_aliases.clone(),

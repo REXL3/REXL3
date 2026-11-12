@@ -210,6 +210,27 @@ pub fn vocab_ranges(prefix_strips: usize, vocab: usize) -> Vec<(usize, usize)> {
     out
 }
 
+/// The device bytes `Exl3Weights::select_strips` allocates for `kept` strips of 128 columns of a bias-free EXL3 linear of `k` input rows at
+/// `bits` (the copy's `weight_bytes`): the kept columns' trellis (`k / 16` x `kept * 8` tiles of `16 * bits` words), the whole fp16 `suh` and the
+/// kept columns' fp16 `svh`. GLM's `lm_head` has no bias; a head with one allocates more and [`GlmModel::mtp_restrict_vocab`] refuses it by name.
+/// `crates/cuda/tests/exl3_split.rs::the_strip_copy_is_priced_to_the_byte` checks this sum against real copies on a GPU.
+pub fn strip_copy_bytes(k: usize, bits: usize, kept: usize) -> usize {
+    (k / 16) * kept * 64 * bits * 4 + k * 2 + kept * 128 * 2
+}
+
+/// The device bytes [`GlmModel::mtp_restrict_vocab`] allocates for the restricted head over `ranges` of an `lm_head` of `k` input rows at `bits`:
+/// the kept strips ([`strip_copy_bytes`]), the decode workspace at `MAX_ROWS` rows, the fp16 logits `[MAX_ROWS][cols]` and the i32 column map.
+/// The planners charge it before the head is built (one node `engine::build_engine`, a rank `tp_boot::plan_from_split`), and the build refuses
+/// an allocation that differs from it (plan == allocations).
+pub fn sub_head_bytes(k: usize, bits: usize, ranges: &[(usize, usize)]) -> u64 {
+    let kept: usize = ranges.iter().map(|&(lo, hi)| hi - lo).sum();
+    let cols = kept * 128;
+    (strip_copy_bytes(k, bits, kept)
+        + gb_cuda::exl3_linear::linear_workspace_bytes(MAX_ROWS, k, cols, bits)
+        + MAX_ROWS * cols * 2
+        + cols * 4) as u64
+}
+
 /// Which vocabulary the drafter's head argmaxes over.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VocabMode {
@@ -505,6 +526,31 @@ impl GlmModel {
         self.mtp.is_some()
     }
 
+    /// The by-name refusal ([`MTP_SHARE`]) of a drafter that would run outside a tensor-parallel group on a NextN layer holding only a
+    /// share of its routed experts (a rank's map before `enable_tp`): its pairs would need the exchange. Checked before any launch, under
+    /// both prefill contracts: at the top of every drafter call (`mtp_block`) and, when the slot drafts, at the top of a prefill
+    /// chunk (`prefill_chunk`), whose trunk forward runs before the drafter's (under P2 the trunk's routed experts on a share outside a
+    /// group would otherwise stop first, on the P2 kernels' unnamed argument check).
+    pub(super) fn mtp_share_refusal(&self) -> Result<(), ModelError> {
+        if self.tp.is_some() || self.mtp.is_none() {
+            return Ok(());
+        }
+        match self.dev.mtp.as_ref().map(|w| &w.moe) {
+            Some(MtpMoe::Subbanks(wm)) if !wm.experts.ownership().is_all() => Err(ModelError::Config(format!(
+                "{MTP_SHARE}: the NextN layer holds {} of its {} routed experts (a tensor-parallel rank's share); its pairs would need the \
+                 exchange",
+                wm.experts.ownership().local(),
+                wm.dims.experts
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether the drafter builds its entries for `slot`'s next prompt chunk (its book is on).
+    pub(super) fn mtp_drafts_slot(&self, slot: usize) -> bool {
+        self.mtp.as_ref().is_some_and(|m| m.book.get(slot).is_some_and(|b| b.ok))
+    }
+
     /// A new sequence in `slot` (called by `begin_slot`).
     pub(super) fn mtp_begin(&mut self, slot: usize) {
         if let Some(m) = &mut self.mtp {
@@ -657,6 +703,8 @@ impl GlmModel {
         mut cap: Option<(&mut MtpCapture, usize)>,
         prompt: bool,
     ) -> Result<(), ModelError> {
+        // a share of the NextN layer's experts outside a group: refused by name before the layer's first launch, under P1 and P2 alike
+        self.mtp_share_refusal()?;
         // a draft call through its graphs (`mtp_draft_group` sets `run_shape` as the marker)
         let shaped = self.run_shape.is_some();
         let GlmModel {
@@ -799,16 +847,9 @@ impl GlmModel {
                 // the rank path (`model/tp/p2.rs`): its pairs and part, the swap, the parts' sum (the shared expert ran above)
                 (moe, Some(t)) => {
                     let ex = match moe {
-                        MtpMoe::Single(wm) => &wm.experts,
-                        MtpMoe::Subbanks(wm) => match wm.experts.banks() {
-                            [b] => b,
-                            _ => {
-                                return Err(ModelError::Config(
-                                    "P2 routed experts of the NextN layer bound as several subbanks on a tensor-parallel rank: not built"
-                                        .into(),
-                                ))
-                            }
-                        },
+                        MtpMoe::Single(wm) => super::tp::P2Experts::Bank(&wm.experts),
+                        // one subbank runs as its bank (as always); a mixed-width NextN share as its subbanks
+                        MtpMoe::Subbanks(wm) => super::tp::P2Experts::of_subbanks(&wm.experts),
                     };
                     t.p2_begin(ex, &s.hidden, rows, &mut pf.moe, st, &mut |_| Ok(()))?;
                     t.p2_finish(ex, &pf.moe, shared, &mut s.mixer_out, st)?;
@@ -887,16 +928,9 @@ impl GlmModel {
                     wm.route(&s.hidden, Dtype::F16, rows, sig, &mut s.moe, st)?;
                     wm.experts_picked(&s.hidden, Dtype::F16, rows, Some(&s.moe_shared_out), &mut s.mixer_out, &mut s.moe, st)?;
                 }
-                // a mixed-width NextN layer (every expert, one node): the subbanks' pairs, then the combine with the shared expert last
+                // a mixed-width NextN layer (every expert, one node; a share was refused at the top, `mtp_share_refusal`): the subbanks'
+                // pairs, then the combine with the shared expert last
                 MtpMoe::Subbanks(wm) => {
-                    if !wm.experts.ownership().is_all() {
-                        return Err(ModelError::Config(format!(
-                        "{MTP_SHARE}: the NextN layer holds {} of its {} routed experts (a tensor-parallel rank's share); its pairs would \
-                         need the exchange",
-                        wm.experts.ownership().local(),
-                        wm.dims.experts
-                    )));
-                    }
                     let os = own_s.as_mut().ok_or_else(|| ModelError::Config("no subbank scratch".into()))?;
                     let d = wm.dims;
                     if big {
@@ -1073,7 +1107,8 @@ impl GlmModel {
 
     /// Restrict the drafter's head to the trunk `lm_head`'s columns of these 128-column strips (`ranges`: half-open, ascending, disjoint, in strips of
     /// 128 token ids; at least 64 strips). The kept columns are bit-identical to the full head's, so a draft is the full head's whenever the full head's
-    /// choice lies inside the set. The copy goes through the host (a boot-time cost); returns the device bytes added. `set_mtp_vocab` turns it on.
+    /// choice lies inside the set. The copy goes through the host (a boot-time cost); returns the device bytes added, which must be [`sub_head_bytes`]
+    /// (what the memory plan charged). `set_mtp_vocab` turns it on.
     pub fn mtp_restrict_vocab(&mut self, ranges: &[(usize, usize)]) -> Result<usize, ModelError> {
         let w = self.dev.lm_head.select_strips(ranges)?;
         let cols = w.n;
@@ -1091,6 +1126,13 @@ impl GlmModel {
         let logits = DevBuf::zeroed(MAX_ROWS * cols * 2)?;
         let map = DevBuf::from_slice(&map)?;
         let bytes = w.weight_bytes() + ws.bytes() + logits.bytes() + map.bytes();
+        // what the planners charged for it: an allocation that differs is a planning bug, refused by name rather than run past the plan
+        let planned = sub_head_bytes(self.dev.lm_head.k, self.dev.lm_head.bits, ranges);
+        if bytes as u64 != planned {
+            return Err(ModelError::Config(format!(
+                "the draft head's vocabulary strips allocate {bytes} bytes, the memory plan charged {planned} (plan != allocations)"
+            )));
+        }
         let m = self.mtp.as_mut().ok_or_else(|| ModelError::Config("the model has no NextN layer".into()))?;
         m.sub = Some(SubHead { w, map, logits, ws, cols, valid, strip_in });
         Ok(bytes)

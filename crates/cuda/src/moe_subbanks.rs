@@ -697,6 +697,11 @@ impl MoeSubbanks {
         &mut self.banks
     }
 
+    /// The subbanks by value (a one-subbank layer's bank as a bank of its own, e.g. a split-width bank in the P2 tests).
+    pub fn into_banks(self) -> Vec<MoeExperts> {
+        self.banks
+    }
+
     /// Bytes of expert weights the subbanks hold (trellises and scales of the owned experts, no padding).
     pub fn expert_bytes(&self) -> usize {
         self.banks.iter().map(|b| b.expert_bytes * b.experts_local()).sum()

@@ -59,6 +59,16 @@ impl KvTables {
         self.pool.free_blocks()
     }
 
+    /// Pages in the pool, free or not.
+    pub fn total_blocks(&self) -> usize {
+        self.pool.total_blocks()
+    }
+
+    /// Pages each slot's table holds (its own and those it shares by reference), by slot.
+    pub fn slot_blocks(&self) -> Vec<usize> {
+        self.tables.iter().map(|t| t.len()).collect()
+    }
+
     pub fn blocks_of(&self, slot: usize) -> &[BlockId] {
         &self.tables[slot]
     }

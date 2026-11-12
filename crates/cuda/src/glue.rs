@@ -168,6 +168,18 @@ mod ffi {
             n: i32,
             s: *mut c_void,
         ) -> i32;
+        pub fn gb_small_linear_pair_f16w(
+            x: *const c_void,
+            w0: *const c_void,
+            w1: *const c_void,
+            y0: *mut c_void,
+            y1: *mut c_void,
+            rows: i32,
+            k: i32,
+            n0: i32,
+            n1: i32,
+            s: *mut c_void,
+        ) -> i32;
         pub fn gb_small_linear_f16w_rows(
             x: *const c_void,
             w: *const c_void,
@@ -447,6 +459,24 @@ pub unsafe fn small_linear_f16w_rows(
     stream: &Stream,
 ) -> Result<(), CudaError> {
     CudaError::check(ffi::gb_small_linear_f16w_rows(x, w, y, i(rows)?, i(k)?, i(n)?, stream.raw()))
+}
+
+/// One launch for two small linears on the same x: `y0 = bf16(x w0^T)` and `y1 = bf16(x w1^T)`, bit for bit the same
+/// as two [`small_linear_f16w`] calls. x bf16 `[rows, k]`, w0/w1 f16 `[n0, k]`/`[n1, k]`, y0/y1 bf16
+/// `[rows, n0]`/`[rows, n1]`. `k % 8 == 0`, x, w0 and w1 16-byte aligned.
+pub unsafe fn small_linear_pair_f16w(
+    x: *const c_void,
+    w0: *const c_void,
+    w1: *const c_void,
+    y0: *mut c_void,
+    y1: *mut c_void,
+    rows: usize,
+    k: usize,
+    n0: usize,
+    n1: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    CudaError::check(ffi::gb_small_linear_pair_f16w(x, w0, w1, y0, y1, i(rows)?, i(k)?, i(n0)?, i(n1)?, stream.raw()))
 }
 
 /// [`small_linear_f16w_rows`] with f32 output (the unrounded accumulator, as [`small_linear_f16w_f32out`]).

@@ -12,15 +12,21 @@ This is the production repository (`REXL3/REXL3`). It holds sealed, data-only ru
 
 If your user asked you to set up, run, benchmark, troubleshoot, or prototype a fix/improvement on a released REXL3 model on an NVIDIA GB10 (DGX Spark class, Ubuntu 24.04 ARM64) host, start here.
 
-### 1. `v0.1.0` model map (trees, runtime IDs, profiles, ports, and pack sheets)
+### 1. `v0.1.1` model map (trees, runtime IDs, profiles, ports, and pack sheets)
+
+The v0.1.1 trees are sealed on engine commit `75031112`; until the `v0.1.1` tag is published, the `v0.1.0` release (engine `afc9b5df`) holds the earlier versions of these models.
 
 | Family / Model | Prod Tree | `runtime_id` | Default Profile (`--profile`) | Context | Port | Served `model` ID (`GET /v1/models`) | Pack Sheet |
 |---|---|---|---|---|---|---|---|
-| `qwen3.8/qwen3.8-27b` | `runtimes/qwen3.8/qwen3.8-27b/v3` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` | `262,144` (1 node) | `8889` | `qwen38-27b-exl3` | [docs/packs/qwen3.8-27b.md](docs/packs/qwen3.8-27b.md) |
-| `qwen3.8/qwen3.8-flash-next` | `runtimes/qwen3.8/qwen3.8-flash-next/v2` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` | `262,144` (1 node) | `8899` | `default` | [docs/packs/qwen3.8-flash-next.md](docs/packs/qwen3.8-flash-next.md) |
-| `glm-5.3/glm-5.3-flash` | `runtimes/glm-5.3/glm-5.3-flash/v1` | `glm53-flash-2.25bpw-sm121` | `glm53-flash-single` (`tp1`) / `glm53-flash-tp2-1m` (`tp2`) | `262,144` (1 node) / `1,048,576` (2 nodes) | `8950` | `GLM-5.3-Flash-EXL3-2.25bpw-sm121` | [docs/packs/glm-5.3-flash.md](docs/packs/glm-5.3-flash.md) |
-| `nemotron-3.5/nemotron-3.5-super-vl` | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/v1` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` | `1,048,576` (1 node) | `9100` | `nemotron-3.5-super-vl` | [docs/packs/nemotron-3.5-super-vl.md](docs/packs/nemotron-3.5-super-vl.md) |
-| `deepseek-v4.1/deepseek-v4.1-flash-1017` | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/v1` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` | `262,144` (1 node) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017.md](docs/packs/deepseek-v4.1-flash-1017.md) |
+| `qwen3.8/qwen3.8-27b` | `runtimes/qwen3.8/qwen3.8-27b/v4` | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k` | `262,144` (1 node) | `8889` | `qwen38-27b-exl3` | [docs/packs/qwen3.8-27b.md](docs/packs/qwen3.8-27b.md) |
+| `qwen3.8/qwen3.8-flash-next` | `runtimes/qwen3.8/qwen3.8-flash-next/v3` | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (opt-in draft choice: `qwen38-flash-next-single-262k-draft`) | `262,144` (1 node) | `8899` | `default` | [docs/packs/qwen3.8-flash-next.md](docs/packs/qwen3.8-flash-next.md) |
+| `glm-5.3/glm-5.3-flash` | `runtimes/glm-5.3/glm-5.3-flash/v2` | `glm53-flash-sage-2.25` | `glm53-flash-single` | `262,144` (1 node) | `8950` | `GLM-5.3-Flash-EXL3-2.25bpw-sm121` | [docs/packs/glm-5.3-flash.md](docs/packs/glm-5.3-flash.md) |
+| `glm-5.3/glm-5.3-flash-tp2` | `runtimes/glm-5.3/glm-5.3-flash-tp2/v1` | `glm53-flash-tp2-sage-2.25` | `glm53-flash-tp2-1m` | `1,048,576` (2 nodes) | `8950` | `GLM-5.3-Flash-EXL3-2.25bpw-sm121` | [docs/packs/glm-5.3-flash-tp2.md](docs/packs/glm-5.3-flash-tp2.md) |
+| `glm-5.3/red-snow-5.3-flash-tp2` | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/v1` | `redsnow-5.3-flash-tp2-sage-4.91` | `redsnow-tp2-512k` | `524,288` (2 nodes) | `8952` | `RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw` | [docs/packs/red-snow-5.3-flash-tp2.md](docs/packs/red-snow-5.3-flash-tp2.md) |
+| `nemotron-3.5/nemotron-3.5-super-vl` | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/v2` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` | `1,048,576` (1 node) | `9100` | `nemotron-3.5-super-vl` | [docs/packs/nemotron-3.5-super-vl.md](docs/packs/nemotron-3.5-super-vl.md) |
+| `minicpm-v-4.7/minicpm-v-4.7-35b-a3b` | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/v1` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k` | `262,144` (1 node) | `8889` | `minicpm-v-4.7-35b-a3b-exl3` | [docs/packs/minicpm-v-4.7-35b-a3b.md](docs/packs/minicpm-v-4.7-35b-a3b.md) |
+| `deepseek-v4.1/deepseek-v4.1-flash-1017-tp2` | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/v1` | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m` | `1,048,576` (2 nodes) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017-tp2.md](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
+| `deepseek-v4.1/deepseek-v4.1-flash-1017` (v0.1.0) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/v1` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` | `262,144` (1 node) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017.md](docs/packs/deepseek-v4.1-flash-1017.md) |
 
 Before running a model, read its pack sheet (`docs/packs/<model>.md`) and its `runtimes/<family>/<model>/v<N>/KNOWN_ISSUES.md`.
 
@@ -29,8 +35,8 @@ Before running a model, read its pack sheet (`docs/packs/<model>.md`) and its `r
 Follow [docs/USER_GUIDE.md](docs/USER_GUIDE.md) section 3:
 
 ```bash
-TAG=v0.1.0
-RUNTIME_ID=dsv41-flash-1017-sage-1.55   # choose from the table above
+TAG=v0.1.1
+RUNTIME_ID=qwen38-27b-dflash2-exl3-4.00   # choose from the table above
 
 DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
 gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
@@ -81,7 +87,7 @@ Every release ships the exact corresponding engine source archive (`rexl3-engine
 When reporting a bug or submitting a root-cause finding, bug fix, feature, or optimization on `REXL3/REXL3`, you **must** follow the structured issue templates under `.github/ISSUE_TEMPLATE/` — including when opening an issue from the command line with `gh issue create` (never submit free-form prose that omits the template headings or `[report] ` / `[finding] ` title prefix). Testers submit through issues only: attach your tested code changes as a `git diff` inside the issue and do not open a pull request. Issues are public, so anyone can read them; only invited testers and the maintainers can open or comment on them.
 
 **No bare feature requests — coded & locally validated proof solution required:**
-- This repository (`REXL3/REXL3`) publishes the complete `v0.1.0` engine source tree (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`).
+- This repository (`REXL3/REXL3`) publishes the complete engine source tree of the current release (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`).
 - **Do not open wishlist or feature-request tickets asking maintainers to implement a feature, drafter binding, KV layout, or optimization.**
 - If a collaborator or tester agent wants to suggest a feature or improvement, you must:
   1. Build the engine source tree locally (`cargo +1.89.0 build --release --locked` per `SOURCE_BUILD.md`) and implement the solution in code.

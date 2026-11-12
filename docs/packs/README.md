@@ -9,7 +9,17 @@ There is one sheet per model, named `docs/packs/<model>.md` after the `runtimes/
 folder. The
 [README](../../README.md)'s released-packs table links to each sheet.
 
-No pack sheet exists yet; the first accompanies the `v0.1.0` product release.
+| Model | Prod tree | Sheet |
+| --- | --- | --- |
+| Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | [qwen3.8-27b.md](qwen3.8-27b.md) |
+| Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | [qwen3.8-flash-next.md](qwen3.8-flash-next.md) |
+| GLM-5.3-Flash (single node) | `runtimes/glm-5.3/glm-5.3-flash/` | [glm-5.3-flash.md](glm-5.3-flash.md) |
+| GLM-5.3-Flash (two nodes) | `runtimes/glm-5.3/glm-5.3-flash-tp2/` | [glm-5.3-flash-tp2.md](glm-5.3-flash-tp2.md) |
+| RED-SNOW-5.3-Flash (two nodes) | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/` | [red-snow-5.3-flash-tp2.md](red-snow-5.3-flash-tp2.md) |
+| Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | [nemotron-3.5-super-vl.md](nemotron-3.5-super-vl.md) |
+| MiniCPM-V-4.7-35B-A3B | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/` | [minicpm-v-4.7-35b-a3b.md](minicpm-v-4.7-35b-a3b.md) |
+| DeepSeek-V4.1-Flash-1017 (single node) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | [deepseek-v4.1-flash-1017.md](deepseek-v4.1-flash-1017.md) |
+| DeepSeek-V4.1-Flash-1017 (two nodes) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/` | [deepseek-v4.1-flash-1017-tp2.md](deepseek-v4.1-flash-1017-tp2.md) |
 
 ## Rules for a sheet
 

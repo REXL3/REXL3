@@ -90,6 +90,115 @@ class ModelDocTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), e.json_bytes(self.doc))
 
 
+class RenamedRuntimeTest(unittest.TestCase):
+    """A folder whose runtime was renamed: v1 sealed under the reviewed earlier id, later versions under the
+    current id, MODEL.json naming the current id (release_evidence.RUNTIME_ID_ALIASES, exact pairs only)."""
+    OLD, NEW, TP2 = 'glm53-flash-2.25bpw-sm121', 'glm53-flash-sage-2.25', 'glm53-flash-tp2-sage-2.25'
+    OLD_REPO, NEW_REPO = 'r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121', 'r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name) / 'runtimes' / 'glm-5.3' / 'glm-5.3-flash'
+        self.v1 = dict(runtime_id=self.OLD, profiles={'glm53-flash-single': {}, 'glm53-flash-tp2-1m': {}})
+        self.write_tree(1, self.v1)
+
+    def write_tree(self, version, approval):
+        tree = self.folder / f'v{version}'
+        tree.mkdir(parents=True, exist_ok=True)
+        (tree / 'approval.json').write_bytes(e.json_bytes(approval))
+
+    def doc(self, runtime_id, repo, **changes):
+        doc = m.model_json_doc(family='glm-5.3', model='glm-5.3-flash', display_name='GLM-5.3-Flash',
+                               architectures=['Glm5NextForConditionalGeneration'], engine_family='glm',
+                               runtime_id=runtime_id, pack={'format': 'exl3', 'bits': '2.25', 'target_repo': repo,
+                                                            'target_revision': 'b' * 40})
+        return dict(doc, **changes)
+
+    def write_model_json(self, doc):
+        path = self.folder / 'MODEL.json'
+        path.write_bytes(e.json_bytes(doc))
+        return path
+
+    def promote(self, doc):
+        return m.write_or_validate_model_json(self.folder / 'MODEL.json', family='glm-5.3', model='glm-5.3-flash',
+                                              doc=doc)
+
+    def test_matches_the_current_id_and_its_reviewed_earlier_id(self):
+        v2 = dict(runtime_id=self.NEW, profiles={'glm53-flash-single': {}})
+        self.assertTrue(m.model_runtime_id_matches(self.NEW, v2))          # current id: exact
+        self.assertTrue(m.model_runtime_id_matches(self.NEW, self.v1))     # earlier id via the single-node pair
+        self.assertTrue(m.model_runtime_id_matches(self.OLD, self.v1))     # unchanged folders still match
+        tp2_only = dict(runtime_id=self.OLD, profiles={'glm53-flash-tp2-1m': {}})
+        self.assertTrue(m.model_runtime_id_matches(self.TP2, tp2_only))
+
+    def test_refuses_every_other_pairing(self):
+        v2 = dict(runtime_id=self.NEW, profiles={'glm53-flash-single': {}})
+        self.assertFalse(m.model_runtime_id_matches(self.OLD, v2))          # the alias is one way
+        tp2_only = dict(runtime_id=self.OLD, profiles={'glm53-flash-tp2-1m': {}})
+        self.assertFalse(m.model_runtime_id_matches(self.NEW, tp2_only))   # pair is for another profile choice
+        self.assertFalse(m.model_runtime_id_matches(self.NEW, dict(self.v1, runtime_id='glm53-flash-other')))
+        self.assertFalse(m.model_runtime_id_matches('glm53-flash-sage', self.v1))   # no prefix or fuzzy match
+        self.assertFalse(m.model_runtime_id_matches(self.NEW, dict(runtime_id=self.OLD)))
+        self.assertFalse(m.model_runtime_id_matches(self.NEW, None))
+
+    def test_promotion_moves_model_json_to_the_current_id(self):
+        self.write_model_json(self.doc(self.OLD, self.OLD_REPO))
+        new = self.doc(self.NEW, self.NEW_REPO)
+        path = self.promote(new)
+        self.assertEqual(path.read_bytes(), e.json_bytes(new))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.promote(new)                                               # idempotent once moved
+        with self.assertRaises(ValueError):
+            self.promote(self.doc(self.OLD, self.OLD_REPO))             # never moved back
+
+    def test_promotion_keeps_the_pack_repo_when_it_was_not_renamed(self):
+        self.write_model_json(self.doc(self.OLD, self.OLD_REPO))
+        new = self.doc(self.NEW, self.OLD_REPO)
+        self.assertEqual(self.promote(new).read_bytes(), e.json_bytes(new))
+
+    def test_promotion_refuses_a_rename_that_changes_anything_else(self):
+        old = self.doc(self.OLD, self.OLD_REPO)
+        path = self.write_model_json(old)
+        for doc in (self.doc(self.NEW, self.NEW_REPO, display_name='Changed'),
+                    self.doc(self.NEW, 'r0b0tlab/elsewhere'),
+                    dict(self.doc(self.NEW, self.NEW_REPO), pack=dict(self.doc(self.NEW, self.NEW_REPO)['pack'],
+                                                                     bits='3.00')),
+                    self.doc('glm53-flash-other', self.NEW_REPO)):
+            with self.subTest(doc=doc):
+                with self.assertRaisesRegex(ValueError, 'differs'):
+                    self.promote(doc)
+                self.assertEqual(path.read_bytes(), e.json_bytes(old))
+
+    def test_promotion_refuses_when_a_sealed_tree_would_no_longer_match(self):
+        old = self.doc(self.OLD, self.OLD_REPO)
+        path = self.write_model_json(old)
+        self.write_tree(2, dict(runtime_id='glm53-flash-other', profiles={'glm53-flash-single': {}}))
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            self.promote(self.doc(self.NEW, self.NEW_REPO))
+        self.assertEqual(path.read_bytes(), e.json_bytes(old))
+
+    def test_promotion_refuses_a_rename_whose_pair_is_for_another_profile_choice(self):
+        # (glm53-flash-tp2-sage-2.25, glm53-flash-tp2-1m) is a reviewed pair, but a folder whose only tree seals
+        # glm53-flash-single under the earlier id cannot move to the two-node id.
+        old = self.doc(self.OLD, self.OLD_REPO)
+        path = self.write_model_json(old)
+        self.write_tree(1, dict(runtime_id=self.OLD, profiles={'glm53-flash-single': {}}))
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            self.promote(self.doc(self.TP2, self.NEW_REPO))
+        self.assertEqual(path.read_bytes(), e.json_bytes(old))
+
+    def test_promotion_refuses_a_rename_without_a_sealed_tree(self):
+        old = self.doc(self.OLD, self.OLD_REPO)
+        empty = Path(self.tmp.name) / 'runtimes' / 'glm-5.3' / 'empty'
+        empty.mkdir(parents=True)
+        path = empty / 'MODEL.json'
+        path.write_bytes(e.json_bytes(dict(old, model='empty')))
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            m.write_or_validate_model_json(path, family='glm-5.3', model='empty',
+                                           doc=dict(self.doc(self.NEW, self.NEW_REPO), model='empty'))
+
+
 class CapabilityContractTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

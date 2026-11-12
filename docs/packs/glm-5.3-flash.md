@@ -23,6 +23,8 @@ Checked against version 2 (dev approval `approve-glm53-flash-sage-2.25-2`, sourc
 
 Source: version 2's `profile.json`. The pack advertises a 1,048,576-token window. One GB10 cannot hold it with the required features, so the single-node profile ships at 262,144 (`KNOWN_ISSUES.md` "Why the window is 262,144"). The full window on two GB10s is the separate runtime unit `glm-5.3/glm-5.3-flash-tp2`; version 1 of this folder still carries its v0.1.0 two-node profile `glm53-flash-tp2-1m`.
 
+Only the single-node profile binds `127.0.0.1`. A two-node profile (version 1's `glm53-flash-tp2-1m`, and the two-node unit's) binds the leader's `address` from the site file (`scripts/runtime.py`), and the server has no API key, so keep it on a private, trusted network or behind a firewall or an SSH tunnel. The two-node unit's pack sheet, `docs/packs/glm-5.3-flash-tp2.md`, gives the details.
+
 ## 3. What the server accepts
 
 | Capability | Supported | Notes |

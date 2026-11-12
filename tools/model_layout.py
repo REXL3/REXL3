@@ -94,13 +94,74 @@ def model_json_doc(*, family, model, display_name, architectures, engine_family,
                 runtime_id=runtime_id, pack=dict(pack))
 
 
+def model_runtime_id_matches(model_runtime_id, approval):
+    """Whether a sealed tree belongs under a MODEL.json that names ``model_runtime_id``.
+
+    MODEL.json names the folder's current runtime id. A tree's approval matches when its runtime_id is that id,
+    or when it is exactly the reviewed earlier id of that runtime for a profile choice the approval seals
+    (release_evidence.RUNTIME_ID_ALIASES, keyed (current id, profile) -> earlier id). Nothing else matches: an
+    approval naming a later id under a MODEL.json that names the earlier one is refused, as is any other id."""
+    runtime_id = approval.get('runtime_id') if isinstance(approval, dict) else None
+    if not isinstance(runtime_id, str) or not isinstance(model_runtime_id, str):
+        return False
+    if runtime_id == model_runtime_id:
+        return True
+    profiles = approval.get('profiles')
+    if not isinstance(profiles, dict):
+        return False
+    return any(e.RUNTIME_ID_ALIASES.get((model_runtime_id, name)) == runtime_id for name in profiles)
+
+
+def _sealed_approvals(folder):
+    """The approval.json of every sealed v<N>/ tree already in a model folder."""
+    approvals = []
+    for entry in sorted(folder.iterdir()):
+        if VERSION_RE.fullmatch(entry.name) and entry.is_dir():
+            approvals.append(e.load_json(e.safe_file(entry, 'approval.json')))
+    return approvals
+
+
+def _renamed_model_json_ok(existing, doc, folder):
+    """A reviewed runtime rename (REXL3/REXL3-dev#333): the existing MODEL.json may be replaced by ``doc`` only
+    when ``doc`` names the current id of the existing MODEL.json's runtime and nothing else changes except a
+    reviewed pack-repo rename. Every sealed tree in the folder must still match the new MODEL.json, and the
+    existing id must be the reviewed alias of the new id for a profile choice one of those trees seals."""
+    old_id, new_id = existing.get('runtime_id'), doc.get('runtime_id')
+    if old_id == new_id:
+        return False
+    expected = dict(existing, runtime_id=new_id)
+    pack = existing.get('pack')
+    new_pack = doc.get('pack')
+    if isinstance(pack, dict) and isinstance(new_pack, dict):
+        repo = new_pack.get('target_repo')
+        if repo in e.PACK_REPO_ALIASES and pack.get('target_repo') == e.PACK_REPO_ALIASES[repo]:
+            expected['pack'] = dict(pack, target_repo=repo)
+    if expected != doc:
+        return False
+    approvals = _sealed_approvals(folder)
+    if not approvals or not all(model_runtime_id_matches(new_id, approval) for approval in approvals):
+        return False
+    # Every tree matches the new id (checked above), so a tree sealed under the old id matches only through
+    # the reviewed (new id, profile) -> old id pair.
+    return any(approval.get('runtime_id') == old_id for approval in approvals)
+
+
 def write_or_validate_model_json(path, *, family, model, doc):
-    """Write MODEL.json when absent; validate bytes for byte when present. Never overwrite."""
+    """Write MODEL.json when absent; validate bytes for byte when present. Never overwrite, except that a
+    reviewed runtime rename moves MODEL.json to the runtime's current id (_renamed_model_json_ok)."""
     path = e.checked_path(path)
     validate_model_doc(doc, family, model)
     data = e.json_bytes(doc)
     if path.exists():
-        e.require(path.read_bytes() == data, 'existing MODEL.json differs from the derived metadata')
+        if path.read_bytes() == data:
+            return path
+        e.require(path.is_file() and not path.is_symlink(), 'existing MODEL.json is not a regular file')
+        existing = validate_model_doc(parse_model_json(path), family, model)
+        e.require(_renamed_model_json_ok(existing, doc, path.parent),
+                  'existing MODEL.json differs from the derived metadata')
+        path.write_bytes(data)
+        path.chmod(0o644)
+        e.require(path.read_bytes() == data, 'MODEL.json write drift')
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('xb') as stream:

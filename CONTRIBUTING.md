@@ -98,6 +98,9 @@ approval's bundle binary digest `binary_sha256` and each profile's sealed receip
 identity; omitted for approvals that predate carry-forward). The `TRUSTED_APPROVALS_SHA256` pin in
 `.github/workflows/verify.yml` changes in the same commit as the registry. Tools derive dev release
 tags from `runtime_id` (MODEL.json and the sealed approval must agree), never from folder names.
+After a reviewed runtime rename, MODEL.json names the current id and a tree sealed under the earlier id
+still agrees only through its exact reviewed pair in `RUNTIME_ID_ALIASES` (`tools/release_evidence.py`,
+keyed by current id and a profile choice that tree seals); any other mismatch is refused.
 
 ## 3. Branches and PR scope
 

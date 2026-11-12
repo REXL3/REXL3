@@ -17,6 +17,35 @@ Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sa
 
 This is the same pack as the single-node entry `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` (runtime `dsv41-flash-1017-sage-1.55`, profile `dsv41-single-262k`). The two entries are separate runtime units with their own approvals; this sheet covers the two-node entry only.
 
+### Model download: the pinned revision moved
+
+The model lock pins `vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` at `cba79c67582950ea44a4a449b3bb85b800748a35`. That revision is no longer on Hugging Face (the repository's history was rewritten), so the managed download (`setup --accept-model-download`) fails. The repository's current revision, `c40cf25cc3148bae95ac27483505c883840bf8a7`, holds byte-identical files: every one of the 24 locked files has the same size and SHA-256. Download that revision and point the runtime at it. The runtime verifies every file against the sealed lock before it serves, as it does for a managed download. Reported by @Blackwellboy in #128.
+
+Free disk: 298.3 GiB for the 24 locked files, plus the three small repository documents.
+
+**Single node (`dsv41-single-262k`)**, from the extracted bundle directory, after `./launch.sh --yes install-deps`:
+
+Downloads without a Hugging Face token are rate-limited (in our run about 12 MB/s unauthenticated against about 86 MB/s with `HF_TOKEN` set); the client reads `HF_TOKEN` from the environment.
+
+```bash
+REV=c40cf25cc3148bae95ac27483505c883840bf8a7
+MODEL_DIR=$HOME/models/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw-c40cf25c   # any absolute path you own
+# the runtime's private environment already has the Hugging Face client
+HF=$(python3 -c 'import json,os;p=os.path.expanduser("~/.local/share/rexl3/dsv41-flash-1017-sage-1.55/python-environment.json");print(json.load(open(p))["hf"])')
+"$HF" download vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw --revision "$REV" --local-dir "$MODEL_DIR"
+SITE=$HOME/dsv41-site.json
+python3 -c 'import json,os,sys;f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(f,json.dumps({"model_dir":sys.argv[2]}).encode());os.close(f)' "$SITE" "$MODEL_DIR"
+./launch.sh --yes setup --site "$SITE"      # verifies the copy; downloads nothing
+./launch.sh verify --site "$SITE"
+./launch.sh --yes start --site "$SITE"
+```
+
+Keep the same `--site` for `status`, `logs` and `stop`. If `$XDG_DATA_HOME` is set, the environment file is under `$XDG_DATA_HOME/rexl3/` instead.
+
+**Two nodes (`dsv41-tp2-1m`)**: the two-node profile never downloads; each node needs its own complete copy. Run the same `download` on the leader and on the follower, or copy the directory (any Hugging Face client works; the two-node runtime's own one is under `~/.local/share/rexl3/dsv41-flash-1017-sage-rexl3-1.55/`), then set `nodes.leader.model_dir` and `nodes.follower.model_dir` in your two-node site file to those paths (docs/SETUP.md, "Required two-node site and pre-staged ranks"). `setup` and `verify` check both copies over SSH.
+
+New versions that pin `c40cf25c` directly will make this step unnecessary, expected with the next engine cut (v0.1.2).
+
 ## 2. Profiles
 
 | Profile | Topology | Context window | Slots | Port | Binds | Ready within |

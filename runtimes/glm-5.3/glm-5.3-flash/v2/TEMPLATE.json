@@ -1,0 +1,9 @@
+{
+  "schema": "rexl3.template-approval.v2",
+  "version": "v1",
+  "digest": "sha256:1a13b3e24965ffa6aa806c3e0db0e02109f253af823fe6a69e753e98ef21da8e",
+  "approved_tree": "44ea900ed7ab6fe570b0da58bf2eca8e6377f230",
+  "approved_at": "2026-11-08",
+  "approved_by": "am423",
+  "note": "Approved by the owner for #280: the draft role is fetched only for profiles that draft. approved_tree is the Git tree of runtimes/template-v1 without TEMPLATE.json (tools/runtime_template_digest.py --tree). Any later edit to the template changes the digest and needs a new approval."
+}

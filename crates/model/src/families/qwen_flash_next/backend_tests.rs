@@ -395,3 +395,115 @@ fn device_verify_errors_are_recorded_and_answer_nan_rows() {
     let e = b.take_error().unwrap();
     assert!(!e.fatal && e.message.contains("gather failed"));
 }
+
+/// A runtime with a DFlash2 draft: slots in `ready` may draft; every ask is recorded with its depth and whether it carried a sampler.
+#[derive(Default)]
+struct FakeDraft {
+    ready: Vec<usize>,
+    asks: Vec<(usize, usize, bool)>,
+    from: Vec<(usize, usize)>,
+    rounds: usize,
+}
+impl FlashNextRuntime for FakeDraft {
+    fn vocab_size(&self) -> usize {
+        42
+    }
+    fn has_mtp(&self) -> bool {
+        false
+    }
+    fn begin_slot(&mut self, _: usize) -> Result<(), ModelError> {
+        Ok(())
+    }
+    fn end_slot(&mut self, _: usize) {}
+    fn prefill_chunk(&mut self, _: &RowBatch, _: PrefillPath, want: Option<usize>) -> Result<Option<Candidates>, ModelError> {
+        Ok(want.map(|count| Candidates { rows: 1, count, ids: vec![7; count], vals: vec![1.0; count] }))
+    }
+    fn mtp_after_prefill(&mut self, _: usize, _: usize, _: &[u32], _: Option<u32>, _: PrefillPath) -> Result<(), ModelError> {
+        panic!("a DFlash2 runtime has no MTP head to run")
+    }
+    fn window_candidates(&mut self, b: &RowBatch, count: usize) -> Result<Candidates, ModelError> {
+        Ok(Candidates { rows: b.rows, count, ids: vec![7; b.rows * count], vals: vec![1.0; b.rows * count] })
+    }
+    fn commit(&mut self, _: usize, _: usize) {}
+    fn flush(&mut self) -> Result<(), ModelError> {
+        Ok(())
+    }
+    fn mtp_propose(&mut self, _: usize, _: &[u32], _: usize) -> Result<Vec<u32>, ModelError> {
+        panic!("a DFlash2 runtime never asks the MTP head")
+    }
+    fn has_dflash(&self) -> bool {
+        true
+    }
+    fn set_dflash_from(&mut self, slot: usize, from: usize) {
+        self.from.push((slot, from));
+    }
+    fn dflash_ready(&self, slot: usize, _: usize) -> bool {
+        self.ready.contains(&slot)
+    }
+    fn dflash_draft(&mut self, asks: &[DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        self.rounds += 1;
+        self.asks.extend(asks.iter().map(|a| (a.slot, a.depth, a.sampling.is_some())));
+        Ok(asks.iter().map(|a| vec![5; a.depth]).collect())
+    }
+}
+
+#[test]
+fn a_dflash2_round_drafts_the_ready_sequences_the_arbiter_picks_in_one_call() {
+    let mut b = FlashNextBackend::with_runtime(FakeDraft { ready: vec![0, 2], ..Default::default() }, 64, 0, true);
+    let greedy = gb_sampling::Sampling { temperature: 0.0, ..Default::default() };
+    let hot = gb_sampling::Sampling { temperature: 0.7, ..Default::default() };
+    let t = [1u32, 2, 3];
+    let reqs = [
+        ProposeRequest { slot: 0, tokens: &t, sampling: &greedy, max: 12 },
+        ProposeRequest { slot: 1, tokens: &t, sampling: &greedy, max: 7 },
+        ProposeRequest { slot: 2, tokens: &t, sampling: &hot, max: 2 },
+    ];
+    let out = b.propose_batch_scored(&reqs);
+    // one batched call for the ready sequences, at the arbiter's warm-up depth (capped by each request), the sampled one with its sampler
+    assert_eq!(b.m.rounds, 1);
+    let warm = super::super::spec::config().warmup_depth;
+    assert_eq!(b.m.asks, vec![(0, warm, false), (2, 2, true)]);
+    assert_eq!(out[0].as_ref().unwrap().tokens, vec![5; warm]);
+    assert_eq!(out[2].as_ref().unwrap().tokens, vec![5; 2]);
+    // the sequence whose context is not ready is never drafted: the arbiter's other picks (no copy match here: no drafts at all)
+    assert!(out[1].as_ref().is_some_and(|p| p.tokens.is_empty()), "{:?}", out[1]);
+    // nothing ready: no draft call
+    let mut idle = FlashNextBackend::with_runtime(FakeDraft::default(), 64, 0, true);
+    idle.propose_batch_scored(&reqs);
+    assert_eq!(idle.m.rounds, 0);
+}
+
+#[test]
+fn the_arbiter_learns_from_the_windows_and_the_commits_and_goes_deep_on_text_that_lands() {
+    let mut b = FlashNextBackend::with_runtime(FakeDraft { ready: vec![0], ..Default::default() }, 64, 0, true);
+    let g = gb_sampling::Sampling { temperature: 0.0, ..Default::default() };
+    let t = [1u32, 2, 3];
+    let mut depth = 0;
+    for round in 0..20u64 {
+        let p = b.propose_batch_scored(&[ProposeRequest { slot: 0, tokens: &t, sampling: &g, max: 12 }]).remove(0).unwrap();
+        depth = p.tokens.len();
+        let mut w = vec![9];
+        w.extend(&p.tokens);
+        b.step(&[RowRequest { slot: 0, first_position: 10 + round * 8, tokens: w }], 3);
+        b.commit(0, depth + 1); // every draft accepted
+    }
+    assert_eq!(depth, super::super::spec::MAX_DEPTH, "every draft lands: the whole block");
+    // a new sequence in the slot starts again from the priors (the warm-up depth)
+    b.release(0);
+    let p = b.propose_batch_scored(&[ProposeRequest { slot: 0, tokens: &t, sampling: &g, max: 12 }]).remove(0).unwrap();
+    assert_eq!(p.tokens.len(), super::super::spec::config().warmup_depth);
+}
+
+#[test]
+fn every_prefill_slice_tells_the_draft_where_its_context_starts() {
+    let mut b = FlashNextBackend::with_runtime(FakeDraft::default(), 1024, 0, true);
+    let prompt = vec![3u32; 5000];
+    let mut done = 0;
+    while done < prompt.len() {
+        done = b.prefill_slice(1, &prompt, &[], done, 1).done;
+    }
+    // the last window before the prompt's end, the same before every slice
+    assert_eq!(b.m.from, vec![(1, 5000 - 2048); 5]);
+    b.prefill_piece(0, 0, &vec![3u32; 100], 100, 1);
+    assert_eq!(*b.m.from.last().unwrap(), (0, 0));
+}

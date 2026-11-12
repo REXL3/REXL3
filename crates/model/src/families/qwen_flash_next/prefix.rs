@@ -112,6 +112,11 @@ impl Layout {
 pub fn snapshot_bytes(cfg: &FlashNextConfig, mtp: bool) -> u64 {
     Layout::from_config(cfg, mtp).bytes() as u64
 }
+/// [`snapshot_bytes`] of a model that drafts with a DFlash2 draft when `draft`: each snapshot also keeps the draft's context window
+/// (K and V of its 5 layers for the last 2,048 positions, `Draft::window_snapshot_bytes`).
+pub fn snapshot_bytes_with(cfg: &FlashNextConfig, mtp: bool, draft: bool) -> u64 {
+    snapshot_bytes(cfg, mtp) + if draft { crate::draft::Draft::window_snapshot_bytes() } else { 0 }
+}
 pub fn page_bytes(cfg: &FlashNextConfig, mtp: bool) -> u64 {
     let layers = cfg.full_layers() + usize::from(mtp);
     let kv = 2 * BLOCK_TOKENS * cfg.kv_heads * cfg.head_dim * 2;
@@ -130,6 +135,8 @@ pub fn budget_for_bytes(cfg: &FlashNextConfig, mtp: bool, bytes: u64) -> CacheBu
 struct Meta {
     len: usize,
     mtp_done: bool,
+    /// The first position of the DFlash2 draft window the snapshot keeps (`None`: no draft, or its context was not sound there).
+    draft_lo: Option<usize>,
 }
 /// Pure slot bookkeeping: a handle remains live until the engine releases it exactly once.
 struct SlotBook {
@@ -163,13 +170,18 @@ pub struct SnapshotArena {
     layout: Layout,
     slots: SlotBook,
     budget: CacheBudget,
+    /// With a DFlash2 draft: per draft layer, its K and V rows of the window of every snapshot (`[snapshots][2048][8 x 128]` bf16);
+    /// empty without one.
+    draft_k: Vec<DevBuf>,
+    draft_v: Vec<DevBuf>,
 }
 impl SnapshotArena {
     /// The KV allocation must include `budget.page_blocks` above the admission share.
     pub fn new(m: &FlashNextModel, budget: CacheBudget) -> Result<Self, ModelError> {
         let layout = Layout::from_model(m);
+        let draft = m.has_dflash();
         if !budget.enabled()
-            || budget.snapshot_bytes != layout.bytes() as u64
+            || budget.snapshot_bytes != snapshot_bytes_with(&m.cfg, m.mtp_kv.is_some(), draft)
             || budget.page_bytes != page_bytes(&m.cfg, m.mtp_kv.is_some())
         {
             return Err(ModelError::Config("Flash-Next prefix budget does not match model allocations".into()));
@@ -178,13 +190,21 @@ impl SnapshotArena {
             .snapshot_slots
             .checked_mul(layout.bytes())
             .ok_or_else(|| ModelError::Config("prefix arena size overflow".into()))?;
-        Ok(Self { data: DevBuf::alloc(bytes)?, layout, slots: SlotBook::new(budget.snapshot_slots), budget })
+        let (mut draft_k, mut draft_v) = (Vec::new(), Vec::new());
+        if draft {
+            let per = budget.snapshot_slots * gb_cuda::dflash2::DraftCtxLayout::WINDOW * crate::draft::Draft::RING_ROW_BYTES;
+            for _ in 0..crate::draft::LAYERS {
+                draft_k.push(DevBuf::alloc(per)?);
+                draft_v.push(DevBuf::alloc(per)?);
+            }
+        }
+        Ok(Self { data: DevBuf::alloc(bytes)?, layout, slots: SlotBook::new(budget.snapshot_slots), budget, draft_k, draft_v })
     }
     pub fn free_count(&self) -> usize {
         self.slots.free.len()
     }
     pub fn allocated_bytes(&self) -> u64 {
-        self.data.bytes() as u64
+        self.data.bytes() as u64 + self.draft_k.iter().chain(&self.draft_v).map(|b| b.bytes() as u64).sum::<u64>()
     }
 }
 pub fn caps(arena: &SnapshotArena, fingerprint: &str, pin_name: &str) -> PrefixCaps {
@@ -237,8 +257,17 @@ pub fn capture(m: &mut FlashNextModel, a: &mut SnapshotArena, slot: usize, len: 
         }
         // Enqueue all device copies before retaining references; a later donor write is
         // ordered after these copies on the same stream.
+        // the DFlash2 draft's window of this prefix (when the slot's draft context is sound at `len`)
+        let draft_lo = match m.dflash_window_of(slot, len).filter(|_| !a.draft_k.is_empty()) {
+            Some(w) => {
+                let lo = w.start;
+                m.dflash_save_window(slot, w, &mut a.draft_k, &mut a.draft_v, id as usize)?;
+                Some(lo)
+            }
+            None => None,
+        };
         let pages = m.kv_tab.retain_prefix(slot, len.div_ceil(BLOCK_TOKENS));
-        a.slots.meta[id as usize] = Some(Meta { len, mtp_done });
+        a.slots.meta[id as usize] = Some(Meta { len, mtp_done, draft_lo });
         Ok(Captured { len, handle: PrefixHandle { snap: id, pages } })
     })();
     if result.is_err() {
@@ -308,6 +337,9 @@ pub fn restore(
                 )?;
             }
             m.mtp_done.insert(slot, len);
+        }
+        if !a.draft_k.is_empty() {
+            m.dflash_load_window(slot, meta.draft_lo, len, &a.draft_k, &a.draft_v, handle.snap as usize)?;
         }
         Ok(())
     })();
@@ -393,6 +425,8 @@ pub fn slice_with_cuts(m: &mut FlashNextModel, a: &mut SnapshotArena, req: Slice
         m.ple_tok.store(slot, from, &hist);
     }
     let cuts = if path(prompt.len()).is_some() { cuts } else { &[] };
+    // the DFlash2 draft's context starts at the last window before the prompt's end or before the first cut still to come
+    m.set_dflash_from(slot, super::dflash::ctx_from(prompt.len(), cuts, done));
     let end = slice_end(done, prompt.len(), chunk.min(m.opts.prefill_rows), cuts);
     let ids = prompt[done..end].to_vec();
     let b = RowBatch::from_requests(&[RowRequest { slot, first_position: done as u64, tokens: ids }]);
@@ -426,7 +460,7 @@ mod tests {
         let x = b.alloc().unwrap();
         let y = b.alloc().unwrap();
         assert!(b.alloc().is_none());
-        b.meta[x as usize] = Some(Meta { len: 257, mtp_done: true });
+        b.meta[x as usize] = Some(Meta { len: 257, mtp_done: true, draft_lo: None });
         b.free(x).unwrap();
         assert!(b.free(x).is_err());
         assert_eq!(b.alloc(), Some(x));

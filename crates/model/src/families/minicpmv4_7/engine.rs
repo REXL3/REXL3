@@ -280,7 +280,7 @@ pub fn engine_from(loaded: LoadedModel, o: &ServeOptions) -> Result<Engine<MiniC
         make,
     );
     // the engine runs the cache only when its backend offers one (`Backend::prefix_caps`), so this is a no-op without an arena
-    let engine = engine.with_prefix_cache(crate::serve::prefix_config_from_env()?);
+    let engine = engine.with_prefix_cache(minicpm_prefix_config(&|name| std::env::var(name).ok())?);
     if !native {
         return Ok(engine);
     }
@@ -349,6 +349,14 @@ pub fn publish_vision(
     Ok(())
 }
 
+/// The MiniCPM-V-4.7 prefix config: the interactive cut policy, then the environment's overrides as in
+/// [`crate::serve::prefix_config_from_env`]. The gated delta net's state cannot be cut back, so a hit needs a snapshot at a cut inside the
+/// shared prefix; the default policy's end cut (16 tokens from the end) falls inside a differing question about a long document, and a tool
+/// loop under 528 tokens, or one that grows by under 256 tokens a turn, gets no new cut. The interactive policy serves both.
+pub(crate) fn minicpm_prefix_config(var: &dyn Fn(&str) -> Option<String>) -> Result<gb_engine::PrefixConfig, ModelError> {
+    crate::serve::interactive_prefix_config_from(var)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +385,23 @@ mod tests {
         // a plan of 16 rows for one stream costs the 16-row window and the draft
         let one = gb_sched::RoundShape { streams: 1, rows: 16, drafting: 1, head_rows: 15, kv_tokens: 0 };
         assert!((c.ms(&one, false) - (33.51 + 3.84 + 0.0)).abs() < 0.02, "{}", c.ms(&one, false));
+    }
+
+    /// MiniCPM-V-4.7 cuts with the interactive policy (the default one serves neither a second question about a document nor a short tool
+    /// loop); the environment still overrides each value, and the default config path is unchanged.
+    #[test]
+    fn minicpm_cuts_for_interactive_use_and_the_environment_still_decides() {
+        use gb_sched::prefix::CutPolicy;
+        let from = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            minicpm_prefix_config(&move |n| vars.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()))
+        };
+        assert_eq!(from(&[]).unwrap().policy, CutPolicy::interactive());
+        assert_ne!(CutPolicy::interactive(), CutPolicy::default());
+        let c = from(&[("REXL3_PREFIX_TAIL", "16"), ("REXL3_PREFIX_MIN_CUT", "512")]).unwrap();
+        assert_eq!((c.policy.tail, c.policy.min_cut), (16, 512));
+        assert_eq!((c.policy.min_gap, c.policy.ghost_min_gain), (128, 256), "what is not overridden stays interactive");
+        assert!(from(&[("REXL3_PREFIX_TAIL", "long")]).is_err());
+        assert_eq!(crate::serve::prefix_config_from(&|_| None).unwrap(), gb_engine::PrefixConfig::default());
     }
 }

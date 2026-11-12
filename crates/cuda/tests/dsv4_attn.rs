@@ -1108,6 +1108,81 @@ fn gpu_kv_prepare_matches_the_unfused_chain() {
     assert_eq!(a2.to_vec::<u16>().unwrap(), b2.to_vec::<u16>().unwrap(), "no-rot fused KV prep must match");
 }
 
+/// The fused KV prep's q4 rotation (phase 4) runs in place on the row: if more than one warp of the block runs it, a
+/// warp that reads after another warp wrote rotates the row a second time (the 64-point orthonormal Walsh-Hadamard is its
+/// own inverse), so the row's bits depend on warp timing. Many rows, many launches, a host thread loading memory: every
+/// launch must equal the unfused chain bit for bit. Before the fix, 1,000 launches here showed tens of rows that differ.
+#[test]
+fn gpu_kv_prepare_is_bit_identical_under_load() {
+    if !device_available() {
+        eprintln!("not run: no device");
+        return;
+    }
+    let st = Stream::new().unwrap();
+    let (width, rd, rows) = (512usize, 64usize, 8192usize);
+    let nope = width - rd;
+    let iters = 1000usize;
+    let rope = Rope::new(rd, 16384, 0, 10_000.0, 1.0, 32.0, 1.0);
+    let (cos, sin) = (DevBuf::from_slice(&rope.cos).unwrap(), DevBuf::from_slice(&rope.sin).unwrap());
+    let w: Vec<f32> = (0..width).map(|i| 0.5 + 0.001 * (i as f32 % 97.0)).collect();
+    let wd = DevBuf::from_slice(&w).unwrap();
+    let mut r = Rng(0x5eed_c0de_0000_0002);
+    let host: Vec<f32> = r.vec(rows * width, -3.0, 3.0);
+    let bits: Vec<u16> = host.iter().map(|&v| gb_exl3::f16::f64_to_f16(v as f64)).collect();
+    let a = DevBuf::from_slice(&bits).unwrap();
+    rmsnorm_dev(&a, &wd, rows, width, 1e-6, &st).unwrap();
+    rope_rows_dev(&a, rows, width, rd, width, 1, (&cos, &sin), 0, 1, false, &st).unwrap();
+    quant_dev(&a, rows, width, 32, 8, true, &st).unwrap();
+    gb_cuda::dsv4_kvq4::rot_dev(&a, rows, width, nope, width, 1, &st).unwrap();
+    st.sync().unwrap();
+    let want: Vec<u16> = a.to_vec().unwrap();
+    // host memory traffic beside the GPU (the engram gather does this on a serving box)
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hogs: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let (mut x, mut y) = (vec![1u8; 32 << 20], vec![2u8; 32 << 20]);
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x.copy_from_slice(&y);
+                    y.copy_from_slice(&x);
+                }
+            })
+        })
+        .collect();
+    let src = DevBuf::from_slice(&bits).unwrap();
+    let mut b = DevBuf::from_slice(&bits).unwrap();
+    // device memory traffic on a second stream, overlapping every launch
+    let side = Stream::new_nonblocking().unwrap();
+    let noise_bytes = 128usize << 20;
+    let noise_src = DevBuf::zeroed(noise_bytes).unwrap();
+    let mut noise_dst = DevBuf::zeroed(noise_bytes).unwrap();
+    let (mut bad_launches, mut bad_rows) = (0usize, 0usize);
+    for _ in 0..iters {
+        b.copy_from_at(0, &src, 0, rows * width * 2, &st).unwrap();
+        st.sync().unwrap();
+        for _ in 0..4 {
+            noise_dst.copy_from_at(0, &noise_src, 0, noise_bytes, &side).unwrap();
+        }
+        kv_prepare_dev(&b, &wd, rows, width, rd, width, (&cos, &sin), 0, 1, true, 1e-6, &st).unwrap();
+        st.sync().unwrap();
+        side.sync().unwrap();
+        let got: Vec<u16> = b.to_vec().unwrap();
+        let n = got.chunks(width).zip(want.chunks(width)).filter(|(g, w)| g != w).count();
+        bad_rows += n;
+        bad_launches += (n > 0) as usize;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for h in hogs {
+        h.join().unwrap();
+    }
+    eprintln!(
+        "kv_prepare stress: {bad_launches} of {iters} launches ({bad_rows} rows of {}) differ from the unfused chain",
+        rows * iters
+    );
+    assert_eq!(bad_rows, 0, "the fused KV prep must give the unfused chain's bits on every row of every launch");
+}
+
 #[test]
 fn gpu_block_matches_the_host_on_a_source_and_a_reader() {
     if !device_available() {
@@ -2192,5 +2267,128 @@ fn gpu_prefill_chunk_grid_invariance() {
         }
 
         eprintln!("L={l}: done");
+    }
+}
+
+/// **A row's selection is a property of the row, not of the prefill chunk it was cut into** — every row, not just
+/// the trailing 128 (`gpu_prefill_chunk_grid_invariance` checks only those, the rows layers 20..39 run under CED).
+///
+/// The layer chooses between the fill selection (every compressed position, in order) and the indexer on the chunk's
+/// END: `(start + n) / ratio <= index_topk`. A chunk of more than `ratio * index_topk` rows starting at 0 used to send
+/// row `ratio * index_topk - 1` — exactly `index_topk` valid entries — through `topk_kernel`, which emits its
+/// lowest-scoring entry last, while every grid dividing `ratio * index_topk` fills that row in order; the q4 cache's
+/// tensor-core sink kernel reduces the selection in 16-entry tiles, so the row's attention output differed, and in the
+/// model every later layer's KV with it (DeepSeek-V4.1 tp2's 2,048-row default: chunked != whole from generated token
+/// 0..15 at 2K..60K prompts; row 1,023 at layer 2 was the first value to differ). The pack's geometry and cache
+/// (`Dsv4Config::v41`, q4 planes): layer 2 (ratio 2 source) and 3 (its reader), boundary row 1,023; layer 20 (ratio 1
+/// source) and 21 (reader), boundary row 511 — the whole prompt as one prefill call against grids that end a chunk on
+/// the boundary, every row compared: the source's published compressed selection (the mechanism, exact; random toy
+/// weights give the compressed entries too little softmax mass for the reorder to reach the f16 output, the pack's
+/// activations do) and both layers' outputs.
+#[test]
+fn gpu_prefill_selection_is_a_property_of_the_row_not_the_chunk() {
+    if !device_available() {
+        eprintln!("not run: no device");
+        return;
+    }
+    let st = Stream::new().unwrap();
+    let cfg = Dsv4Config::v41();
+    cfg.validate().unwrap();
+    let t = toy_with(cfg.clone());
+    let d = cfg.dim;
+    let f16s = |v: &[u16]| -> Vec<f32> { v.iter().map(|&b| gb_exl3::f16::f16_to_f64(b) as f32).collect() };
+    for (src, rdr) in [(2usize, 3usize), (20, 21)] {
+        let ratio = cfg.ratio(src) as usize;
+        assert_eq!(cfg.kv_source_of(rdr), Some(src));
+        assert_eq!(cfg.index_source_of(rdr), Some(src), "layer {rdr} reads layer {src}'s selection");
+        let boundary = ratio * cfg.index_topk;
+        let l = boundary + 64;
+        let max_seq = 2 * boundary + 256;
+        let mut ms: Vec<MlaDsv4> = [src, rdr].iter().map(|&k| MlaDsv4::new(&cfg, k, &t.pack(k), max_seq).unwrap()).collect();
+        let mut r = Rng(0x0123_4567_89ab_cdefu64.wrapping_add(src as u64));
+        let x = r.vec(l * d, -1.0, 1.0);
+        let xb: Vec<u16> = x.iter().map(|&v| gb_exl3::f16::f64_to_f16(v as f64)).collect();
+
+        let (win, topk, stride) = (cfg.window, cfg.index_topk, cfg.window + cfg.index_topk);
+        // one prompt cut on `grid` (0 = the whole prompt as one call): every row of both layers' outputs, and every row's
+        // compressed selection as the source published it (compressed positions, `split` removed; `-1` kept)
+        // `first` > 0 cuts the first chunk there (a prefix-snapshot cut), so every later chunk starts off the grid: a
+        // chunk then straddles the boundary from `start_pos > 0`, the fill rows' second path
+        let mut run = |first: usize, grid: usize| -> ([Vec<f32>; 2], Vec<Vec<i32>>) {
+            let planes: Vec<Dsv4Planes> =
+                [src, rdr].iter().map(|&k| Dsv4Planes::new(&cfg, max_seq, k, gb_cuda::dsv4_kvq4::KvFmt::Q4).unwrap()).collect();
+            let mut sc = Dsv4Scratch::new(&cfg, l, max_seq).unwrap();
+            let mut out = [vec![0f32; l * d], vec![0f32; l * d]];
+            let mut sel: Vec<Vec<i32>> = Vec::with_capacity(l);
+            let mut pos = 0usize;
+            while pos < l {
+                let n = if grid == 0 {
+                    l
+                } else if pos == 0 && first > 0 {
+                    first.min(l)
+                } else {
+                    grid.min(l - pos)
+                };
+                let xdev = DevBuf::from_slice(&xb[pos * d..(pos + n) * d]).unwrap();
+                for (i, m) in ms.iter_mut().enumerate() {
+                    let shared = if i == 0 { None } else { Some(&planes[0]) };
+                    // `prefill = true`: the model's Mode::Prefill call, which the fill rule is about
+                    m.forward_slot_ex(&xdev, n, pos, 0, &planes[i], shared, false, false, &mut sc, true, &st).unwrap();
+                    st.sync().unwrap();
+                    out[i][pos * d..(pos + n) * d].copy_from_slice(&f16s(&sc.out.to_vec::<u16>().unwrap()[..n * d]));
+                    if i == 0 {
+                        // where the source staged this call's selection: its plane for n <= PLANE_ROWS, else `scratch.oq`
+                        // after the window stage (`forward_slot_to_o`'s `topk_stage_off`)
+                        let mut rows = vec![0i32; n * stride];
+                        if n <= gb_cuda::dsv4_attn::PLANE_ROWS {
+                            planes[0].topk.download_range(0, &mut rows).unwrap();
+                        } else {
+                            let off = ((win + n) * cfg.head_dim * 2 + 4095) & !4095;
+                            sc.oq.download_range(off, &mut rows).unwrap();
+                        }
+                        // the window half is `min(n, window)` slots wide on a chunk at 0 and `window` after it
+                        // (`gb_dsv4_window_and_cmp_idxs`); the compressed half follows, its entries offset by `split`
+                        let (wslots, split) = if pos == 0 {
+                            (n.min(win), n)
+                        } else if n == 1 {
+                            (win, win)
+                        } else {
+                            (win, win + n)
+                        };
+                        for r in 0..n {
+                            let row = &rows[r * stride + wslots..r * stride + wslots + topk];
+                            sel.push(row.iter().map(|&e| if e < 0 { -1 } else { e - split as i32 }).collect());
+                        }
+                    }
+                }
+                pos += n;
+            }
+            (out, sel)
+        };
+        let (whole, whole_sel) = run(0, 0);
+        // a grid whose first chunk is cut short of the boundary (the next chunk straddles it from `start_pos > 0`: 600 then
+        // 512s at ratio 2, 300 then 256s at ratio 1), and grids that end a chunk on the boundary
+        for (first, grid) in [(if ratio == 2 { 600usize } else { 300 }, boundary / 2), (0, boundary / 2), (0, boundary)] {
+            let (got, got_sel) = run(first, grid);
+            let bad_sel: Vec<usize> = (0..l).filter(|&row| whole_sel[row] != got_sel[row]).collect();
+            eprintln!(
+                "ratio {ratio} grid {grid} first {first}: layer {src} rows whose compressed selection differs from the whole prompt: {bad_sel:?}"
+            );
+            assert!(
+                bad_sel.is_empty(),
+                "ratio {ratio} grid {grid} first {first}: layer {src} published another selection on rows {bad_sel:?} (boundary row {})",
+                boundary - 1
+            );
+            for (i, layer) in [src, rdr].iter().enumerate() {
+                let bad: Vec<usize> =
+                    (0..l).filter(|&row| whole[i][row * d..(row + 1) * d] != got[i][row * d..(row + 1) * d]).collect();
+                eprintln!("ratio {ratio} grid {grid} first {first}: layer {layer} rows differing from the whole prompt: {bad:?}");
+                assert!(
+                    bad.is_empty(),
+                    "ratio {ratio} grid {grid} first {first}: layer {layer} rows {bad:?} differ from the whole prompt (boundary row {})",
+                    boundary - 1
+                );
+            }
+        }
     }
 }

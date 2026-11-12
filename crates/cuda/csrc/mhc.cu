@@ -532,6 +532,23 @@ __global__ void __launch_bounds__(256) embed_expand_k(const u16* table, const in
     for (int h = 0; h < NS; ++h) *(float4*)(x + (size_t)r * ROW + (size_t)h * HD + (size_t)c4 * 4) = v;
 }
 
+// The same from a table at ANY byte address (a shard read in place: a safetensors table may start at an odd byte, so a 2- or 8-byte load
+// of it would be misaligned): each 4-value group's 8 bytes are read one by one and assembled into the very words `ld4<T_BF16>` loads, so
+// every value is the aligned kernel's bit for bit. Only launched for a table the aligned kernel refuses.
+__global__ void __launch_bounds__(256) embed_expand_bytes_k(const unsigned char* table, const int* ids, float* x, int vocab) {
+    const int r = blockIdx.y, c4 = blockIdx.x * blockDim.x + threadIdx.x;
+    const int id = ids[r];
+    float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+    if ((unsigned)id < (unsigned)vocab) {
+        const unsigned char* b = table + ((size_t)(unsigned)id * HD + (size_t)c4 * 4) * 2;
+        const u32 lo = (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16) | ((u32)b[3] << 24);
+        const u32 hi = (u32)b[4] | ((u32)b[5] << 8) | ((u32)b[6] << 16) | ((u32)b[7] << 24);
+        v = make_float4(bf2f(lo & 0xFFFFu), bf2f(lo >> 16), bf2f(hi & 0xFFFFu), bf2f(hi >> 16));
+    }
+#pragma unroll
+    for (int h = 0; h < NS; ++h) *(float4*)(x + (size_t)r * ROW + (size_t)h * HD + (size_t)c4 * 4) = v;
+}
+
 // ------------------------------------------------------------------------------------------------ launchers
 
 static inline bool al(const void* p, int n) { return ((uintptr_t)p & (uintptr_t)(n - 1)) == 0; }
@@ -612,8 +629,10 @@ GB_EXPORT int gb_mhc_expand(const void* in, int in_type, float* x, int rows, voi
 GB_EXPORT int gb_mhc_embed_expand(const void* table, const int* ids, float* x, int rows, int vocab, void* stream) {
     if (!ok_rows(rows) || vocab <= 0) return ERR_INVALID;
     if (rows == 0) return 0;
-    if (!al(table, 8) || !al(x, 16)) return ERR_INVALID;
-    embed_expand_k<<<dim3(VEC / 256, rows), 256, 0, gb_stream(stream)>>>((const u16*)table, ids, x, vocab);
+    if (!table || !al(x, 16)) return ERR_INVALID;
+    // an 8-byte-aligned table (every device copy) takes the kernel it always took; any other address (a shard read in place) the byte one
+    if (al(table, 8)) embed_expand_k<<<dim3(VEC / 256, rows), 256, 0, gb_stream(stream)>>>((const u16*)table, ids, x, vocab);
+    else embed_expand_bytes_k<<<dim3(VEC / 256, rows), 256, 0, gb_stream(stream)>>>((const unsigned char*)table, ids, x, vocab);
     return GB_CHECK_LAUNCH();
 }
 

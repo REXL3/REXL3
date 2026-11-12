@@ -82,6 +82,15 @@ mod ffi {
     use core::ffi::c_void;
     crate::launchers! {
         pub fn gb_dsv4_router_logits(x: *const c_void, x_type: i32, w: *const c_void, logits: *mut c_void, rows: i32, s: *mut c_void) -> i32;
+        pub fn gb_dsv4_router_logits_ex(
+            x: *const c_void,
+            x_type: i32,
+            w: *const c_void,
+            logits: *mut c_void,
+            rows: i32,
+            force_mma: i32,
+            s: *mut c_void,
+        ) -> i32;
         pub fn gb_dsv4_router_select(
             logits: *const c_void,
             tab: *const c_void,
@@ -596,6 +605,31 @@ impl Dsv4Router {
         logits: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        self.logits_impl(x, x_dtype, rows, logits, false, st)
+    }
+
+    /// Prefill-slice variant of [`Self::logits`]: the MMA kernel even for `rows <= 16`, so a row's logits do not depend on the
+    /// slice's row count (decode keeps the small-row kernels).
+    pub fn logits_force(
+        &self,
+        x: &DevBuf,
+        x_dtype: crate::exl3_linear::Dtype,
+        rows: usize,
+        logits: &mut DevBuf,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        self.logits_impl(x, x_dtype, rows, logits, true, st)
+    }
+
+    fn logits_impl(
+        &self,
+        x: &DevBuf,
+        x_dtype: crate::exl3_linear::Dtype,
+        rows: usize,
+        logits: &mut DevBuf,
+        force_mma: bool,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
         let es = x_dtype.size();
         if rows == 0 {
             return Ok(());
@@ -604,12 +638,13 @@ impl Dsv4Router {
             return Err(CudaError(1));
         }
         unsafe {
-            CudaError::check(ffi::gb_dsv4_router_logits(
+            CudaError::check(ffi::gb_dsv4_router_logits_ex(
                 x.ptr(),
                 x_dtype as i32,
                 self.gate.ptr(),
                 logits.ptr(),
                 i(rows)?,
+                i32::from(force_mma),
                 st.raw(),
             ))
         }

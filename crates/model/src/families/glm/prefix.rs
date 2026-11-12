@@ -63,6 +63,15 @@ pub fn slice_end(done: usize, n: usize, chunk: usize, cuts: &[usize]) -> usize {
     }
 }
 
+/// The grid a prompt slice that does not end the prompt ends on under contract `c`, in rows from its segment's first row: P2's 16-row KDA
+/// chunk (`docs/GLM_PREFILL_P2.md` 8.1), 1 under P1.
+pub fn slice_grid(c: super::contract::PrefillContract) -> usize {
+    match c {
+        super::contract::PrefillContract::P1 => 1,
+        super::contract::PrefillContract::P2 => gb_cuda::kda::P2_CHUNK_ROWS,
+    }
+}
+
 /// The rows of a prompt slice under contract `c`. P2 (`docs/GLM_PREFILL_P2.md` 8.1): every slice of a prefill segment but its last must end
 /// a whole number of 16-row KDA chunks after the segment's first row, so a slice that starts on that grid takes a multiple of 16 rows
 /// (rounded down, at least 16); P1: `rows` as given (every grid is P1's).
@@ -142,10 +151,16 @@ pub struct SnapLayout {
     pub ring_layers: usize,
     /// The drafter's carry row, bytes (0 without the NextN layer).
     pub carry: u64,
+    /// A DFlash2 draft's context window, bytes (0 without the draft): K and V of its 5 layers for 2,048 positions.
+    pub draft_window: u64,
 }
 
 impl SnapLayout {
     pub fn of(cfg: &GlmConfig, mtp: bool) -> Result<Self, String> {
+        Self::of_with(cfg, mtp, false)
+    }
+    /// [`SnapLayout::of`] with a DFlash2 draft's window when `draft`.
+    pub fn of_with(cfg: &GlmConfig, mtp: bool, draft: bool) -> Result<Self, String> {
         let d = alloc::dims_of(cfg)?;
         Ok(Self {
             kda_layers: cfg.kda_layers().len(),
@@ -153,6 +168,7 @@ impl SnapLayout {
             kda_conv: (d.conv_slot_elems() * 2) as u64,
             ring_layers: cfg.mla_layers().len() + usize::from(mtp),
             carry: if mtp { (cfg.hidden * 2) as u64 } else { 0 },
+            draft_window: if draft { crate::draft::Draft::window_snapshot_bytes() } else { 0 },
         })
     }
     /// Bytes of the ring tails of one snapshot (every indexer layer at the most rows a tail can have).
@@ -165,13 +181,18 @@ impl SnapLayout {
     }
     /// Bytes of one snapshot slot: the memory plan and the allocation both use this.
     pub fn bytes(&self) -> u64 {
-        self.kda_bytes() + self.ring_bytes() + self.carry
+        self.kda_bytes() + self.ring_bytes() + self.carry + self.draft_window
     }
 }
 
 /// Bytes of one snapshot slot (see [`SnapLayout`]).
 pub fn snapshot_bytes(cfg: &GlmConfig, mtp: bool) -> Result<u64, String> {
     Ok(SnapLayout::of(cfg, mtp)?.bytes())
+}
+
+/// [`snapshot_bytes`] with a DFlash2 draft's window when `draft` (about 40 MiB more).
+pub fn snapshot_bytes_with(cfg: &GlmConfig, mtp: bool, draft: bool) -> Result<u64, String> {
+    Ok(SnapLayout::of_with(cfg, mtp, draft)?.bytes())
 }
 
 /// The key namespace of this pack's snapshots: everything their bytes depend on besides the tokens. Another pack, another cache format or another
@@ -181,6 +202,15 @@ pub fn snapshot_bytes(cfg: &GlmConfig, mtp: bool) -> Result<u64, String> {
 /// prompt and decoded rows), P2 is another arithmetic for prompt rows and so another namespace.
 pub fn namespace_of(target_fingerprint: &str, mtp: bool) -> u64 {
     namespace_with(target_fingerprint, mtp, super::contract::current())
+}
+
+/// [`namespace_of`] for a model that drafts with a DFlash2 draft of fingerprint `draft_fingerprint`: its snapshots hold that draft's window,
+/// so they are another namespace (another draft pack, another one again). Without a draft this is [`namespace_of`], the same text.
+pub fn namespace_of_draft(target_fingerprint: &str, mtp: bool, draft_fingerprint: Option<&str>) -> u64 {
+    match draft_fingerprint {
+        None => namespace_of(target_fingerprint, mtp),
+        Some(d) => namespace_of(&format!("{target_fingerprint}|dflash2={d}"), mtp),
+    }
 }
 
 /// [`namespace_of`] under a given prefill contract (pure, for the tests).

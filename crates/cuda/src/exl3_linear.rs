@@ -358,6 +358,42 @@ pub unsafe fn reconstruct_k2_raw(
     }
 }
 
+/// The reconstruct-once prefill linear: `y [m, n] = layer(x [m, k])` on a W_q the caller
+/// reconstructs itself (`wq`: fp16 `k * n` words row-major, filled by [`reconstruct_k2_raw`])
+/// via the pinned cuBLASLt tensor-core GEMM (`xh` fp16 `[m, k]` rotated input, `c` fp32
+/// `[m, n]` raw GEMM output). This is the same path [`Exl3Weights::prefill_with_w`] runs, one
+/// C-ABI call over the four steps, for a caller that keeps all four buffers. `bias` may be null.
+/// Not row-invariant (cuBLAS picks its kernel by shape) — the decode paths remain the reference.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn prefill_reconstruct_gemm_raw(
+    x: *const core::ffi::c_void,
+    x_dtype: i32,
+    wq: *const core::ffi::c_void,
+    suh: *const core::ffi::c_void,
+    svh: *const core::ffi::c_void,
+    bias: *const core::ffi::c_void,
+    xh: *mut core::ffi::c_void,
+    c: *mut core::ffi::c_void,
+    y: *mut core::ffi::c_void,
+    y_dtype: i32,
+    m: i32,
+    k: i32,
+    n: i32,
+    stream: *mut core::ffi::c_void,
+) -> Result<(), CudaError> {
+    #[cfg(not(gb_no_cuda))]
+    unsafe {
+        CudaError::check(ffi::gb_exl3_rotate_in(x, x_dtype, suh, xh, m, k, stream))?;
+        CudaError::check(ffi::gb_exl3_prefill_gemm(xh, wq, c, m, k, n, stream))?;
+        CudaError::check(ffi::gb_exl3_rotate_out(c, svh, bias, y, y_dtype, m, n, stream))
+    }
+    #[cfg(gb_no_cuda)]
+    {
+        let _ = (x, x_dtype, wq, suh, svh, bias, xh, c, y, y_dtype, m, k, n, stream);
+        Err(CudaError(-1))
+    }
+}
+
 /// The decode path ([`Exl3Weights::forward`]) for a half-integer width: `k2` is twice the bits
 /// (3 = 1.5, 5 = 2.5, 7 = 3.5), in place of `Exl3Weights::bits`. The other arguments are
 /// `forward`'s: `workspace` needs `linear_workspace_bytes`' sizing for the shape (see

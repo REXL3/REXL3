@@ -351,7 +351,8 @@ impl EngineHandle {
             return Err(Refusal::NotReady);
         }
         if !self.score_supported() {
-            return Err(Refusal::Rejected(gb_engine::score::unsupported()));
+            let e = if req.all_rows { gb_engine::score::rows_unsupported() } else { gb_engine::score::unsupported() };
+            return Err(Refusal::Rejected(e));
         }
         if self.metrics.inbox.fetch_add(1, Ordering::AcqRel) >= self.inbox_cap() {
             self.metrics.inbox.fetch_sub(1, Ordering::AcqRel);
@@ -517,7 +518,8 @@ pub struct RuntimeConfig {
     pub on_fatal: Arc<dyn Fn(&FatalInfo) + Send + Sync>,
     /// On a fatal engine exit, leak the engine instead of dropping it. Set for a tensor-parallel group: a destructor that frees device
     /// memory can block behind a collective that a lost peer will never join, and `die` (which fails the requests by name and ends the
-    /// process) would then never run. Off elsewhere: every other family drops its engine as before.
+    /// process) would then never run. A fatal exit is a returned `Exit::Fatal` or a panic once the engine is built (see [`Held`]); a
+    /// boot cancelled before the server turned ready still drops it. Off elsewhere: every other family drops its engine as before.
     pub leak_engine_on_fatal: bool,
     /// How the default `on_fatal` ends the process. `FatalExit::Immediate` (a tensor-parallel group, `gb_model::exit::fatal_exit_mode`):
     /// stderr flushed and `_exit`, with no atexit handler, so the CUDA runtime's exit-time teardown of a context whose communicator was
@@ -580,6 +582,23 @@ pub fn spawn_dyn(make: Box<dyn FnOnce() -> Box<dyn ServeEngine> + Send>) -> (Eng
     spawn_with(make, RuntimeConfig::default())
 }
 
+/// The engine of the engine thread, from the boot's last checkpoint on. A panic that unwinds out of the thread's closure would drop it
+/// on the way, before `die` has answered a single request; with `leak_on_unwind` (`RuntimeConfig::leak_engine_on_fatal`) the unwind
+/// leaks it instead, so a panic leaves a group's rank the way a returned fatal exit does (REXL3/REXL3#101). Without the flag, and on
+/// every way out that is not an unwind, the engine is dropped as before; a returned fatal exit of a group forgets the whole guard.
+struct Held {
+    engine: Option<Box<dyn ServeEngine>>,
+    leak_on_unwind: bool,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.leak_on_unwind && std::thread::panicking() {
+            std::mem::forget(self.engine.take());
+        }
+    }
+}
+
 /// [`spawn_dyn`] with a configuration.
 pub fn spawn_with(make: Box<dyn FnOnce() -> Box<dyn ServeEngine> + Send>, cfg: RuntimeConfig) -> (EngineHandle, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
@@ -600,8 +619,12 @@ pub fn spawn_with(make: Box<dyn FnOnce() -> Box<dyn ServeEngine> + Send>, cfg: R
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 gb_engine::boot::install_cancel(abort_boot);
                 gb_engine::boot::checkpoint();
-                let mut engine = make();
+                let engine = make();
                 gb_engine::boot::checkpoint();
+                // from here on a panic is a fatal exit like a returned one, and must not drop a group's engine either (`Held`); a boot
+                // cancelled at the checkpoint above still drops it
+                let mut held = Held { engine: Some(engine), leak_on_unwind: cfg.leak_engine_on_fatal };
+                let engine = held.engine.as_mut().expect("the engine is held until the closure ends");
                 m.set_ready_complete(true);
                 m.score_supported.store(engine.score_supported(), Ordering::Release);
                 snapshot(engine.as_ref(), &m);
@@ -622,7 +645,7 @@ pub fn spawn_with(make: Box<dyn FnOnce() -> Box<dyn ServeEngine> + Send>, cfg: R
                     // The engine is not dropped on the way out: `die` below fails every request by name and ends the process, and a
                     // destructor that frees device memory can block on a device that is stuck (a tensor-parallel rank in a collective
                     // with a lost peer: the clients would see no error for the whole progress-watchdog budget, and `die` never ran).
-                    std::mem::forget(engine);
+                    std::mem::forget(held);
                 }
                 exit
             }));

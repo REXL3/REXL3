@@ -2,6 +2,7 @@
 //! per-channel decay g and the output gate z from the full-rank fp16 `f_proj` / `g_proj` outputs and the plain bf16
 //! `b_proj` weight, instead of the low-rank `proj_in` + `proj_out` pair. The kernel is row-invariant (a row's values
 //! depend only on its own x / f / g) and matches the CPU reference.
+#![cfg(not(gb_no_cuda))]
 mod common;
 
 const HEADS: usize = 64;

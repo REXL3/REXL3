@@ -257,3 +257,110 @@ fn a_rank_maps_and_plans_only_its_share() {
         }
     }
 }
+
+/// The embedding read in place (`REXL3_GLM_EMBED_IN_PLACE`, `GlmPack::from_inventory_embed`): a rank's plan of the RED-SNOW 4.91 bpw pack
+/// (and the 2.25 bpw pack's, `REXL3_GLM_DIR`) holds exactly the embedding table's bytes less, in a `Mapped` region of one item that no
+/// load plan keeps; the plan without it is the default plan item for item. CPU only, on the pack headers.
+#[test]
+fn the_embedding_read_in_place_leaves_the_rank_plan_by_exactly_its_bytes() {
+    use gb_model::families::glm::plan::RegionKind;
+    use gb_model::families::glm::tp_boot::rank_weight_bytes_with;
+    let dirs: Vec<PathBuf> = ["REXL3_REDSNOW_DIR", "REXL3_GLM_DIR"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(PathBuf::from))
+        .filter(|p| p.join("config.json").exists())
+        .collect();
+    if dirs.is_empty() {
+        eprintln!("REXL3_REDSNOW_DIR / REXL3_GLM_DIR not set: not run");
+        return;
+    }
+    for dir in dirs {
+        // the headers only (no marker reads): a header-only copy of a pack is enough
+        let ck = gb_exl3::checkpoint::scan(&dir, false).unwrap();
+        let inv = PackInventory::from_checkpoint(&ck).unwrap();
+        let cfg = GlmConfig::from_dir(&dir).unwrap().with_kda_rank(0, 2).unwrap();
+        let own = ExpertOwnership::range(288, 0, 2).unwrap();
+        let copy = GlmPack::from_inventory_embed(&inv, cfg.clone(), &own, false, false).unwrap();
+        let mapped = GlmPack::from_inventory_embed(&inv, cfg.clone(), &own, false, true).unwrap();
+        // the default plan is unchanged by the option's existence
+        let default = GlmPack::from_inventory_with(&inv, cfg.clone(), &own, false).unwrap();
+        assert_eq!(default.plan.items, copy.plan.items, "{}: the default plan", dir.display());
+        assert_eq!(default.plan.regions, copy.plan.regions);
+        let m: Vec<_> = mapped.plan.regions.iter().filter(|r| r.kind == RegionKind::Mapped).collect();
+        assert_eq!(m.len(), 1, "one mapped region");
+        let items: Vec<_> = mapped.plan.items.iter().filter(|i| i.region == m[0].id).collect();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].name.ends_with("embed_tokens.weight"), "{}", items[0].name);
+        let table = items[0].bytes;
+        assert_eq!(table, 154_880 * 4096 * 2);
+        for mtp in [false, true] {
+            let (a, b) = (rank_weight_bytes_with(&copy, mtp), rank_weight_bytes_with(&mapped, mtp));
+            // the Global region shrinks by the table and its alignment padding, nothing else moves
+            assert!(a - b >= table && a - b < table + 4096, "{}: mtp {mtp}: {a} - {b} vs the table's {table}", dir.display());
+            eprintln!(
+                "{}: mtp {mtp}: rank 0 weights {:.3} -> {:.3} GiB (-{:.3}); the table {} bytes at file offset {} (mod 8 = {})",
+                dir.file_name().unwrap().to_string_lossy(),
+                a as f64 / GIB,
+                b as f64 / GIB,
+                (a - b) as f64 / GIB,
+                table,
+                items[0].offset,
+                items[0].offset % 8
+            );
+        }
+    }
+}
+
+/// One layer of a real pack booted twice, the embedding copied and read in place (`GlmPack::from_inventory_embed`): the executed plan
+/// holds no mapped region, the mapped boot holds exactly the table less device memory, the two tables are the same bytes, and the trunk's
+/// gather (`mhc::embed_expand`) gives the same rows from both, bit for bit. GPU (under the GPU lock); needs `REXL3_GLM_DIR` or
+/// `REXL3_REDSNOW_DIR` (a real pack: the markers are read).
+#[test]
+#[ignore]
+fn a_one_layer_boot_with_the_embedding_in_place_holds_the_copys_bytes() {
+    use gb_model::families::glm::load::{boot_mapped, LoadOptions};
+    use gb_model::families::glm::plan::RegionKind;
+    let Some(dir) = ["REXL3_GLM_DIR", "REXL3_REDSNOW_DIR"].iter().find_map(|k| std::env::var(k).ok().map(PathBuf::from)) else {
+        eprintln!("REXL3_GLM_DIR / REXL3_REDSNOW_DIR not set: not run");
+        return;
+    };
+    if !gb_cuda::device_available() || !gb_cuda::rt::pageable_memory_access() {
+        eprintln!("no device that reads pageable memory: not run");
+        return;
+    }
+    let ck = gb_exl3::checkpoint::scan(&dir, true).unwrap();
+    let inv = PackInventory::from_checkpoint(&ck).unwrap();
+    let cfg = GlmConfig::from_dir(&dir).unwrap();
+    let all = ExpertOwnership::all(cfg.ffn.routed_experts);
+    let copy = GlmPack::from_inventory_embed(&inv, cfg.clone(), &all, false, false).unwrap();
+    let mapped = GlmPack::from_inventory_embed(&inv, cfg.clone(), &all, false, true).unwrap();
+    let o = LoadOptions::from_env(4 << 30);
+    let a = boot_mapped(&dir, copy, Some(1), &o, 0.0).unwrap();
+    let b = boot_mapped(&dir, mapped, Some(1), &o, 0.0).unwrap();
+    let table = (cfg.vocab * cfg.hidden * 2) as u64;
+    assert!(!b.plan.regions.iter().any(|r| r.kind == RegionKind::Mapped), "the executed plan allocates no mapped region");
+    assert_eq!(b.device.regions.mapped_bytes(), table);
+    let (da, db) = (a.device.regions.bytes(), b.device.regions.bytes());
+    assert!(da - db >= table && da - db < table + 4096, "device bytes {da} -> {db}, the table {table}");
+    let (ea, eb) = (a.device.embed.to_vec::<u16>().unwrap(), b.device.embed.to_vec::<u16>().unwrap());
+    assert!(ea == eb, "the table read in place is not the copy's bytes");
+    let st = gb_cuda::Stream::new().unwrap();
+    let ids: Vec<i32> = vec![0, 1, 2, 4095, 65_537, 154_855, cfg.vocab as i32 - 1, -1, cfg.vocab as i32];
+    let rows = ids.len();
+    let di = gb_cuda::DevBuf::from_slice(&ids).unwrap();
+    let gather = |t: &gb_cuda::DevBuf| -> Vec<u32> {
+        let x = gb_cuda::DevBuf::zeroed(rows * gb_cuda::mhc::ROW * 4).unwrap();
+        unsafe { gb_cuda::mhc::embed_expand(t.ptr(), di.ptr(), x.ptr() as *mut f32, rows, cfg.vocab, &st).unwrap() };
+        st.sync().unwrap();
+        x.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect()
+    };
+    assert!(gather(&a.device.embed) == gather(&b.device.embed), "the trunk's gather differs");
+    eprintln!(
+        "one layer, embedding in place: device {:.3} -> {:.3} GiB (-{:.3}), mapped {:.3} GiB, table pointer mod 8 = {}, {rows} rows gathered bit for bit",
+        da as f64 / GIB,
+        db as f64 / GIB,
+        (da - db) as f64 / GIB,
+        table as f64 / GIB,
+        b.device.embed.ptr() as usize % 8
+    );
+}

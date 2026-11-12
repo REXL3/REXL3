@@ -406,3 +406,26 @@ fn bench_pdl_chain() {
         }
     }
 }
+
+/// The bytes a strip copy (`select_strips`) allocates are its parts: the kept columns' trellis (`k / 16` x `kept * 8` tiles of `16 * bits` words),
+/// the whole fp16 `suh`, the kept columns' fp16 `svh`, and with a bias the kept columns of it. The bias-free sum is what GLM's planner charges
+/// for the NextN drafter's restricted head (`families::glm::model::strip_copy_bytes`, a copy of the bias-free `lm_head`), at several widths and
+/// strip sets.
+#[test]
+fn the_strip_copy_is_priced_to_the_byte() {
+    gpu!();
+    let parts = |k: usize, bits: usize, kept: usize, bias: bool| {
+        (k / 16) * kept * 64 * bits * 4 + k * 2 + kept * 128 * 2 + if bias { kept * 128 * 2 } else { 0 }
+    };
+    let mut checked = 0;
+    for (bits, bias) in [(2usize, false), (4, true), (6, false), (8, false), (8, true)] {
+        let w = synth(256, 128 * 80, bits, Codebook::Mul1, bias, 900 + bits as u64);
+        for set in [vec![(0usize, 64usize)], vec![(0, 40), (50, 74), (79, 80)], vec![(0, 80)]] {
+            let kept: usize = set.iter().map(|&(lo, hi)| hi - lo).sum();
+            let c = w.select_strips(&set).unwrap();
+            assert_eq!(c.weight_bytes(), parts(w.k, w.bits, kept, bias), "{bits} bits, bias {bias}, {set:?}");
+            checked += 1;
+        }
+    }
+    eprintln!("a strip copy's weight_bytes == its parts in {checked} cases");
+}

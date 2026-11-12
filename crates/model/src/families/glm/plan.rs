@@ -29,6 +29,10 @@ pub enum RegionKind {
     Experts(usize),
     /// The vision tower.
     Vision,
+    /// The embedding table read in place from its shard (`load::EMBED_IN_PLACE_ENV`, opt-in): planned like any region so its items
+    /// keep their offsets, but never allocated or copied; the boot maps the shard's bytes read-only (`load::boot_mapped_with`). The
+    /// pages are the shard's page cache (reclaimable), so no weight plan charges them (`load::keep_prefix_mtp` leaves it out).
+    Mapped,
 }
 
 impl std::fmt::Display for RegionKind {
@@ -38,6 +42,7 @@ impl std::fmt::Display for RegionKind {
             RegionKind::Trunk(l) => write!(f, "layer{l}"),
             RegionKind::Experts(l) => write!(f, "experts{l}"),
             RegionKind::Vision => write!(f, "vision"),
+            RegionKind::Mapped => write!(f, "mapped"),
         }
     }
 }

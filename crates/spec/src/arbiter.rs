@@ -493,15 +493,11 @@ impl Arbiter {
                 self.state(a.stream).probing_mtp = true;
                 continue;
             }
-            if self.cfg.allow_copy
-                && a.copy_len >= 1
-                && a.max >= 1
-                && copy_due
-                && matches!(picks[i], Choice::None)
-                && room(rows, 1)
-            {
-                picks[i] = Choice::Copy(a.copy_len.min(a.max).min(2));
-                rows += picks[i].drafts();
+            // the copy probe is up to two drafts deep, and never deeper than the rows the window has left
+            let copy_depth = a.copy_len.min(a.max).min(2).min(self.cfg.max_rows.saturating_sub(rows));
+            if self.cfg.allow_copy && copy_depth >= 1 && copy_due && matches!(picks[i], Choice::None) && room(rows, copy_depth) {
+                picks[i] = Choice::Copy(copy_depth);
+                rows += copy_depth;
                 self.stats.probes += 1;
                 self.state(a.stream).probing_copy = true;
             }
@@ -778,6 +774,35 @@ mod tests {
         fn mtp_ms(&self, _: usize, _: usize, _: usize) -> f64 {
             0.0
         }
+    }
+
+    /// The copy probe is up to two drafts deep. With one row left in the window it used to check room for one row and then take
+    /// two, the one place the arbiter went past `max_rows` (REXL3/REXL3#100).
+    #[test]
+    fn a_copy_probe_takes_only_the_rows_the_window_has_left() {
+        let n = 4;
+        for free in 0..=2 * n + 1 {
+            // no head, a copy match on every stream, rows too dear for the search to draft: only the probes (due every round) add rows
+            let mut a =
+                Arbiter::new(ArbiterConfig { allow_mtp: false, max_rows: n + free, probe_every: 0, ..ArbiterConfig::default() });
+            let asks: Vec<Ask> = (0..n).map(|s| Ask { copy_len: 5, mtp_ok: false, ..ask(s) }).collect();
+            let picks = a.choose(&Linear(300.0), &asks);
+            let rows: usize = picks.iter().map(|c| 1 + c.drafts()).sum();
+            assert!(rows <= n + free, "{free} free rows: {rows} rows in a window of {}: {picks:?}", n + free);
+            // the probes go in stream order, two deep while two rows are left, then one deep, then none
+            let want: Vec<Choice> = (0..n)
+                .map(|s| match free.saturating_sub(2 * s).min(2) {
+                    0 => Choice::None,
+                    d => Choice::Copy(d),
+                })
+                .collect();
+            assert_eq!(picks, want, "{free} free rows");
+            assert_eq!(a.stats.probes, want.iter().filter(|c| **c != Choice::None).count() as u64, "{free} free rows");
+        }
+        // a match of one token is probed one deep, as before
+        let mut a = Arbiter::new(ArbiterConfig { allow_mtp: false, max_rows: 8, probe_every: 0, ..ArbiterConfig::default() });
+        let picks = a.choose(&Linear(300.0), &[Ask { copy_len: 1, mtp_ok: false, ..ask(0) }]);
+        assert_eq!(picks, vec![Choice::Copy(1)]);
     }
 
     #[test]

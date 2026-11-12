@@ -25,9 +25,24 @@ Engine development, model validation and sealing happen in the development repos
 Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: v0.1.0 is released.** The five models below are published as assets of the
-> [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
-> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`.
+> **Status: v0.1.0 is released; v0.1.1 is being prepared.** The v0.1.0 models are published as
+> assets of the [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from
+> engine commit `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`. The v0.1.1 models below are sealed on
+> engine commit `75031112ba1279b6da97d5604be5160648cc9f2c` and are published as assets of the
+> v0.1.1 release when it is tagged; until then, install from v0.1.0.
+
+## v0.1.1 models
+
+| Model | Version | Architecture | Runtime id | Profiles: context, nodes, port | Vision | Pack sheet |
+| --- | --- | --- | --- | --- | --- | --- |
+| Qwen3.8-27B | v4 | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on | [qwen3.8-27b](docs/packs/qwen3.8-27b.md) |
+| Qwen3.8-Flash-Next | v3 | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (default) and `qwen38-flash-next-single-262k-draft`: 262,144 tokens, one node, port 8899 | off | [qwen3.8-flash-next](docs/packs/qwen3.8-flash-next.md) |
+| GLM-5.3-Flash | v2 | `glm` (glm5_next) | `glm53-flash-sage-2.25` | `glm53-flash-single`: 262,144 tokens, one node, port 8950 | on | [glm-5.3-flash](docs/packs/glm-5.3-flash.md) |
+| GLM-5.3-Flash, two nodes | v1 | `glm` (glm5_next) | `glm53-flash-tp2-sage-2.25` | `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on | [glm-5.3-flash-tp2](docs/packs/glm-5.3-flash-tp2.md) |
+| RED-SNOW-5.3-Flash, two nodes | v1 | `glm` (glm5_next) | `redsnow-5.3-flash-tp2-sage-4.91` | `redsnow-tp2-512k`: 524,288 tokens, two nodes, port 8952 | on | [red-snow-5.3-flash-tp2](docs/packs/red-snow-5.3-flash-tp2.md) |
+| Nemotron-3.5-Super-VL | v2 | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on | [nemotron-3.5-super-vl](docs/packs/nemotron-3.5-super-vl.md) |
+| MiniCPM-V-4.7-35B-A3B | v1 | `minicpmv4_7` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k`: 262,144 tokens, one node, port 8889 | on | [minicpm-v-4.7-35b-a3b](docs/packs/minicpm-v-4.7-35b-a3b.md) |
+| DeepSeek-V4.1-Flash-1017, two nodes | v1 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off | [deepseek-v4.1-flash-1017-tp2](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
 
 ## First release (v0.1.0) models
 
@@ -39,24 +54,21 @@ Rules for contributing are in
 | Nemotron-3.5-Super-VL | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on |
 | DeepSeek-V4.1-Flash-1017 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940 | off |
 
-Planned for v0.1.1: Ling-3.1-Flash-1019 and DeepSeek-V4.1-Flash-1017's two-node profile (`dsv41-tp2-1m`, 1,048,576 tokens).
-
 The runtime id is the prefix of that model's release asset names. A model with a single-node and a
 two-node profile ships as two independent runtime units: `tp1` (single node) as `<model>`, and `tp2`
 (two nodes) as `<model>-tp2`. They are packaged, sealed and approved separately, so a `tp1` unit never
 waits on its `tp2` sibling. In v0.1.0 the GLM-5.3-Flash approval is the combined approval 1
-(`glm53-flash-2.25bpw-sm121`) covering both `glm53-flash-single` and `glm53-flash-tp2-1m`; the
-`<model>` / `<model>-tp2` split applies to models added after v0.1.0 and to subsequent GLM versions. The
+(`glm53-flash-2.25bpw-sm121`) covering both `glm53-flash-single` and `glm53-flash-tp2-1m`; from v0.1.1
+GLM-5.3-Flash ships as two units, `glm-5.3-flash` (single node, version 2) and `glm-5.3-flash-tp2`
+(two nodes, version 1). The
 release page and each recipe's sealed `profile.json` are authoritative: a sealed runtime id, profile
 or port can differ from the table above. A recipe with vision off says so in its `KNOWN_ISSUES.md`.
 
-**The `tp2` two-node profile in v0.1.0** (GLM-5.3-Flash's 1,048,576-token profile,
-`glm53-flash-tp2-1m`) listens on the leader node's network address, not on localhost, and in v0.1.0
-the server has no API key and no request log. Run it only on a private, trusted network, or behind a
-firewall or an SSH tunnel. An API key option is planned for v0.1.1.
-
-None of these is released. Qualification on the exact release binary, sealing and promotion are the
-remaining steps; the release notes document what each model's evidence proves.
+**The `tp2` two-node profiles** (GLM-5.3-Flash's `glm53-flash-tp2-1m`, RED-SNOW-5.3-Flash's
+`redsnow-tp2-512k` and DeepSeek-V4.1-Flash-1017's `dsv41-tp2-1m`) listen on the leader node's network
+address, not on localhost, and the server has no API key and no request log. Run them only on a
+private, trusted network, or behind a firewall or an SSH tunnel. An API key option is planned for the
+next release.
 
 ## Supported hardware
 
@@ -106,7 +118,7 @@ release asset's name, so never use it to find the file. The steps:
 
 ```bash
 # 1. Download your model's approval and bundle from the exact tag
-TAG=v0.1.0
+TAG=v0.1.1
 RUNTIME_ID=<runtime-id>          # the prefix of your model's asset names on the release page
 DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
 gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
@@ -118,9 +130,22 @@ want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"][
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
 [ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"
 
-# 3. Extract into a new directory and run the launcher lifecycle
+# 3. Extract into a new directory
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+
+# 4. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
+#    SHA-256 against the approval, and install it at its path with mode 0755
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
+
+# 5. Run the launcher lifecycle
 ./launch.sh --yes install-deps                # pinned system packages and a private Python environment
 ./launch.sh doctor                            # read-only checks; must exit 0
 ./launch.sh print-command                     # the exact command, including the profile's port

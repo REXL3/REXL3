@@ -56,6 +56,7 @@ pub fn rank_graphs(capturable: bool) -> bool {
 
 /// Lane P step (c): the routed experts of a P2 prompt chunk on a rank (the parts' swap).
 mod p2;
+pub(in crate::families::glm::model) use p2::P2Experts;
 mod p2_split;
 
 /// The rank's collective and its share of the routed experts.

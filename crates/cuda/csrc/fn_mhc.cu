@@ -355,3 +355,41 @@ GB_EXPORT int gb_fn_hc_post(
     }
     return GB_CHECK_LAUNCH();
 }
+
+// ── DFlash2 tap: the unweighted mean of the hc streams of every row, ((x0 + x1) + x2) + ... in fp32, times 1 / hc, rounded once to
+// bf16, written into column `col` (an `H`-wide band) of a row-major tap buffer whose rows are `ld` values wide. Reads the streams only.
+extern "C" __global__ void hc_tap_kernel(
+    const float* __restrict__ streams,  // [T, hc, H]
+    __nv_bfloat16* __restrict__ out,    // [T, ld]
+    const unsigned int H,
+    const unsigned int hc,
+    const unsigned int ld,
+    const unsigned int col,
+    const float inv
+) {
+    const unsigned int t = blockIdx.y;
+    const unsigned int d = blockIdx.x * QHC_BLOCK + threadIdx.x;
+    if (d >= H) return;
+    const float* s = streams + (size_t)t * hc * H + d;
+    float acc = s[0];
+    for (unsigned int i = 1; i < hc; ++i) acc += s[(size_t)i * H];
+    out[(size_t)t * ld + col + d] = __float2bfloat16_rn(acc * inv);
+}
+
+GB_EXPORT int gb_fn_hc_tap(
+    const void* streams,
+    void* out,
+    unsigned int hidden_size,
+    unsigned int hc_mult,
+    unsigned int ld,
+    unsigned int col,
+    unsigned int num_tokens,
+    void* stream
+) {
+    if (num_tokens == 0) return 0;
+    if (hc_mult == 0 || col + hidden_size > ld) return (int)cudaErrorInvalidValue;
+    const dim3 grid((hidden_size + QHC_BLOCK - 1) / QHC_BLOCK, num_tokens);
+    hc_tap_kernel<<<grid, QHC_BLOCK, 0, gb_stream(stream)>>>(
+        (const float*)streams, (__nv_bfloat16*)out, hidden_size, hc_mult, ld, col, 1.0f / (float)hc_mult);
+    return GB_CHECK_LAUNCH();
+}

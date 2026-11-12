@@ -24,6 +24,12 @@ fn row_of(c: &Candidates, r: usize, n: usize) -> RowOutput {
 /// kernels' bits at any row count), so a snapshot is interchangeable across totals.
 pub const PATH_ID: u32 = 1;
 
+/// Tokens the engine rounds a planned prefix cut down to a multiple of. A KDA prefix snapshot resumes by running
+/// `kda::window_chunked` over the tail, whose recurrence advances in 16-row chunks: a cut on that grid means the resumed
+/// chunk never re-derives a partial chunk of an already-snapshotted prefix. (KV pages of this family are whole-page
+/// snapshots already; this is the KDA chunk grid, not the page size.)
+pub const CUT_ALIGN: usize = super::alloc::PREFILL_ALIGN;
+
 /// Bytes of one host-RAM snapshot slot apart from its MLA page copies: every KDA layer's committed state as the pool holds it (both
 /// state buffers, the conv history and the parity word: `kda::Dims::slot_bytes`, 8.14 MiB a layer on Ling-3.1) and, when the MTP head
 /// drafts, its tap ring (`CAP_TAPS` bf16 rows, 64 MiB): 576.9 MiB for Ling-3.1 with MTP. A snapshot also copies the
@@ -36,13 +42,24 @@ pub fn snapshot_fixed_bytes(cfg: &super::config::BailingConfig, with_mtp: bool) 
     kda + mtp
 }
 
+/// Whether a snapshot at `cut` of a prefill segment that starts at `start` lies on the segment's KDA chunk grid (a whole number of
+/// `engine::CUT_GRID`-row chunks after `start`): the prefill's chunks start there too, so the snapshot holds a cold prefill's bits.
+pub fn on_cut_grid(cut: usize, start: usize) -> bool {
+    cut >= start && (cut - start) % super::engine::CUT_GRID == 0
+}
+
 /// The prefix cache namespace of this pack pair: everything a snapshot's bytes depend on besides the tokens
-/// (the pack's fingerprint, whether the MTP drafter is on, the page size, the cache formats).
+/// (the pack's fingerprint, whether the MTP drafter is on, the page size, the cache formats, and the
+/// Gated-MLA arithmetic contract — P2's tensor-core bits differ from P1's, so a snapshot written under one
+/// contract must never be restored under the other).
 pub fn prefix_namespace(target_fingerprint: &str, mtp: bool) -> u64 {
+    let c = super::contract::current();
     let text = format!(
-        "rexl3-bailing-prefix-cache-v1|{target_fingerprint}|mtp={}|page={}|kv=bf16|state=f32+bf16",
+        "rexl3-bailing-prefix-cache-v1|{target_fingerprint}|mtp={}|page={}|kv=bf16|state=f32+bf16|mla={}{}",
         if mtp { "l72" } else { "none" },
         crate::kvtables::BLOCK_TOKENS,
+        c.id(),
+        c.arith_tag(),
     );
     text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
 }
@@ -115,11 +132,11 @@ impl BailingBackend {
                 self.model.begin_slot(slot)?;
             }
             if done >= n {
-                // a full hit (restored exactly to the prompt's end): no tokens to prefill, but the first
-                // token's candidates must come from the restored last row — a single-row window step
-                let b =
-                    RowBatch::from_requests(&[RowRequest { slot, tokens: vec![prompt[n - 1]], first_position: (n - 1) as u64 }]);
-                let c = self.model.window_candidates(&b, candidates)?;
+                // a full hit (restored exactly to the prompt's end): no tokens to prefill, and the restored state already
+                // holds the last row, so it must not run again (a window of it would step every KDA state and conv history
+                // past it once more and rewrite its MLA rows from those). Its candidates are the head over its normed trunk
+                // row, which the restored MTP tap ring holds: the bytes and the kernel of the cold prefill's last row.
+                let c = self.model.tap_candidates(slot, n - 1, candidates)?;
                 return Ok(PrefillStep { done: n, row: Some(row_of(&c, 0, candidates)) });
             }
             let has_prefix = self.prefix.is_some();
@@ -132,8 +149,28 @@ impl BailingBackend {
             } else {
                 0
             };
-            let mut eligible: Vec<usize> =
-                cuts.iter().copied().filter(|&c| c > done && c <= n && (!capture || self.model.can_snapshot_prefix(c))).collect();
+            // only cuts on the segment's KDA chunk grid (`engine::CUT_GRID` rows from its first row, `done`): a snapshot off the
+            // grid would resume with other bits than a cold prefill (the engine's cuts are on it already, `engine::prefix_config`)
+            let mut eligible: Vec<usize> = Vec::new();
+            // cuts the host-memory guard declined (`BailingModel::can_snapshot_prefix`): counted, never silent
+            let mut declined = 0u64;
+            let mut first_declined: Option<super::model::SnapshotHeadroom> = None;
+            for &c in cuts {
+                if !(c > done && c <= n && on_cut_grid(c, done)) {
+                    continue;
+                }
+                if capture && !self.model.can_snapshot_prefix(c) {
+                    if let Some(h) = self.model.snapshot_headroom(c).filter(|h| h.avail < h.needed) {
+                        declined += 1;
+                        first_declined.get_or_insert(h);
+                    }
+                    continue;
+                }
+                eligible.push(c);
+            }
+            if let Some(h) = first_declined {
+                super::counters::note_skipped_low_memory(declined, h.avail, h.needed);
+            }
             let active: Vec<usize> =
                 if eligible.len() > cap_limit { eligible.split_off(eligible.len() - cap_limit) } else { eligible };
             let mut waypoints = active.clone();
@@ -146,6 +183,12 @@ impl BailingBackend {
                 let is_cut = active.contains(&seg_end);
                 let want = (seg_end == n).then_some(candidates);
                 last = self.model.prefill_chunk(slot, cur, &prompt[cur..seg_end], want)?;
+                if is_cut && capture && !self.model.can_snapshot_prefix(seg_end) {
+                    // the guard passed when the cut was planned and fails now (memory moved while the segment prefilled)
+                    if let Some(h) = self.model.snapshot_headroom(seg_end).filter(|h| h.avail < h.needed) {
+                        super::counters::note_skipped_low_memory(1, h.avail, h.needed);
+                    }
+                }
                 if is_cut && capture && self.model.can_snapshot_prefix(seg_end) {
                     if let Some(snap) = self.model.alloc_snapshot() {
                         taken.push(snap);
@@ -161,7 +204,9 @@ impl BailingBackend {
                                 taken.clear();
                                 captured.push(Captured { len: seg_end, handle: PrefixHandle { snap, pages: Vec::new() } });
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                // the cut is lost and the prompt goes on cold: counted and logged, not swallowed
+                                super::counters::note_capture_failed(&e.to_string());
                                 taken.clear();
                                 self.model.release_prefix(snap);
                             }
@@ -315,6 +360,12 @@ impl Backend for BailingBackend {
         self.prefix
     }
 
+    /// The prefix cache's cut grid (the engine rounds every planned cut down to a multiple of this): the KDA
+    /// `window_chunked` 16-row chunk grid, so a restored prefix resumes on a chunk boundary.
+    fn prefix_cut_align(&self) -> usize {
+        CUT_ALIGN
+    }
+
     fn prefix_path(&self, _total: usize) -> Option<u32> {
         self.prefix.as_ref().map(|_| PATH_ID)
     }
@@ -348,5 +399,37 @@ impl Backend for BailingBackend {
         if self.prefix.is_some() {
             self.model.release_prefix(handle.snap);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine reads the family's cut grid through the `Backend` trait (`prefix_cut_align`), and the default
+    /// `PrefixConfig` leaves `cut_align` off so `Engine::with_prefix_cache` fills it in from here.
+    #[test]
+    fn the_prefix_cut_align_is_the_kda_chunk_grid() {
+        assert_eq!(CUT_ALIGN, 16, "kda::window_chunked's 16-row chunk grid");
+        assert_eq!(CUT_ALIGN, super::super::alloc::PREFILL_ALIGN);
+        // the Backend impl reports it (the method exists on the trait and is overridden here)
+        fn grid_of<B: Backend>(b: &B) -> usize {
+            b.prefix_cut_align()
+        }
+        let _ = grid_of::<BailingBackend>;
+        // the engine's default leaves the grid unset, so the backend's grid applies
+        assert!(gb_engine::PrefixConfig::default().cut_align <= 1);
+    }
+
+    #[test]
+    fn a_cut_is_on_the_grid_of_its_segment() {
+        // a cold prefill's segment starts at 0: its cuts are the multiples of 16
+        assert!(on_cut_grid(1296, 0) && on_cut_grid(16, 0) && on_cut_grid(0, 0));
+        assert!(!on_cut_grid(1300, 0) && !on_cut_grid(1, 0));
+        // a resumed one starts at its hit (itself a cut, so on the grid): 16-row chunks from there
+        assert!(on_cut_grid(2048 + 512, 2048) && !on_cut_grid(2048 + 8, 2048));
+        // a segment that started off the grid keeps its own grid
+        assert!(on_cut_grid(100 + 32, 100) && !on_cut_grid(128, 100));
+        assert!(!on_cut_grid(10, 20));
     }
 }

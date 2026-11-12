@@ -57,6 +57,10 @@ impl BuildInfo {
             s.push('_');
             s.push_str(&g);
         }
+        if let Some(l) = gb_model::families::bailing_moe_v3::contract::fingerprint_suffix() {
+            s.push('_');
+            s.push_str(&l);
+        }
         s
     }
 

@@ -55,10 +55,22 @@ use gb_cuda::{glue, DevBuf, Stream};
 
 /// Rows a decode or verify window may carry.
 pub const WINDOW_ROWS: usize = 32;
+
+/// The rows the model's scratch is built at for a prefill chunk of `chunk_rows`: the chunk or a verify window, whichever is
+/// wider, capped at the kernels' `MAX_ROWS`. [`Dsv41Model::new`] allocates at this depth and admission prices at it
+/// (`plan::model_rows`), so the two cannot drift.
+pub fn scratch_rows(chunk_rows: usize) -> usize {
+    chunk_rows.clamp(WINDOW_ROWS, DSV4_MAX_ROWS)
+}
+
 /// Maximum drafted tokens per single-sequence MTP round (`1 + MTP_MAX_DRAFTS = 8` verify rows).
 pub const MTP_MAX_DRAFTS: usize = 7;
 /// Most candidates one row is offered.
 pub const MAX_CANDIDATES: usize = 64;
+/// Rows of full-vocabulary head output the scratch holds (`head_out` and the top-k buffers). One forward with
+/// [`Head::AllRows`] reads out at most this many rows, so a longer teacher-forced readout (`prompt_logprobs`) runs in
+/// pieces of it ([`Dsv41Model::prefill_logits_rows`] refuses more). A decode or verify window is at most [`WINDOW_ROWS`].
+pub const HEAD_ROWS: usize = 64;
 
 /// `REXL3_DSV41_WINDOW_ROWS` (T2.5c): the verify window's row budget — this family's analog of the Qwen engine's
 /// `--window-rows` (`docs/SERVING.md`, "Window rows"). That flag is a Qwen option: a family that sizes its own
@@ -252,10 +264,12 @@ pub(crate) struct Scratch {
 }
 
 impl Scratch {
-    /// The bytes [`Self::new`] allocates, from the same constructors' formulas — the number admission charges for the model's own
-    /// state. `new` asserts it equals [`Self::bytes`], so the price and the allocation cannot drift.
+    /// The bytes admission charges for the model's own state, from the same constructors' formulas. It prices the attention
+    /// scratch ([`Dsv4Scratch::bytes`]) as if none of it shared the MoE arena, so it is an upper bound on what [`Self::new`]
+    /// allocates: the views that fit in the arena cost nothing extra. `Dsv41Model::new` asserts [`Self::bytes`] stays at or
+    /// under it.
     ///
-    /// `rows` is the model's chunk depth (`o.chunk_rows.max(WINDOW_ROWS)`), `max_context` the admitted context.
+    /// `rows` is the model's chunk depth ([`scratch_rows`] of the chunk), `max_context` the admitted context.
     pub fn bytes_for(cfg: &DeepseekV41Config, rows: usize, max_context: usize) -> u64 {
         let r = rows as u64;
         let h = cfg.hidden as u64;
@@ -282,9 +296,9 @@ impl Scratch {
             + r * h * 4
             + r * h * 2
             + gb_cuda::dsv4_moe::MoeScratch::bytes_for(rows, k as usize, h as usize, inter as usize, e as usize)
-            + (rows.min(64) as u64) * (cfg.vocab as u64) * 2
-            + 2 * (rows.min(64) as u64) * MAX_CANDIDATES as u64 * 4
-            + gb_cuda::glue::topk_workspace_bytes(rows.min(64), cfg.vocab, MAX_CANDIDATES) as u64
+            + (rows.min(HEAD_ROWS) as u64) * (cfg.vocab as u64) * 2
+            + 2 * (rows.min(HEAD_ROWS) as u64) * MAX_CANDIDATES as u64 * 4
+            + gb_cuda::glue::topk_workspace_bytes(rows.min(HEAD_ROWS), cfg.vocab, MAX_CANDIDATES) as u64
     }
 
     fn new(cfg: &DeepseekV41Config, rows: usize, _slots: usize, max_context: usize) -> Result<Self, ModelError> {
@@ -303,19 +317,19 @@ impl Scratch {
         let moe = gb_cuda::dsv4_moe::MoeScratch::new(rows, k, h, inter, e)?;
         let dsv4 = Dsv4Scratch::new_with_shared_block(&dcfg, rows, max_context, Some(moe.arena_block()))?;
         let ids_b = (rows * 4).div_ceil(256) * 256;
-        let topk_b = (rows.min(64) * MAX_CANDIDATES * 4).div_ceil(256) * 256;
+        let topk_b = (rows.min(HEAD_ROWS) * MAX_CANDIDATES * 4).div_ceil(256) * 256;
         let (ids, topk_ids, topk_vals) = if let Ok(mb) = gb_cuda::rt::Block::alloc_mapped_host(ids_b + 2 * topk_b) {
             let mb = std::sync::Arc::new(mb);
             (
                 DevBuf::view(&mb, 0, rows * 4),
-                DevBuf::view(&mb, ids_b, rows.min(64) * MAX_CANDIDATES * 4),
-                DevBuf::view(&mb, ids_b + topk_b, rows.min(64) * MAX_CANDIDATES * 4),
+                DevBuf::view(&mb, ids_b, rows.min(HEAD_ROWS) * MAX_CANDIDATES * 4),
+                DevBuf::view(&mb, ids_b + topk_b, rows.min(HEAD_ROWS) * MAX_CANDIDATES * 4),
             )
         } else {
             (
                 DevBuf::zeroed(rows * 4)?,
-                DevBuf::zeroed(rows.min(64) * MAX_CANDIDATES * 4)?,
-                DevBuf::zeroed(rows.min(64) * MAX_CANDIDATES * 4)?,
+                DevBuf::zeroed(rows.min(HEAD_ROWS) * MAX_CANDIDATES * 4)?,
+                DevBuf::zeroed(rows.min(HEAD_ROWS) * MAX_CANDIDATES * 4)?,
             )
         };
         Ok(Self {
@@ -337,13 +351,14 @@ impl Scratch {
             moe_out: DevBuf::zeroed_view(rows * h * 4)?,
             sub_out: DevBuf::zeroed_view(rows * h * 2)?,
             moe,
-            head_out: DevBuf::zeroed_view(rows.min(64) * cfg.vocab * 2)?,
+            head_out: DevBuf::zeroed_view(rows.min(HEAD_ROWS) * cfg.vocab * 2)?,
             topk_ids,
             topk_vals,
-            topk_ws: DevBuf::zeroed(glue::topk_workspace_bytes(rows.min(64), cfg.vocab, MAX_CANDIDATES))?,
+            topk_ws: DevBuf::zeroed(glue::topk_workspace_bytes(rows.min(HEAD_ROWS), cfg.vocab, MAX_CANDIDATES))?,
         })
     }
 
+    /// The bytes this scratch allocated: every buffer it owns, and of the attention scratch only what did not fit the MoE arena.
     fn bytes(&self) -> u64 {
         let pre: u64 = self.pre.iter().map(|(_, _, b)| b.bytes() as u64).sum();
         [
@@ -371,6 +386,21 @@ impl Scratch {
             + pre
             + self.hc.bytes()
             + self.moe.bytes()
+            + self.dsv4_own_bytes()
+    }
+
+    /// The attention scratch's own allocations: `oq` and `out` always, and `qr`, `kv` and the block behind `q`/`o` (which
+    /// also holds the compressor and indexer staging) only when they are not views into the MoE arena.
+    /// `Dsv4Scratch::new_with_shared_block` places them there when the arena is large enough, and the arena's bytes are
+    /// already counted by [`gb_cuda::dsv4_moe::MoeScratch::bytes`].
+    fn dsv4_own_bytes(&self) -> u64 {
+        let arena = self.moe.arena_block();
+        let in_arena = |b: &DevBuf| b.block().is_some_and(|blk| std::sync::Arc::ptr_eq(blk, arena));
+        let own = |b: &DevBuf| if in_arena(b) { 0 } else { b.bytes() as u64 };
+        let d = &self.dsv4;
+        // `q` is a view at offset 0 of the block that also holds `o` and the staging: count the whole block, once
+        let qo = if in_arena(&d.q) { 0 } else { d.q.block().map_or(d.q.bytes(), |blk| blk.bytes()) as u64 };
+        d.oq.bytes() as u64 + d.out.bytes() as u64 + own(&d.qr) + own(&d.kv) + qo
     }
 }
 
@@ -633,12 +663,11 @@ impl Dsv41Model {
         let max_blocks = o.max_context.div_ceil(BLOCK_TOKENS);
         let kv_tab = KvTables::new(o.kv_blocks.max(o.slots * max_blocks), o.slots, max_blocks);
         let table = BlockTable::from_host(&vec![Vec::new(); o.slots], max_blocks)?;
-        let rows = o.chunk_rows.max(WINDOW_ROWS);
+        let rows = scratch_rows(o.chunk_rows);
         let s = Scratch::new(&cfg, rows, o.slots, o.max_context)?;
-        debug_assert_eq!(
-            s.bytes(),
-            Scratch::bytes_for(&cfg, rows, o.max_context),
-            "the model's scratch is not the bytes admission prices for it"
+        debug_assert!(
+            s.bytes() <= Scratch::bytes_for(&cfg, rows, o.max_context),
+            "the model's scratch allocated more than admission prices for it"
         );
         let mut pre_index = std::collections::BTreeMap::new();
         for (i, (layer, kind, _)) in s.pre.iter().enumerate() {
@@ -1281,6 +1310,15 @@ impl Dsv41Model {
         if len == 0 || len > self.max_context || self.snaps.free.is_empty() {
             return false;
         }
+        // No snapshot below the sliding window: a cut there splits the prefill where a row's attention bits still depend on the
+        // split. The attention kernel reduces each row's key list in 16-entry tiles, and `window_idxs_kernel` lays the list out
+        // per call: a first chunk of fewer rows than the window puts the compressed half after its own row count (not after the
+        // window), and a chunk that starts past 0 right-aligns the window keys, so below position `window - 1` the same keys land
+        // in other tile lanes than in the whole prompt's pass. At or past the window every layout is the same, so a cut there
+        // (and the warm continuation from it) is bit-exact; a prompt whose only cut falls below it runs whole.
+        if len < self.cfg.sliding_window {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         {
             if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
@@ -1652,7 +1690,13 @@ impl Dsv41Model {
                         gb_cuda::fp8_linear::Fp8Error::Cuda(c) => ModelError::Cuda(c),
                         other => ModelError::Config(other.to_string()),
                     };
-                    e.wkv.forward(engram_in, engram_kv, rows, Dtype::BF16, st).map_err(fp8)?;
+                    // a prefill slice of 16 rows or fewer stays on the MMA path (as every other prefill linear does), so a
+                    // short warm tail after a prefix-cache restore gets the bits the whole prompt's pass gives those rows
+                    if mode == Mode::Prefill {
+                        e.wkv.forward_force(engram_in, engram_kv, rows, Dtype::BF16, st).map_err(fp8)?;
+                    } else {
+                        e.wkv.forward(engram_in, engram_kv, rows, Dtype::BF16, st).map_err(fp8)?;
+                    }
                     gb_cuda::dsv4_moe::engram_gate_add(
                         &mut s.streams,
                         engram_kv,
@@ -2054,7 +2098,11 @@ impl Dsv41Model {
                 }
                 Op::MoeRoute { layer } => {
                     let l = &dev.layers[layer];
-                    l.router.logits(&s.hidden, Dtype::F16, rows, &mut s.logits, st)?;
+                    if mode == Mode::Prefill {
+                        l.router.logits_force(&s.hidden, Dtype::F16, rows, &mut s.logits, st)?;
+                    } else {
+                        l.router.logits(&s.hidden, Dtype::F16, rows, &mut s.logits, st)?;
+                    }
                     l.router.select_top_p(&s.logits, rows, None, decode_top_p, &mut s.picks, &mut s.wts, st)?;
                     if l.experts.streamed.is_some() {
                         st.sync()?;
@@ -2605,42 +2653,7 @@ impl Dsv41Model {
         // adds candidate continuations where the chain is weak, so the splice would only cut the lattice's chain
         // (its `conf` is the DSpark head's, not the copied tokens'); without it (the default) the splice is unchanged
         if !tree_on && tokens.len() >= 8 && max_total > 1 {
-            let hc_len = conf.iter().take_while(|&&c| c >= 0.65).count().min(drafted.len());
-            let gram = 4usize;
-            for &prefix_len in &[hc_len, drafted.len()] {
-                if prefix_len < 2 || prefix_len >= max_total {
-                    continue;
-                }
-                if prefix_len < drafted.len() && conf[prefix_len] >= 0.70 {
-                    continue;
-                }
-                if tokens.len() + prefix_len < gram + 4 {
-                    continue;
-                }
-                let mut tail = [0u32; 4];
-                for (idx_g, t) in tail.iter_mut().enumerate().take(gram) {
-                    let pos_in_comb = tokens.len() + prefix_len - gram + idx_g;
-                    *t = if pos_in_comb < tokens.len() { tokens[pos_in_comb] } else { drafted[pos_in_comb - tokens.len()] };
-                }
-                let need = max_total - prefix_len;
-                let search_end = tokens.len().saturating_sub(gram + need);
-                let mut matched = false;
-                for pos in (0..=search_end).rev() {
-                    if tokens[pos..pos + gram] == tail[..] {
-                        drafted.truncate(prefix_len);
-                        conf.truncate(prefix_len);
-                        for j in 0..need {
-                            drafted.push(tokens[pos + gram + j]);
-                            conf.push(0.90);
-                        }
-                        matched = true;
-                        break;
-                    }
-                }
-                if matched {
-                    break;
-                }
-            }
+            ngram_splice(tokens, &mut drafted, &mut conf, max_total);
         }
         if std::env::var_os("REXL3_DSV41_OP_TIMING").is_some() || std::env::var_os("REXL3_DSV41_STEP_TIMING").is_some() {
             eprintln!(
@@ -2681,6 +2694,14 @@ impl Dsv41Model {
     /// only asks for it here, so a chunk of `rows` costs `rows * vocab * 2` bytes of device head output plus the same
     /// again as its f16 host copy before the widening to f32.
     pub fn prefill_logits_rows(&mut self, slot: usize, start: usize, tokens: &[u32]) -> Result<Vec<Vec<f32>>, ModelError> {
+        if tokens.len() > HEAD_ROWS {
+            // refused before the forward writes KV: the head holds HEAD_ROWS rows, and the caller reads a longer
+            // segment in pieces of it (`Dsv41Backend::score_slice`). A request error, not the head's assert.
+            return Err(ModelError::Request(format!(
+                "a full-row readout of {} rows exceeds the head's {HEAD_ROWS}",
+                tokens.len()
+            )));
+        }
         self.prefill_rows(slot, start, tokens, Head::AllRows)?;
         let vocab = self.cfg.vocab;
         let raw = self.head_rows(tokens.len(), vocab)?;
@@ -2932,6 +2953,48 @@ impl super::tree::TreeRoundHost for Dsv41Model {
 
     fn tree_drop_round(&mut self) -> Result<(), String> {
         self.tree_drop_round_impl().map_err(|e| e.to_string())
+    }
+}
+
+/// The chain's n-gram splice: when the drafted prefix (`prefix_len` of the confident drafts, or all of them) ends in a
+/// 4-gram that occurred earlier in the committed context `tokens`, the drafts after the prefix are replaced by the
+/// `max_total - prefix_len` tokens that followed that earlier occurrence (at confidence 0.90). A prefix is only tried
+/// when some position has a whole copy after it: with fewer than `gram + need` committed tokens no earlier occurrence
+/// can supply `need` tokens, and trying position 0 anyway read past the context's end (an 8-token context at the
+/// default depth of 7, a panic of the engine thread). Every other case is the splice as it was.
+fn ngram_splice(tokens: &[u32], drafted: &mut Vec<u32>, conf: &mut Vec<f32>, max_total: usize) {
+    let hc_len = conf.iter().take_while(|&&c| c >= 0.65).count().min(drafted.len());
+    let gram = 4usize;
+    for &prefix_len in &[hc_len, drafted.len()] {
+        if prefix_len < 2 || prefix_len >= max_total {
+            continue;
+        }
+        if prefix_len < drafted.len() && conf[prefix_len] >= 0.70 {
+            continue;
+        }
+        if tokens.len() + prefix_len < gram + 4 {
+            continue;
+        }
+        let need = max_total - prefix_len;
+        let Some(search_end) = tokens.len().checked_sub(gram + need) else {
+            continue; // no position has `gram + need` committed tokens from it: nothing to copy
+        };
+        let mut tail = [0u32; 4];
+        for (idx_g, t) in tail.iter_mut().enumerate().take(gram) {
+            let pos_in_comb = tokens.len() + prefix_len - gram + idx_g;
+            *t = if pos_in_comb < tokens.len() { tokens[pos_in_comb] } else { drafted[pos_in_comb - tokens.len()] };
+        }
+        for pos in (0..=search_end).rev() {
+            if tokens[pos..pos + gram] == tail[..] {
+                drafted.truncate(prefix_len);
+                conf.truncate(prefix_len);
+                for j in 0..need {
+                    drafted.push(tokens[pos + gram + j]);
+                    conf.push(0.90);
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -3389,6 +3452,46 @@ mod tests {
     use super::*;
 
     const CONFIG: &str = include_str!("../../../../../testdata/deepseek_v41/config.json");
+
+    /// The n-gram splice on an 8-token context at the default depth (7 drafts, a 2-draft confident prefix): the prefix
+    /// ends in `(t6, t7, d0, d1)`, which equals `t0..t4`, but only 4 tokens follow position 0 where 5 are needed. The splice
+    /// leaves the drafts alone; it used to try position 0 anyway and read `tokens[8]`, a panic of the engine thread.
+    #[test]
+    fn the_ngram_splice_never_copies_past_the_context() {
+        let tokens = [11u32, 12, 13, 14, 15, 16, 11, 12];
+        let mut drafted = vec![13u32, 14, 90, 91, 92];
+        let mut conf = vec![0.9f32, 0.8, 0.3, 0.2, 0.1];
+        ngram_splice(&tokens, &mut drafted, &mut conf, MTP_MAX_DRAFTS);
+        assert_eq!((drafted, conf), (vec![13, 14, 90, 91, 92], vec![0.9, 0.8, 0.3, 0.2, 0.1]));
+        // two drafts in all (the verify-length schedule cut the walk): the second candidate prefix is the same 2
+        let mut drafted = vec![13u32, 14];
+        let mut conf = vec![0.5f32, 0.5];
+        ngram_splice(&tokens, &mut drafted, &mut conf, MTP_MAX_DRAFTS);
+        assert_eq!(drafted, vec![13, 14]);
+    }
+
+    /// The splice where a whole copy fits is unchanged, including the edge where position 0 is the only candidate (the
+    /// context holds exactly `gram + need` tokens), and the latest earlier occurrence wins.
+    #[test]
+    fn the_ngram_splice_copies_the_continuation_of_the_latest_occurrence() {
+        let tokens = [1u32, 2, 3, 4, 5, 6, 7, 1, 2];
+        let mut drafted = vec![3u32, 4, 80, 81];
+        let mut conf = vec![0.9f32, 0.9, 0.1, 0.1];
+        ngram_splice(&tokens, &mut drafted, &mut conf, MTP_MAX_DRAFTS);
+        assert_eq!(drafted, vec![3, 4, 5, 6, 7, 1, 2]);
+        assert_eq!(conf, vec![0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]);
+        // two occurrences of the 4-gram: the copy follows the later one
+        let tokens = [9u32, 9, 1, 2, 3, 4, 50, 51, 52, 53, 54, 1, 2, 3, 4, 60, 61, 62, 63, 64, 99, 1, 2];
+        let mut drafted = vec![3u32, 4, 70];
+        let mut conf = vec![0.9f32, 0.9, 0.1];
+        ngram_splice(&tokens, &mut drafted, &mut conf, MTP_MAX_DRAFTS);
+        assert_eq!(drafted, vec![3, 4, 60, 61, 62, 63, 64]);
+        // a confident third draft: the prefix is all three, whose 4-gram (2, 3, 4, 70) never occurred, so no splice
+        let mut drafted = vec![3u32, 4, 70];
+        let mut conf = vec![0.9f32, 0.9, 0.75];
+        ngram_splice(&tokens, &mut drafted, &mut conf, MTP_MAX_DRAFTS);
+        assert_eq!(drafted, vec![3, 4, 70]);
+    }
 
     #[test]
     fn the_snapshot_floor_defaults_to_a_quarter_gib_and_ignores_the_boot_floor_env() {

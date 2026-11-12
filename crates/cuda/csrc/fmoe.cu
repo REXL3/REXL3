@@ -17,6 +17,8 @@
 //     rotation. The last group of a down column block combines all experts per token in top-k order.
 #include "common.cuh"
 #include "exl3_linear_decode.cuh"
+#include <cstdlib>
+#include <cstring>
 
 namespace fmoe {
 
@@ -91,6 +93,13 @@ __device__ __forceinline__ void had128(float (&v)[4], int lane) {
 
 __device__ __forceinline__ void ld_bf16x4(const __nv_bfloat16* p, float (&v)[4]) {
     const uint2 u = *reinterpret_cast<const uint2*>(p);
+    const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
+    const float2 b = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
+    v[0] = a.x; v[1] = a.y; v[2] = b.x; v[3] = b.y;
+}
+
+__device__ __forceinline__ void ld_bf16x4_g(const __nv_bfloat16* p, float (&v)[4]) {
+    const uint2 u = __ldg(reinterpret_cast<const uint2*>(p));
     const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
     const float2 b = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
     v[0] = a.x; v[1] = a.y; v[2] = b.x; v[3] = b.y;
@@ -258,7 +267,17 @@ __device__ __forceinline__ void store_partials(const float (&acc)[8][4], int lan
 constexpr int ROUTE_THREADS = 512;
 constexpr int ROUTE_EMAX = 64 * 11 + 64;   // smem capacity (64 tokens, top-k <= 11 with the shared expert)
 
-__global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const __nv_bfloat16* __restrict__ logits,
+// ---------------------------------------------------------------------------------------------------------------
+// Route helpers. A token's logits come in as bf16 (every other family's MoE) or as fp32 (Ling-3.1's
+// router_dtype = "fp32"): the launchers take the dtype code (0 bf16, 1 fp32) and the kernels load through
+// these, so the routing arithmetic below is byte-for-byte the same in both cases apart from the load itself.
+// ---------------------------------------------------------------------------------------------------------------
+__device__ __forceinline__ float route_logit(const void* logits, int f32, size_t i) {
+    return f32 ? __ldg(static_cast<const float*>(logits) + i)
+               : __bfloat162float(__ldg(static_cast<const __nv_bfloat16*>(logits) + i));
+}
+
+__global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const void* __restrict__ logits, int logits_f32,
                                                               const __nv_bfloat16* __restrict__ shared_gate,
                                                               void* route_base, int emax, int T, int NE, int K) {
     __shared__ int s_exp[ROUTE_EMAX];
@@ -267,6 +286,10 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const __nv_bfloat1
     __shared__ int s_gid[ROUTE_EMAX];
     __shared__ int s_ntok[ROUTE_EMAX];
     __shared__ int s_goff[ROUTE_EMAX];
+    // per-warp top-k scratch (the winners every lane of the warp agree on): in shared memory so the dynamic `k`
+    // indexing of the winners never touches the local/stack memory (STACK: 0)
+    __shared__ float s_vk[ROUTE_THREADS / 32][16];
+    __shared__ int s_ik[ROUTE_THREADS / 32][16];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
     const int KT = K + (shared_gate ? 1 : 0);
     const int E = T * KT;
@@ -278,11 +301,11 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const __nv_bfloat1
 #pragma unroll
         for (int i = 0; i < 16; ++i) {
             const int e = lane + 32 * i;
-            l[i] = e < NE ? __bfloat162float(logits[(size_t)tok * NE + e]) : -INFINITY;
+            l[i] = e < NE ? route_logit(logits, logits_f32, (size_t)tok * NE + e) : -INFINITY;
         }
+        float* vk = s_vk[warp];
+        int* ik = s_ik[warp];
         float top_v = 0.f;
-        float vk[16];
-        int ik[16];
         for (int k = 0; k < K; ++k) {
             float bv = -INFINITY;
             int bi = 0x7fffffff;
@@ -299,7 +322,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const __nv_bfloat1
             for (int i = 0; i < 16; ++i)
                 if (lane + 32 * i == bi) l[i] = -INFINITY;
             if (k == 0) top_v = bv;
-            if (k < 16) { vk[k] = bv; ik[k] = bi; }
+            if (lane == 0) { vk[k] = bv; ik[k] = bi; }
         }
         if (lane == 0) {
             float sum = 0.f;
@@ -420,7 +443,7 @@ __device__ __forceinline__ void g_butterfly(float& v1, float& v2) {
 // The group (0..7) of expert e under the 64-expert groups of the group-limited router.
 __device__ __forceinline__ int group_of(int e) { return e >> 6; }
 
-__global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const __nv_bfloat16* __restrict__ logits,
+__global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const void* __restrict__ logits, int logits_f32,
                                                                     const __nv_bfloat16* __restrict__ shared_gate,
                                                                     const float* __restrict__ expert_bias, float scale,
                                                                     void* route_base, int emax, int T, int NE, int K,
@@ -431,73 +454,67 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const __nv_b
     __shared__ int s_gid[ROUTE_EMAX];
     __shared__ int s_ntok[ROUTE_EMAX];
     __shared__ int s_goff[ROUTE_EMAX];
+    // per-warp top-k scratch (the winners every lane of the warp agree on): in shared memory so the dynamic `k`
+    // indexing of the winners never touches the local/stack memory (STACK: 0)
+    __shared__ float s_suk[ROUTE_THREADS / 32][16];
+    __shared__ int s_ik[ROUTE_THREADS / 32][16];
+    __shared__ float s_gs[ROUTE_THREADS / 32][8];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarp = blockDim.x >> 5;
     const int KT = K + (shared_gate ? 1 : 0);
     const int E = T * KT;
     constexpr int GS = 64;  // experts a group (must equal NE / n_group)
     Route r = route_view(route_base, emax);
 
+    // top-2 of every group across the warp: each lane holds experts lane + 32i, so of group g it holds exactly
+    // experts 64g + lane and 64g + lane + 32 (the lane's sc[2g] and sc[2g+1])
     for (int tok = warp; tok < T; tok += nwarp) {
-        float sb[16], su[16];
-#pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            const int e = lane + 32 * i;
-            if (e < NE) {
-                const float lg = __bfloat162float(logits[(size_t)tok * NE + e]);
-                su[i] = 1.0f / (1.0f + expf(-lg));
-                sb[i] = su[i] + expert_bias[e];
-            } else {
-                su[i] = -INFINITY;
-                sb[i] = -INFINITY;
-            }
-        }
-        // top-2 of every group across the warp: each lane holds experts lane + 32i, so of group g it holds exactly
-        // experts 64g + lane and 64g + lane + 32 (the lane's sc[2g] and sc[2g+1]).
-        float gs[8];
+        float* suk = s_suk[warp];
+        int* ik = s_ik[warp];
+        float* gs = s_gs[warp];
 #pragma unroll
         for (int g = 0; g < 8; ++g) {
+            const int e0 = 64 * g + lane, e1 = e0 + 32;
+            const float lg0 = e0 < NE ? route_logit(logits, logits_f32, (size_t)tok * NE + e0) : -INFINITY;
+            const float lg1 = e1 < NE ? route_logit(logits, logits_f32, (size_t)tok * NE + e1) : -INFINITY;
+            const float su0 = e0 < NE ? 1.0f / (1.0f + expf(-lg0)) : -INFINITY;
+            const float su1 = e1 < NE ? 1.0f / (1.0f + expf(-lg1)) : -INFINITY;
+            const float sb0 = e0 < NE ? su0 + expert_bias[e0] : -INFINITY;
+            const float sb1 = e1 < NE ? su1 + expert_bias[e1] : -INFINITY;
             float a, b;
-            g2(sb[2 * g], sb[2 * g + 1], a, b);
+            g2(sb0, sb1, a, b);
             g_butterfly(a, b);
             gs[g] = a + b;
         }
         // the topk_group groups by (score DESC, index ASC)
-        bool in[8];
-#pragma unroll
-        for (int g = 0; g < 8; ++g) in[g] = false;
+        uint32_t sel = 0u;  // bit g: group g selected (register state)
         for (int q = 0; q < topk_group; ++q) {
             float bv = -INFINITY;
             int bg = 0x7fffffff;
 #pragma unroll
             for (int g = 0; g < 8; ++g)
-                if (!in[g] && (gs[g] > bv || (gs[g] == bv && g < bg))) {
+                if (!(sel & (1u << g)) && (gs[g] > bv || (gs[g] == bv && g < bg))) {
                     bv = gs[g];
                     bg = g;
                 }
-            if (bg >= 8) bg = q;  // NaN-safe: never index in[] out of range
-            in[bg] = true;
+            if (bg >= 8) bg = q;  // NaN-safe: never select a bogus group
+            sel |= 1u << bg;
         }
-        // the lane's 16 experts masked by their group's selection
-        bool gm[16];
-#pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            const int e = lane + 32 * i;
-            gm[i] = e < NE && in[group_of(e)];
-        }
-        float vk[16];
-        float suk[16];  // the selected winners' UNBIASED sigmoid scores (the weights come from them)
-        int ik[16];
+        // top-k across the full expert set, only the selected groups' experts
+        uint32_t excl = 0u;  // bit i: expert lane + 32i already picked (per-lane register state)
         for (int k = 0; k < K; ++k) {
-            float bv = -INFINITY;
-            float bsu = -INFINITY;
-            int bi = 0x7fffffff;
-#pragma unroll
-            for (int i = 0; i < 16; ++i)
-                if (gm[i] && sb[i] > bv) {
-                    bv = sb[i];
-                    bsu = su[i];
-                    bi = lane + 32 * i;
-                }
+        float bv = -INFINITY;
+        float bsu = -INFINITY;
+        int bi = 0x7fffffff;
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            if (excl & (1u << i)) continue;
+            const int e = lane + 32 * i;
+            if (e >= NE || !(sel & (1u << group_of(e)))) continue;
+            const float lg = route_logit(logits, logits_f32, (size_t)tok * NE + e);
+            const float su = 1.0f / (1.0f + expf(-lg));
+            const float sb = su + expert_bias[e];
+            if (sb > bv) { bv = sb; bsu = su; bi = e; }
+        }
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) {
                 const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
@@ -509,13 +526,10 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const __nv_b
                     bi = oi;
                 }
             }
-#pragma unroll
-            for (int i = 0; i < 16; ++i)
-                if (gm[i] && lane + 32 * i == bi) gm[i] = false;
+            // exclude the picked expert on the lane that owns it (bi is warp-uniform after the reduction)
+            if ((bi & 31) == lane && bi < NE) excl |= 1u << (bi >> 5);
             if (bi >= NE) bi = k;  // NaN-safe: keep a valid expert id
-            vk[k] = bv;
-            suk[k] = bsu;
-            ik[k] = bi;
+            if (lane == 0) { suk[k] = bsu; ik[k] = bi; }
         }
         if (lane == 0) {
             float sum = 0.f;
@@ -843,6 +857,163 @@ __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
     if (lane == 0) a.cntc[nb] = 0;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Kernel 2b: gate + up (+ SwiGLU, + rotation), in-CTA K reduction (the wave-6b prototype).
+//
+// One CTA owns every KC K-chunk of one (group, 128-column block) and computes BOTH matrices for each chunk (every
+// warp decodes the gate and the up tiles of its kc — the SwiGLU activation needs both reduced values together).
+// Warps 1..KC-1 stage their fp32 partials in shared memory (one row per kc, so the reduction keeps the exact
+// deterministic ascending kc = 0..KC-1 float32 add order of the global-partial path); warp 0 keeps its own kc = 0
+// partial in registers (it is the first term of the ascending chain), reduces the rest from shared, stores the
+// merged gate vector in the spare shared row, and finishes the column block as the legacy kernel's last warp did.
+// No global `part` traffic, no `__threadfence()` + `atomicAdd` barrier per column block.
+//
+// smem: KC * GT * (kblocks * 128 + 8) halves of staged x + KC * GT * 128 floats of partials (row KC-1 holds the
+// merged gate vector between the two phases). Fits 100 KiB for the supported counts at H <= 2560.
+// Grid: `E * NB` (legacy: `E * 2 * NB * KC` warps worth of work, one CTA per (group, nb)).
+// ---------------------------------------------------------------------------------------------------------------
+template <int NKC>
+__global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
+    extern __shared__ __align__(16) half smem_x[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    if (warp >= NKC) return;
+    const Route r = route_view(const_cast<void*>(a.route), a.emax);
+    const int NB = a.I >> 7;
+    const int grp = blockIdx.x / NB;
+    const int nb = blockIdx.x % NB;
+    if (grp >= r.hdr[0]) return;
+    const int kc = warp;
+
+    const int e = r.g_exp[grp], ntok = r.g_ntok[grp], off = r.g_off[grp];
+    const float limit = (e == a.ne) ? a.shared_limit : a.routed_limit;
+    const int kblocks = (a.H >> 7) / NKC;
+    const int kb0 = kc * kblocks;
+    const int xstride = kblocks * 128 + 8;  // +8 halves: conflict-free B fragment reads
+    half* xs = smem_x + warp * GT * xstride;
+    float* s_part = reinterpret_cast<float*>(smem_x + NKC * GT * xstride);
+
+    const int g = lane >> 2, t = lane & 3;
+    // stage the group's tokens rotated by this matrix's suh (same as the legacy kernel's staging loop)
+    auto stage = [&](const half* su) {
+        for (int c = 0; c < GT; ++c) {
+            for (int b = 0; b < kblocks; ++b) {
+                float v[4] = {0.f, 0.f, 0.f, 0.f};
+                if (c < ntok) {
+                    const int tok = r.s_tok[off + c];
+                    const int k = (kb0 + b) * 128 + 4 * lane;
+                    float s[4];
+                    ld_bf16x4(a.x + (size_t)tok * a.H + k, v);
+                    ld_f16x4(su + k, s);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) v[i] *= s[i];
+                    had128(v, lane);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) v[i] *= RS128;
+                }
+                st_f16x4(xs + c * xstride + b * 128 + 4 * lane, v);
+            }
+        }
+        __syncwarp();
+    };
+    auto getb = [&](int kt, uint32_t& b0, uint32_t& b1) {
+        const half* xrow = xs + g * xstride + 2 * t;
+        b0 = *reinterpret_cast<const uint32_t*>(xrow + kt * 16);
+        b1 = *reinterpret_cast<const uint32_t*>(xrow + kt * 16 + 8);
+    };
+
+    // ---- gate phase: mma, stage partials, reduce in warp 0 ----
+    // `acc` is reused by the up phase below (the gate partials are consumed before the up mma overwrites it).
+    float acc[8][4];
+    {
+        const int bits = a.ktab[e * 3 + 0];
+        stage(reinterpret_cast<const half*>(a.gSu[e]));
+        const uint32_t* T = reinterpret_cast<const uint32_t*>(a.gT[e]);
+        const size_t tw = 4 * (size_t)bits;
+        const size_t stride_k = (size_t)(a.I >> 4) * tw;
+        const uint32_t* base = T + (size_t)(kb0 * 8) * stride_k + (size_t)nb * 8 * tw;
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) acc[j][c] = 0.f;
+        run_tiles_bits(bits, base, stride_k, kblocks * 8, lane, acc, getb);
+        // every warp (including warp 0) stages its gate partials; row warp = kc
+        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * GT * 128 + c * 128; });
+    }
+    __syncthreads();
+    if (warp == 0) {
+        const int col = nb * 128 + 4 * lane;
+        for (int c = 0; c < ntok; ++c) {
+            // gate sum in the exact legacy order: 0 + p0 + p1 + ... + p_{KC-1}
+            float vg[4];
+            vg[0] = vg[1] = vg[2] = vg[3] = 0.f;
+            for (int k = 0; k < NKC; ++k) {
+                const float4 x = *reinterpret_cast<const float4*>(s_part + k * GT * 128 + c * 128 + 4 * lane);
+                vg[0] += x.x; vg[1] += x.y; vg[2] += x.z; vg[3] += x.w;
+            }
+            had128(vg, lane);
+            // keep the merged gate vector in the spare shared row until the up phase's activation
+            *reinterpret_cast<float4*>(s_part + NKC * GT * 128 + c * 128 + 4 * lane) =
+                make_float4(vg[0], vg[1], vg[2], vg[3]);
+        }
+    }
+    __syncthreads();
+
+    // ---- up phase: mma, stage partials, reduce in warp 0, SwiGLU against the stored gate vector ----
+    {
+        const int bits = a.ktab[e * 3 + 1];
+        stage(reinterpret_cast<const half*>(a.uSu[e]));
+        const uint32_t* T = reinterpret_cast<const uint32_t*>(a.uT[e]);
+        const size_t tw = 4 * (size_t)bits;
+        const size_t stride_k = (size_t)(a.I >> 4) * tw;
+        const uint32_t* base = T + (size_t)(kb0 * 8) * stride_k + (size_t)nb * 8 * tw;
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) acc[j][c] = 0.f;
+        run_tiles_bits(bits, base, stride_k, kblocks * 8, lane, acc, getb);
+        // every warp stages its up partials into the same rows (the gate rows are consumed above)
+        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * GT * 128 + c * 128; });
+        __syncthreads();
+        if (warp == 0) {
+            const half* gsv = reinterpret_cast<const half*>(a.gSv[e]);
+            const half* usv = reinterpret_cast<const half*>(a.uSv[e]);
+            const half* dsu = reinterpret_cast<const half*>(a.dSu[e]);
+            const int col = nb * 128 + 4 * lane;
+            float sg[4], sv[4], sd[4];
+            ld_f16x4(gsv + col, sg);
+            ld_f16x4(usv + col, sv);
+            ld_f16x4(dsu + col, sd);
+            for (int c = 0; c < ntok; ++c) {
+                const int slot = off + c;
+                float vu[4];
+                vu[0] = vu[1] = vu[2] = vu[3] = 0.f;
+                for (int k = 0; k < NKC; ++k) {
+                    const float4 x = *reinterpret_cast<const float4*>(s_part + k * GT * 128 + c * 128 + 4 * lane);
+                    vu[0] += x.x; vu[1] += x.y; vu[2] += x.z; vu[3] += x.w;
+                }
+                had128(vu, lane);
+                const float4 vg4 = *reinterpret_cast<const float4*>(s_part + NKC * GT * 128 + c * 128 + 4 * lane);
+                const float vg[4] = {vg4.x, vg4.y, vg4.z, vg4.w};
+                float act[4];
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    float gv = vg[i] * RS128 * sg[i];
+                    float uv = vu[i] * RS128 * sv[i];
+                    if (limit > 0.0f) {
+                        gv = fminf(gv, limit);
+                        uv = fmaxf(-limit, fminf(uv, limit));
+                    }
+                    act[i] = gv / (1.f + __expf(-gv)) * uv * sd[i];
+                }
+                had128(act, lane);
+#pragma unroll
+                for (int i = 0; i < 4; ++i) act[i] *= RS128;
+                st_f16x4(a.xd + (size_t)slot * a.I + col, act);
+            }
+        }
+    }
+}
+
 // Test: W [K][N] fp16 from a trellis through this file's decoder (layout check against gb_exl3_reconstruct).
 template <int K2>
 __global__ void unpack_kernel(const uint32_t* __restrict__ T, half* __restrict__ W, int N) {
@@ -873,12 +1044,19 @@ __global__ void unpack_kernel(const uint32_t* __restrict__ T, half* __restrict__
 // and multiplied into all of the tile's tokens (8 mma n-tiles of 8 tokens), over the full K in one warp, so a token's
 // output does not depend on which other tokens share its tile. A per-token combine adds the experts in top-k order.
 // ---------------------------------------------------------------------------------------------------------------
-constexpr int PT = 64;           // tokens a tile
+// PT = 80 (NJ = 10) for Ling-3.1-flash-1019: at 4,096 tokens the mean routed load is exactly 64 tokens per
+// expert (4096 * 8 / 512), so PT = 64 tiles the mean and ~47 % of the 512 experts spill into a second tile of 1..21
+// tokens (+47 % tiles). PT = 80 = 64 + 2 * sigma removes ~95 % of those splits (P(load > 80) ~ 2.3 % at Poisson(64),
+// sigma = 8) while keeping the conflict-free +8 pad and 2 blocks an SM (no swizzle, STACK: 0).
+constexpr int PT = 80;           // tokens a tile (REG: 128 STACK: 0)
+constexpr int PNJ = PT / 8;      // the n tiles a tile fills (acc[2][PNJ][4] and the zero-init loop MUST match this)
+                                 // True A/B on GB10 (bench_ling31_moe_4096, HNJ fix + acc[2][NJ][4] matched to PT):
+                                 // PT = 64 (acc[2][8][4]) ~25.2 ms vs PT = 80 (acc[2][10][4]) ~27.9 ms.
 constexpr int PW = 8;            // warps a prefill block
 constexpr int PXS = 128 + 8;     // gate/up staging row (halves): one 128-wide k block, +8 for conflict-free B reads
 constexpr int POS = 128 + 4;     // gate/up output row (floats)
 constexpr int PKC = 64;          // k a staged chunk (4 k tiles)
-constexpr int PKS = PKC + 8;     // staged row stride (halves): conflict-free B reads
+constexpr int PKS = PKC + 8;     // staged row stride (halves): conflict-free B reads; gate/up 46,080 B, 2 blocks 90 KiB
 
 // ---------------------------------------------------------------------------------------------------------------
 // The prefill MMA loop. A tile's every output element is ONE fp32 chain of m16n8k16 steps over the k tiles in order from zero, on
@@ -886,7 +1064,7 @@ constexpr int PKS = PKC + 8;     // staged row stride (halves): conflict-free B 
 // token fragments, so what a token gets does not depend on the other tokens of its tile, on its column in the tile, or on how the
 // prompt was cut into calls (the committed golden pins the bits; the invariance tests of tests/minicpm_moe_prefill.rs run the
 // chunk grids). The loop's instruction stream is lean on purpose (E6a):
-//   * the n tiles are a compile-time count NJ (2, 4 or 8, the tile's `ntn` rounded up; the extra tiles read zero rows, which add
+//   * the n tiles are a compile-time count NJ (2, 4, 8 or 10, the tile's `ntn` rounded up; the extra tiles read zero rows, which add
 //     exactly 0), so the loop has no per-n-tile branch and no per-n-tile address arithmetic;
 //   * the token fragments of two n tiles come from one ldmatrix.x4 (4 shared loads instead of 16 at NJ = 8);
 //   * the weight words of the NEXT k tile are fetched across the chunk boundary (the caller carries `cur`), so a chunk's first tile is
@@ -948,7 +1126,7 @@ __device__ __forceinline__ void p_ldsm_x4(uint32_t (&r)[4], uint32_t saddr) {
 // then prefetched here). `cur` enters holding this chunk's first tile pair and leaves holding the next chunk's.
 template <int K2, int NJ>
 __device__ __forceinline__ void p_mm2(const uint32_t* __restrict__ t0, size_t stride_k, int nkt, bool more, uint32_t xs_lane,
-                                      int lane, uint32_t (&cur)[2][3], float (&acc)[2][8][4]) {
+                                      int lane, uint32_t (&cur)[2][3], float (&acc)[2][10][4]) {
     constexpr int NW = GeoK<K2>::NW, NL = GeoK<K2>::NL;
     int i0, off0;
     lane_origin<K2>(lane, i0, off0);
@@ -987,7 +1165,7 @@ __device__ __forceinline__ void p_mm2(const uint32_t* __restrict__ t0, size_t st
 
 template <int NJ>
 __device__ __forceinline__ bool p_mm_bits2(int k2, const uint32_t* t0, size_t stride_k, int nkt, bool more, uint32_t xs_lane,
-                                           int lane, uint32_t (&cur)[2][3], float (&acc)[2][8][4]) {
+                                           int lane, uint32_t (&cur)[2][3], float (&acc)[2][10][4]) {
     switch (k2) {
         case 2: p_mm2<2, NJ>(t0, stride_k, nkt, more, xs_lane, lane, cur, acc); return true;
         case 3: p_mm2<3, NJ>(t0, stride_k, nkt, more, xs_lane, lane, cur, acc); return true;
@@ -1023,29 +1201,36 @@ __device__ __forceinline__ bool p_prime_bits(int k2, const uint32_t* t0, int lan
 
 // the n tiles a tile of `ntn` fills, as the loop's compile-time width
 __device__ __forceinline__ bool p_mm_run(int ntn, int k2, const uint32_t* t0, size_t stride_k, int nkt, bool more,
-                                         uint32_t xs_lane, int lane, uint32_t (&cur)[2][3], float (&acc)[2][8][4]) {
+                                         uint32_t xs_lane, int lane, uint32_t (&cur)[2][3], float (&acc)[2][10][4]) {
     if (ntn <= 2) return p_mm_bits2<2>(k2, t0, stride_k, nkt, more, xs_lane, lane, cur, acc);
     if (ntn <= 4) return p_mm_bits2<4>(k2, t0, stride_k, nkt, more, xs_lane, lane, cur, acc);
-    return p_mm_bits2<8>(k2, t0, stride_k, nkt, more, xs_lane, lane, cur, acc);
+    if (ntn <= 8) return p_mm_bits2<8>(k2, t0, stride_k, nkt, more, xs_lane, lane, cur, acc);
+    return p_mm_bits2<10>(k2, t0, stride_k, nkt, more, xs_lane, lane, cur, acc);
 }
 
 // Route, one warp a token: top-k softmax (lowest index wins ties), the shared expert as entry K with sigmoid(gate).
-__global__ void __launch_bounds__(256) p_route_kernel(const __nv_bfloat16* __restrict__ logits,
+__global__ void __launch_bounds__(256) p_route_kernel(const void* __restrict__ logits, int logits_f32,
                                                       const __nv_bfloat16* __restrict__ shared_gate,
                                                       int* __restrict__ ent_exp, float* __restrict__ ent_w,
                                                       int* __restrict__ cnt, int T, int NE, int K) {
+    // per-warp top-k scratch (the winners every lane of the warp agree on): in shared memory so the dynamic `k`
+    // indexing of the winners never touches the local/stack memory (STACK: 0)
+    __shared__ float s_vk[8][16];
+    __shared__ int s_ik[8][16];
     const int lane = threadIdx.x & 31;
-    const int tok = blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int warp = threadIdx.x >> 5;
+    const int tok = blockIdx.x * 8 + warp;
     if (tok >= T) return;
     const int KT = K + (shared_gate ? 1 : 0);
     float l[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
         const int e = lane + 32 * i;
-        l[i] = e < NE ? __bfloat162float(logits[(size_t)tok * NE + e]) : -INFINITY;
+        l[i] = e < NE ? route_logit(logits, logits_f32, (size_t)tok * NE + e) : -INFINITY;
     }
-    float top_v = 0.f, vk[16];
-    int ik[16];
+    float* vk = s_vk[warp];
+    int* ik = s_ik[warp];
+    float top_v = 0.f;
     for (int k = 0; k < K; ++k) {
         float bv = -INFINITY;
         int bi = 0x7fffffff;
@@ -1062,9 +1247,8 @@ __global__ void __launch_bounds__(256) p_route_kernel(const __nv_bfloat16* __res
         for (int i = 0; i < 16; ++i)
             if (lane + 32 * i == bi) l[i] = -INFINITY;
         if (k == 0) top_v = bv;
-        vk[k] = bv;
         if (bi >= NE) bi = k;  // NaN-safe: keep a valid expert id
-        ik[k] = bi;
+        if (lane == 0) { vk[k] = bv; ik[k] = bi; }
     }
     if (lane == 0) {
         float sum = 0.f;
@@ -1084,22 +1268,30 @@ __global__ void __launch_bounds__(256) p_route_kernel(const __nv_bfloat16* __res
 }
 
 // Route, one warp a token: the group-limited noaux_tc route (see route_group_kernel), the shared expert as entry K.
-__global__ void __launch_bounds__(256) p_route_group_kernel(const __nv_bfloat16* __restrict__ logits,
+__global__ void __launch_bounds__(256) p_route_group_kernel(const void* __restrict__ logits, int logits_f32,
                                                             const __nv_bfloat16* __restrict__ shared_gate,
                                                             const float* __restrict__ expert_bias, float scale,
                                                             int* __restrict__ ent_exp, float* __restrict__ ent_w,
                                                             int* __restrict__ cnt, int T, int NE, int K, int n_group,
                                                             int topk_group) {
+    // per-warp top-k scratch (the winners every lane of the warp agree on): in shared memory so the dynamic `k`
+    // indexing of the winners never touches the local/stack memory (STACK: 0)
+    __shared__ float s_suk[8][16];
+    __shared__ int s_ik[8][16];
     const int lane = threadIdx.x & 31;
-    const int tok = blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int warp = threadIdx.x >> 5;
+    const int tok = blockIdx.x * 8 + warp;
     if (tok >= T) return;
     const int KT = K + (shared_gate ? 1 : 0);
+    // each lane's 16 experts: sigmoid score su[i] and biased score sb[i], loaded ONCE per token as read-only
+    // registers (the `k` loop indexes them by compile-time constants only and never writes them, so ptxas
+    // keeps them in registers: STACK 0, LOCAL 0)
     float sb[16], su[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
         const int e = lane + 32 * i;
         if (e < NE) {
-            const float lg = __bfloat162float(logits[(size_t)tok * NE + e]);
+            const float lg = route_logit(logits, logits_f32, (size_t)tok * NE + e);
             su[i] = 1.0f / (1.0f + expf(-lg));
             sb[i] = su[i] + expert_bias[e];
         } else {
@@ -1107,6 +1299,8 @@ __global__ void __launch_bounds__(256) p_route_group_kernel(const __nv_bfloat16*
             sb[i] = -INFINITY;
         }
     }
+    float* suk = s_suk[warp];
+    int* ik = s_ik[warp];
     float gs[8];
 #pragma unroll
     for (int g = 0; g < 8; ++g) {
@@ -1115,40 +1309,34 @@ __global__ void __launch_bounds__(256) p_route_group_kernel(const __nv_bfloat16*
         g_butterfly(a, b);
         gs[g] = a + b;
     }
-    bool in[8];
-#pragma unroll
-    for (int g = 0; g < 8; ++g) in[g] = false;
+    uint32_t sel = 0u;  // bit g: group g selected (register state)
     for (int q = 0; q < topk_group; ++q) {
         float bv = -INFINITY;
         int bg = 0x7fffffff;
 #pragma unroll
         for (int g = 0; g < 8; ++g)
-            if (!in[g] && (gs[g] > bv || (gs[g] == bv && g < bg))) {
+            if (!(sel & (1u << g)) && (gs[g] > bv || (gs[g] == bv && g < bg))) {
                 bv = gs[g];
                 bg = g;
             }
-        if (bg >= 8) bg = q;  // NaN-safe: never index in[] out of range
-        in[bg] = true;
+        if (bg >= 8) bg = q;  // NaN-safe: never select a bogus group
+        sel |= 1u << bg;
     }
-    bool gm[16];
-#pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        const int e = lane + 32 * i;
-        gm[i] = e < NE && in[group_of(e)];
-    }
-    int ik[16];
-    float suk[16];  // the selected winners' UNBIASED sigmoid scores
+    uint32_t excl = 0u;  // bit i: expert lane + 32i already picked (per-lane register state)
     for (int k = 0; k < K; ++k) {
         float bv = -INFINITY;
         float bsu = -INFINITY;
         int bi = 0x7fffffff;
 #pragma unroll
-        for (int i = 0; i < 16; ++i)
-            if (gm[i] && sb[i] > bv) {
-                bv = sb[i];
-                bsu = su[i];
-                bi = lane + 32 * i;
-            }
+        for (int i = 0; i < 16; ++i) {
+            if (excl & (1u << i)) continue;
+            const int e = lane + 32 * i;
+            if (e >= NE || !(sel & (1u << group_of(e)))) continue;
+            const float lg = route_logit(logits, logits_f32, (size_t)tok * NE + e);
+            const float su = 1.0f / (1.0f + expf(-lg));
+            const float sb = su + expert_bias[e];
+            if (sb > bv) { bv = sb; bsu = su; bi = e; }
+        }
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) {
             const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
@@ -1160,12 +1348,10 @@ __global__ void __launch_bounds__(256) p_route_group_kernel(const __nv_bfloat16*
                 bi = oi;
             }
         }
-#pragma unroll
-        for (int i = 0; i < 16; ++i)
-            if (gm[i] && lane + 32 * i == bi) gm[i] = false;
+        // exclude the picked expert on the lane that owns it (bi is warp-uniform after the reduction)
+        if ((bi & 31) == lane && bi < NE) excl |= 1u << (bi >> 5);
         if (bi >= NE) bi = k;  // NaN-safe: keep a valid expert id
-        ik[k] = bi;
-        suk[k] = bsu;
+        if (lane == 0) { suk[k] = bsu; ik[k] = bi; }
     }
     if (lane == 0) {
         float sum = 0.f;
@@ -1229,14 +1415,17 @@ __global__ void p_scatter_kernel(const int* __restrict__ ent_exp, const int* __r
 }
 
 // Every sorted slot's token rotated ONCE per matrix: xr[p][m][k] = fp16(H(x[tok] * suh_m[e]) / sqrt(128))[k], so the
-// gate/up blocks (five column blocks a tile) only copy their rows. One warp a (slot, matrix, 128-wide k block).
+// gate/up blocks (five column blocks a tile) only copy their rows. One block per (slot, matrix): its 8 warps split the
+// 32 independent 128-wide k blocks (warp w takes kb = w, w+8, w+16, w+24), so all warps stream the SAME token row and
+// expert scale rows (an 8x smaller L1 working set). Each kb is an independent 128-wide Sylvester Hadamard run wholly by
+// one warp, so the output is bit-for-bit identical to one warp per entry.
 __global__ void __launch_bounds__(256) p_rotate_kernel(const __nv_bfloat16* __restrict__ x, const int* __restrict__ s_tok,
                                                        const int* __restrict__ s_exp, const uint64_t* __restrict__ gSu,
                                                        const uint64_t* __restrict__ uSu, half* __restrict__ xr, int E,
                                                        int H) {
     const int lane = threadIdx.x & 31;
     const int KB = H >> 7;
-    const int p = blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int p = blockIdx.x;
     if (p >= E) return;
     const int e = s_exp[p], tok = s_tok[p];
     const half* sg = reinterpret_cast<const half*>(gSu[e]);
@@ -1244,11 +1433,12 @@ __global__ void __launch_bounds__(256) p_rotate_kernel(const __nv_bfloat16* __re
     const __nv_bfloat16* xrow = x + (size_t)tok * H;
     half* dg = xr + ((size_t)p * 2) * H;
     half* du = dg + H;
+    const int w = threadIdx.x >> 5;
 #pragma unroll 4
-    for (int kb = 0; kb < KB; ++kb) {
+    for (int kb = w; kb < KB; kb += 8) {
         const int k = kb * 128 + 4 * lane;
         float v[4], a[4], b[4], g4[4], u4[4];
-        ld_bf16x4(xrow + k, v);
+        ld_bf16x4_g(xrow + k, v);
         ld_f16x4(sg + k, g4);
         ld_f16x4(su + k, u4);
 #pragma unroll
@@ -1292,8 +1482,7 @@ struct PGateUp {
 // 64-wide k chunks, double buffered with async copies, while every warp runs its columns over the previous chunk.
 __global__ void __launch_bounds__(PW * 32, 2) p_gate_up_kernel(PGateUp a) {
     extern __shared__ __align__(16) unsigned char p_smem[];
-    const int NB = a.I >> 7;
-    const int tile = blockIdx.x / NB, cb = blockIdx.x % NB;
+    const int cb = blockIdx.x, tile = blockIdx.y;
     if (tile >= a.hdr[0]) return;
     const int e = a.t_exp[tile], p0 = a.t_p0[tile], n = a.t_n[tile];
     const float limit = (e == a.ne) ? a.shared_limit : a.routed_limit;
@@ -1308,21 +1497,22 @@ __global__ void __launch_bounds__(PW * 32, 2) p_gate_up_kernel(PGateUp a) {
     const int nt0 = cb * 8 + wq * 2;
     const int ntn = (n + 7) >> 3;
     const int NC = a.H / PKC;
+    const int q8 = (threadIdx.x & 7) * 8;
     auto stage = [&](int c, int buf) {
-        // 2 mats x PT rows x (PKC / 8) 16-byte pieces
-        for (int i = threadIdx.x; i < 2 * PT * (PKC / 8); i += PW * 32) {
-            const int q = i % (PKC / 8), r = i / (PKC / 8), tk = r % PT, um = r / PT;
+        for (int r = threadIdx.x >> 3; r < 2 * PT; r += (PW * 32) / (PKC / 8)) {
+            const int um = (r >= PT);
+            const int tk = um ? (r - PT) : r;
             const bool in = tk < n;
-            const half* src = a.xr + ((size_t)(p0 + (in ? tk : 0)) * 2 + um) * a.H + c * PKC + q * 8;
-            p_cp16(xs + (size_t)buf * BUF + ((size_t)um * PT + tk) * PKS + q * 8, src, in);
+            const half* src = a.xr + ((size_t)(p0 + (in ? tk : 0)) * 2 + um) * a.H + c * PKC + q8;
+            p_cp16(xs + (size_t)buf * BUF + (size_t)r * PKS + q8, src, in);
         }
         p_commit();
     };
-    float acc[2][8][4];
+    float acc[2][PNJ][4];
 #pragma unroll
     for (int m = 0; m < 2; ++m)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < PNJ; ++j)
 #pragma unroll
             for (int c = 0; c < 4; ++c) acc[m][j][c] = 0.f;
 
@@ -1342,9 +1532,10 @@ __global__ void __launch_bounds__(PW * 32, 2) p_gate_up_kernel(PGateUp a) {
     }
     __syncthreads();
 
-    // epilogue in two halves of PT / 2 tokens so the fp32 outputs fit in the staging area: [2][PT / 2][POS]
+    // epilogue in two halves of PT / 2 = 40 tokens so the fp32 outputs fit in the staging area: [2][40][POS] (42,240 B)
     float* outs = reinterpret_cast<float*>(p_smem);
     constexpr int HT = PT / 2;
+    constexpr int HNJ = HT / 8;
     const int g = lane >> 2, t = lane & 3;
     const int col = cb * 128 + 4 * lane;
     float sg[4], sv[4], sd[4];
@@ -1356,8 +1547,8 @@ __global__ void __launch_bounds__(PW * 32, 2) p_gate_up_kernel(PGateUp a) {
 #pragma unroll
         for (int m = 0; m < 2; ++m)
 #pragma unroll
-            for (int jj = 0; jj < 4; ++jj) {
-                const int j = hh * 4 + jj;
+            for (int jj = 0; jj < HNJ; ++jj) {
+                const int j = hh * HNJ + jj;
                 if (j < ntn) {
                     const int c = wq * 32 + m * 16 + g, tk = jj * 8 + 2 * t;
                     float* o = outs + ((size_t)mat * HT + tk) * POS + c;
@@ -1408,13 +1599,13 @@ struct PDown {
 };
 
 // Block = (tile, 256-column block), 8 warps of 32 columns. The tile's activation rows are staged one 128-wide k block
-// at a time and the epilogue runs in two halves of PT / 2 tokens, so a block needs ~33 KB and two fit an SM.
+// at a time and the epilogue runs in two halves of PT / 2 = 40 tokens; the launcher sizes shared memory to the larger of
+// double-buffered staging (23,040 B) and the epilogue (41,600 B), so two blocks (83.2 KiB) fit an SM.
 constexpr int DOS = 256 + 4;  // down output row (floats)
 
 __global__ void __launch_bounds__(PW * 32, 2) p_down_kernel(PDown a) {
     extern __shared__ __align__(16) unsigned char p_smem[];
-    const int NB = a.H >> 8;
-    const int tile = blockIdx.x / NB, cb = blockIdx.x % NB;
+    const int cb = blockIdx.x, tile = blockIdx.y;
     if (tile >= a.hdr[0]) return;
     const int e = a.t_exp[tile], p0 = a.t_p0[tile], n = a.t_n[tile];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
@@ -1427,19 +1618,20 @@ __global__ void __launch_bounds__(PW * 32, 2) p_down_kernel(PDown a) {
     const int nt0 = cb * 16 + warp * 2;
     const int ntn = (n + 7) >> 3;
     const int NC = a.I / PKC;
+    const int q8 = (threadIdx.x & 7) * 8;
     auto stage = [&](int c, int buf) {
-        for (int i = threadIdx.x; i < PT * (PKC / 8); i += PW * 32) {
-            const int q = i % (PKC / 8), tk = i / (PKC / 8);
+        #pragma unroll
+        for (int tk = threadIdx.x >> 3; tk < PT; tk += (PW * 32) / (PKC / 8)) {
             const bool in = tk < n;
-            p_cp16(xs + (size_t)buf * BUF + (size_t)tk * PKS + q * 8, a.xd + (size_t)(p0 + (in ? tk : 0)) * a.I + c * PKC + q * 8, in);
+            p_cp16(xs + (size_t)buf * BUF + (size_t)tk * PKS + q8, a.xd + (size_t)(p0 + (in ? tk : 0)) * a.I + c * PKC + q8, in);
         }
         p_commit();
     };
-    float acc[2][8][4];
+    float acc[2][PNJ][4];
 #pragma unroll
     for (int m = 0; m < 2; ++m)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < PNJ; ++j)
 #pragma unroll
             for (int c = 0; c < 4; ++c) acc[m][j][c] = 0.f;
     stage(0, 0);
@@ -1457,7 +1649,8 @@ __global__ void __launch_bounds__(PW * 32, 2) p_down_kernel(PDown a) {
     __syncthreads();
 
     constexpr int HT = PT / 2;
-    float* outs = reinterpret_cast<float*>(p_smem);  // [HT][DOS]
+    constexpr int HNJ = HT / 8;
+    float* outs = reinterpret_cast<float*>(p_smem);  // [HT][DOS] (41,600 B at HT = 40)
     const int g = lane >> 2, t = lane & 3;
     const half* dsv = reinterpret_cast<const half*>(a.dSv[e]);
 #pragma unroll
@@ -1465,8 +1658,8 @@ __global__ void __launch_bounds__(PW * 32, 2) p_down_kernel(PDown a) {
 #pragma unroll
         for (int m = 0; m < 2; ++m)
 #pragma unroll
-            for (int jj = 0; jj < 4; ++jj) {
-                const int j = hh * 4 + jj;
+            for (int jj = 0; jj < HNJ; ++jj) {
+                const int j = hh * HNJ + jj;
                 if (j < ntn) {
                     const int c = warp * 32 + m * 16 + g, tk = jj * 8 + 2 * t;
                     float* o = outs + (size_t)tk * DOS + c;
@@ -1499,16 +1692,27 @@ __global__ void __launch_bounds__(256) p_combine_kernel(const float* __restrict_
                                                         const float* __restrict__ ent_w, __nv_bfloat16* __restrict__ out,
                                                         int H, int KT) {
     const int tok = blockIdx.x;
-    for (int c = threadIdx.x * 4; c < H; c += blockDim.x * 4) {
-        float v[4] = {0.f, 0.f, 0.f, 0.f};
-        for (int k = 0; k < KT; ++k) {
-            const int p = e_pos[tok * KT + k];
-            const float w = ent_w[tok * KT + k];
+    const int c = (blockIdx.y * 256 + threadIdx.x) * 4;
+    if (c >= H) return;
+    const int base = tok * KT;
+    float v[4] = {0.f, 0.f, 0.f, 0.f};
+    if (KT == 9) {
+#pragma unroll
+        for (int k = 0; k < 9; ++k) {
+            const int p = __ldg(e_pos + base + k);
+            const float w = __ldg(ent_w + base + k);
             const float4 x = ldcg4(y + (size_t)p * H + c);
             v[0] += w * x.x; v[1] += w * x.y; v[2] += w * x.z; v[3] += w * x.w;
         }
-        st_bf16x4(out + (size_t)tok * H + c, v);
+    } else {
+        for (int k = 0; k < KT; ++k) {
+            const int p = __ldg(e_pos + base + k);
+            const float w = __ldg(ent_w + base + k);
+            const float4 x = ldcg4(y + (size_t)p * H + c);
+            v[0] += w * x.x; v[1] += w * x.y; v[2] += w * x.z; v[3] += w * x.w;
+        }
     }
+    st_bf16x4(out + (size_t)tok * H + c, v);
 }
 
 }  // namespace fmoe
@@ -1545,7 +1749,8 @@ GB_EXPORT size_t gb_fmoe_workspace_bytes(int max_tokens, int top_k, int H, int I
     return fmoe_layout(nullptr, emax, H, I, KC).total;
 }
 
-// out [T][H] bf16 = MoE(x [T][H] bf16) with routing from logits [T][NE] bf16 and the shared expert gated by
+// out [T][H] bf16 = MoE(x [T][H] bf16) with routing from logits [T][NE] (bf16 when logits_f32 == 0, fp32
+// otherwise — Ling-3.1's router_dtype = fp32) and the shared expert gated by
 // sigmoid(shared_gate [T] bf16). Pointer tables hold NE + 1 entries (the shared expert last); ktab [NE + 1][3] holds
 // the EXL3 K2 (twice the bits, 2..16) of gate, up, down. T <= max_tokens of the workspace, T <= 64, NE <= 512,
 // top_k <= 16, H % 128 == 0, I % 128 == 0, (H/128) % KC == 0.
@@ -1553,7 +1758,9 @@ GB_EXPORT size_t gb_fmoe_workspace_bytes(int max_tokens, int top_k, int H, int I
 // logits, no scale); otherwise the group-limited noaux_tc router runs (sigmoid scores + expert_bias, top-2 per group,
 // topk_group groups of NE / n_group = 64 experts, weights = normalized unbiased sigmoid scores * scale).
 // SwiGLU clamps: routed_limit applies to the routed experts, shared_limit to the shared expert (entry NE); <= 0: none.
-GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, const void* shared_gate, const uint64_t* gT,
+// Test/debug hook: when 1, gb_fmoe_forward uses the legacy global-partial kernels (A/B bit-exactness tests).
+static int g_fmoe_legacy = 0;
+GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
                               const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
                               const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
                               const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int KC,
@@ -1572,11 +1779,11 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, const void* sha
     const int E = T * (top_k + (shared_gate ? 1 : 0));
 
     if (group)
-        route_group_kernel<<<1, ROUTE_THREADS, 0, st>>>((const __nv_bfloat16*)logits, (const __nv_bfloat16*)shared_gate,
+        route_group_kernel<<<1, ROUTE_THREADS, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
                                                         expert_bias, routed_scaling, w.route, emax, T, NE, top_k, n_group,
                                                         topk_group);
     else
-        route_kernel<<<1, ROUTE_THREADS, 0, st>>>((const __nv_bfloat16*)logits, (const __nv_bfloat16*)shared_gate,
+        route_kernel<<<1, ROUTE_THREADS, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
                                                  w.route, emax, T, NE, top_k);
     int rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
@@ -1585,13 +1792,63 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, const void* sha
                   (float*)w.part, (int*)w.cnt, (half*)w.xd, H, I, KC, NE, routed_limit, shared_limit};
     const int jobs_a = E * 2 * (I / 128) * KC;
     const size_t smem_a = (size_t)WARPS * GT * ((H / 128 / KC) * 128 + 8) * sizeof(half);
-    // the staged tokens live in the default 48 KiB of dynamic shared memory (the kernel never raises its limit): at most 5 blocks of 128
-    // a chunk, so H = 2048 (16 blocks) takes KC 4, 8 and 16 and Flash-Next's H = 2560 (20 blocks) KC 4, 5, 10 and 20
+    // the staged tokens live in the default 48 KiB of dynamic shared memory (the legacy kernel never raises its limit): at most 5 blocks of
+    // 128 a chunk, so H = 2048 (16 blocks) takes KC 4, 8 and 16 and Flash-Next's H = 2560 (20 blocks) KC 4, 5, 10 and 20
     if (smem_a > 48 * 1024) return (int)cudaErrorInvalidValue;
+
+    // Wave-6b in-CTA reductions (one CTA owns every K chunk of a (group, block); partials cross warps in shared
+    // memory, keeping the legacy ascending kc sum order exactly). The gate/up fused path is the default (it is
+    // bit-exact with the legacy path); gb_fmoe_set_legacy forces the global-partial kernels (A/B tests). The down
+    // path stays the legacy down_kernel (bit-exact, the wave-6 67.07 tok/s winner).
+    const bool use_gu_smem = !g_fmoe_legacy;
+    if (use_gu_smem && (H / 128) % KC == 0) {
+        const int kblocks = (H / 128) / KC;
+        const size_t smem_gu = (size_t)KC * GT * (kblocks * 128 + 8) * sizeof(half) + (size_t)(KC + 1) * GT * 128 * sizeof(float);
+        if (smem_gu <= 100 * 1024) {
+            const int grid_gu = E * (I / 128);
+            switch (KC) {
+                case 2:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<2><<<grid_gu, 64, smem_gu, st>>>(ga);
+                    break;
+                case 4:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<4><<<grid_gu, 128, smem_gu, st>>>(ga);
+                    break;
+                case 5:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<5>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<5><<<grid_gu, 160, smem_gu, st>>>(ga);
+                    break;
+                case 8:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<8>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<8><<<grid_gu, 256, smem_gu, st>>>(ga);
+                    break;
+                case 10:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<10>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<10><<<grid_gu, 320, smem_gu, st>>>(ga);
+                    break;
+                case 16:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<16><<<grid_gu, 512, smem_gu, st>>>(ga);
+                    break;
+                case 20:
+                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<20>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
+                    gate_up_kernel_smem<20><<<grid_gu, 640, smem_gu, st>>>(ga);
+                    break;
+                default:
+                    gate_up_kernel<<<(jobs_a + WARPS - 1) / WARPS, WARPS * 32, smem_a, st>>>(ga);
+                    break;
+            }
+            rc = GB_CHECK_LAUNCH();
+            if (rc) return rc;
+            goto down_launch;
+        }
+    }
     gate_up_kernel<<<(jobs_a + WARPS - 1) / WARPS, WARPS * 32, smem_a, st>>>(ga);
     rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
 
+down_launch:
     DownArgs da{(const half*)w.xd, w.route, emax, dT, dSv, ktab, (float*)w.partd, (float*)w.y, (int*)w.cntd,
                 (int*)w.cntc, (__nv_bfloat16*)out, H, I};
     const int jobs_b = E * (H / 128) * (I / 128);
@@ -1599,9 +1856,16 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, const void* sha
     return GB_CHECK_LAUNCH();
 }
 
+// Test/debug hook: force the legacy global-partial kernels (0 or 1); returns the previous setting.
+GB_EXPORT int gb_fmoe_set_legacy(int legacy) {
+    const int prev = g_fmoe_legacy;
+    g_fmoe_legacy = legacy != 0;
+    return prev;
+}
+
 // The group-limited noaux_tc router alone (test/debug hook): sel [T][K+1] i32 and wts [T][K+1] f32 with the shared
 // expert as entry K, as gb_fmoe_forward routes. ws holds T*(K+1)*8 + (NE+1)*4 bytes (contents on entry never matter).
-GB_EXPORT int gb_fmoe_group_route(const void* logits, const void* shared_gate, const float* expert_bias, float scale,
+GB_EXPORT int gb_fmoe_group_route(const void* logits, int logits_f32, const void* shared_gate, const float* expert_bias, float scale,
                                   int* sel, float* wts, void* ws, int T, int NE, int K, int n_group, int topk_group,
                                   void* stream) {
     if (T < 1 || NE < 1 || NE > 512 || K < 1 || K > 16 || T * (K + 1) > ROUTE_EMAX || !expert_bias || n_group < 2 ||
@@ -1613,7 +1877,7 @@ GB_EXPORT int gb_fmoe_group_route(const void* logits, const void* shared_gate, c
     int* cnt = reinterpret_cast<int*>(static_cast<char*>(ws) + (size_t)T * (K + 1) * 8);
     int rc = (int)cudaMemsetAsync(cnt, 0, (size_t)(NE + 1) * sizeof(int), st);
     if (rc) return rc;
-    p_route_group_kernel<<<(T + 7) / 8, 256, 0, st>>>((const __nv_bfloat16*)logits, (const __nv_bfloat16*)shared_gate,
+    p_route_group_kernel<<<(T + 7) / 8, 256, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
                                                       expert_bias, scale, ent_exp, ent_w, cnt, T, NE, K, n_group, topk_group);
     rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
@@ -1652,7 +1916,10 @@ struct PWs {
     size_t total;
 };
 
-static int p_max_tiles(int entries, int nex) { return (entries + PT - 1) / PT + nex; }
+static int p_max_tiles(int entries, int nex) {
+    const int upper = (entries + PT - 1) / PT + nex;
+    return entries < upper ? entries : upper;
+}
 
 static PWs p_layout(char* base, int max_tokens, int top_k, int NE, int H, int I) {
     const int nex = NE + 1, emax = max_tokens * (top_k + 1), mt = p_max_tiles(emax, nex);
@@ -1685,10 +1952,11 @@ GB_EXPORT size_t gb_fmoep_workspace_bytes(int max_tokens, int top_k, int NE, int
     return p_layout(nullptr, max_tokens, top_k, NE, H, I).total;
 }
 
-// Prefill MoE: out [T][H] bf16 from x [T][H] bf16, router logits [T][NE] bf16 and the shared expert gated by
+// Prefill MoE: out [T][H] bf16 from x [T][H] bf16, router logits [T][NE] (bf16 or fp32, `logits_f32`) and the
+// shared expert gated by
 // sigmoid(shared_gate [T] bf16). Same tables as gb_fmoe_forward (ktab holds K2, 2..16). T <= max_tokens,
 // NE + 1 <= 1024, top_k <= 16, H % 256 == 0, I % 128 == 0. Routing and SwiGLU clamps as gb_fmoe_forward.
-GB_EXPORT int gb_fmoep_forward(const void* x, const void* logits, const void* shared_gate, const uint64_t* gT,
+GB_EXPORT int gb_fmoep_forward(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
                                const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
                                const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
                                const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int max_tokens,
@@ -1710,7 +1978,7 @@ GB_EXPORT int gb_fmoep_forward(const void* x, const void* logits, const void* sh
     const size_t smem_dn = smem_d > smem_d2 ? smem_d : smem_d2;
     static const cudaError_t c1 = cudaFuncSetAttribute(p_gate_up_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
     if (c1 != cudaSuccess) return (int)c1;
-    const cudaError_t c2 = cudaFuncSetAttribute(p_down_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_dn);
+    static const cudaError_t c2 = cudaFuncSetAttribute(p_down_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_dn);
     if (c2 != cudaSuccess) return (int)c2;
 
     // the expert counters start every call at zero: the scan zeroes them again, but a call that failed between the route and the scan
@@ -1718,11 +1986,11 @@ GB_EXPORT int gb_fmoep_forward(const void* x, const void* logits, const void* sh
     int rc = (int)cudaMemsetAsync(w.cnt, 0, (size_t)nex * sizeof(int), st);
     if (rc) return rc;
     if (group)
-        p_route_group_kernel<<<(T + 7) / 8, 256, 0, st>>>((const __nv_bfloat16*)logits, (const __nv_bfloat16*)shared_gate,
+        p_route_group_kernel<<<(T + 7) / 8, 256, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
                                                           expert_bias, routed_scaling, w.ent_exp, w.ent_w, w.cnt, T, NE,
                                                           top_k, n_group, topk_group);
     else
-        p_route_kernel<<<(T + 7) / 8, 256, 0, st>>>((const __nv_bfloat16*)logits, (const __nv_bfloat16*)shared_gate,
+        p_route_kernel<<<(T + 7) / 8, 256, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
                                                     w.ent_exp, w.ent_w, w.cnt, T, NE, top_k);
     rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
@@ -1730,14 +1998,14 @@ GB_EXPORT int gb_fmoep_forward(const void* x, const void* logits, const void* sh
     if ((rc = GB_CHECK_LAUNCH())) return rc;
     p_scatter_kernel<<<(E + 255) / 256, 256, 0, st>>>(w.ent_exp, w.eoff, w.cur, w.s_tok, w.s_exp, w.e_pos, E, KT);
     if ((rc = GB_CHECK_LAUNCH())) return rc;
-    p_rotate_kernel<<<(unsigned)((E + 7) / 8), 256, 0, st>>>((const __nv_bfloat16*)x, w.s_tok, w.s_exp, gSu, uSu, w.xr, E, H);
+    p_rotate_kernel<<<(unsigned)E, 256, 0, st>>>((const __nv_bfloat16*)x, w.s_tok, w.s_exp, gSu, uSu, w.xr, E, H);
     if ((rc = GB_CHECK_LAUNCH())) return rc;
     PGateUp ga{w.xr, w.hdr, w.t_exp, w.t_p0, w.t_n, gT, gSv, uT, uSv, dSu, ktab, w.xd, H, I, NE, routed_limit, shared_limit};
-    p_gate_up_kernel<<<mt * (I / 128), PW * 32, smem_gu, st>>>(ga);
+    p_gate_up_kernel<<<dim3((unsigned)(I / 128), (unsigned)mt), PW * 32, smem_gu, st>>>(ga);
     if ((rc = GB_CHECK_LAUNCH())) return rc;
     PDown da{w.xd, w.hdr, w.t_exp, w.t_p0, w.t_n, dT, dSv, ktab, w.y, H, I};
-    p_down_kernel<<<mt * (H / 256), PW * 32, smem_dn, st>>>(da);
+    p_down_kernel<<<dim3((unsigned)(H / 256), (unsigned)mt), PW * 32, smem_dn, st>>>(da);
     if ((rc = GB_CHECK_LAUNCH())) return rc;
-    p_combine_kernel<<<T, 256, 0, st>>>(w.y, w.e_pos, w.ent_w, (__nv_bfloat16*)out, H, KT);
+    p_combine_kernel<<<dim3(T, (unsigned)((H + 1023) / 1024)), 256, 0, st>>>(w.y, w.e_pos, w.ent_w, (__nv_bfloat16*)out, H, KT);
     return GB_CHECK_LAUNCH();
 }

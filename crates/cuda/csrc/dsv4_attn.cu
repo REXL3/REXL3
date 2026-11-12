@@ -550,71 +550,37 @@ __global__ void kv_prepare_kernel(void* x, const float* w, int width, float eps,
     }
     __syncthreads();
 
-    // phase 4: walsh_kernel's f16 path (do_rot), sub == 1 so one warp block
+    // phase 4: walsh_kernel's f16 path (do_rot): one 64-wide block of the nope dims per warp, so no two warps touch the same
+    // values. Every warp of the block used to rotate the whole row in place, and a warp that read after another had written
+    // rotated the row a second time (the orthonormal 64-point Walsh-Hadamard is its own inverse): the row's bits then
+    // depended on warp timing, rarely, and most often under memory load (one window key of one layer, run to run).
     if (do_rot) {
         const int lane = threadIdx.x & 31;
         const int dim = width - rope_dim;
         __half2* x2 = reinterpret_cast<__half2*>(static_cast<__half*>(x) + base);
-        if (dim == 448) {
-            __half2 h[7];
-#pragma unroll
-            for (int t = 0; t < 7; ++t) {
-                h[t] = x2[32 * t + lane];
+        for (int t = threadIdx.x >> 5; t < dim / 64; t += blockDim.x >> 5) {
+            const float2 ab = __half22float2(x2[32 * t + lane]);
+            float a = ab.x;
+            float b = ab.y;
+            {
+                const float p = a + b;
+                b = a - b;
+                a = p;
             }
 #pragma unroll
-            for (int t = 0; t < 7; ++t) {
-                const float2 ab = __half22float2(h[t]);
-                float a = ab.x;
-                float b = ab.y;
-                {
-                    const float p = a + b;
-                    b = a - b;
-                    a = p;
+            for (int k = 0; k < 5; ++k) {
+                const int d = 1 << k;
+                const float pa = __shfl_xor_sync(0xFFFFFFFFu, a, d);
+                const float pb = __shfl_xor_sync(0xFFFFFFFFu, b, d);
+                if ((lane >> k) & 1) {
+                    a = pa - a;
+                    b = pb - b;
+                } else {
+                    a += pa;
+                    b += pb;
                 }
-#pragma unroll
-                for (int k = 0; k < 5; ++k) {
-                    const int d = 1 << k;
-                    const float pa = __shfl_xor_sync(0xFFFFFFFFu, a, d);
-                    const float pb = __shfl_xor_sync(0xFFFFFFFFu, b, d);
-                    if ((lane >> k) & 1) {
-                        a = pa - a;
-                        b = pb - b;
-                    } else {
-                        a += pa;
-                        b += pb;
-                    }
-                }
-                h[t] = __floats2half2_rn(a * 0.125f, b * 0.125f);
             }
-#pragma unroll
-            for (int t = 0; t < 7; ++t) {
-                x2[32 * t + lane] = h[t];
-            }
-        } else {
-            for (int t = 0; t < dim / 64; ++t) {
-                const float2 ab = __half22float2(x2[32 * t + lane]);
-                float a = ab.x;
-                float b = ab.y;
-                {
-                    const float p = a + b;
-                    b = a - b;
-                    a = p;
-                }
-#pragma unroll
-                for (int k = 0; k < 5; ++k) {
-                    const int d = 1 << k;
-                    const float pa = __shfl_xor_sync(0xFFFFFFFFu, a, d);
-                    const float pb = __shfl_xor_sync(0xFFFFFFFFu, b, d);
-                    if ((lane >> k) & 1) {
-                        a = pa - a;
-                        b = pb - b;
-                    } else {
-                        a += pa;
-                        b += pb;
-                    }
-                }
-                x2[32 * t + lane] = __floats2half2_rn(a * 0.125f, b * 0.125f);
-            }
+            x2[32 * t + lane] = __floats2half2_rn(a * 0.125f, b * 0.125f);
         }
     }
 }

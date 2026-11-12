@@ -794,8 +794,11 @@ static inline bool ok_rows(int rows) { return rows >= 0 && rows <= 65535; }
 }  // namespace
 
 template <int XT>
-static inline void launch_router_logits(const void* x, const u16* w, float* logits, int rows, cudaStream_t st) {
-    if (rows > 16 && al(x, 16) && al(w, 16)) {
+// `force_mma`: a prefill slice of 16 rows or fewer takes the MMA kernel too, so a row's logits do not depend on how many rows
+// the slice carries (a short warm tail after a prefix-cache restore gets the bits the whole prompt's pass gives it); decode
+// and speculative verify keep the small-row kernels below.
+static inline void launch_router_logits(const void* x, const u16* w, float* logits, int rows, bool force_mma, cudaStream_t st) {
+    if ((rows > 16 || force_mma) && al(x, 16) && al(w, 16)) {
         const unsigned gx = (unsigned)((rows + 31) / 32);
         const unsigned gy = (unsigned)(E / 64);
         router_logits_mma_k<XT><<<dim3(gx, gy), 128, 0, st>>>(x, w, logits, rows);
@@ -820,17 +823,23 @@ static inline void launch_router_logits(const void* x, const u16* w, float* logi
 }
 
 // logits [rows][384] fp32 = x [rows][5120] (f16 / bf16 / f32) times the bf16 gate [384][5120] transposed.
-GB_EXPORT int gb_dsv4_router_logits(const void* x, int x_type, const void* w, float* logits, int rows, void* stream) {
+GB_EXPORT int gb_dsv4_router_logits_ex(const void* x, int x_type, const void* w, float* logits, int rows, int force_mma,
+                                       void* stream) {
     if (!ok_rows(rows) || !ok_type(x_type)) return ERR_INVALID;
     if (rows == 0) return 0;
     if (!al(x, tal(x_type)) || !al(w, 2) || !al(logits, 16)) return ERR_INVALID;
     cudaStream_t st = gb_stream(stream);
+    const bool force = force_mma != 0;
     switch (x_type) {
-        case T_F32: launch_router_logits<T_F32>(x, (const u16*)w, logits, rows, st); break;
-        case T_F16: launch_router_logits<T_F16>(x, (const u16*)w, logits, rows, st); break;
-        default: launch_router_logits<T_BF16>(x, (const u16*)w, logits, rows, st); break;
+        case T_F32: launch_router_logits<T_F32>(x, (const u16*)w, logits, rows, force, st); break;
+        case T_F16: launch_router_logits<T_F16>(x, (const u16*)w, logits, rows, force, st); break;
+        default: launch_router_logits<T_BF16>(x, (const u16*)w, logits, rows, force, st); break;
     }
     return GB_CHECK_LAUNCH();
+}
+
+GB_EXPORT int gb_dsv4_router_logits(const void* x, int x_type, const void* w, float* logits, int rows, void* stream) {
+    return gb_dsv4_router_logits_ex(x, x_type, w, logits, rows, 0, stream);
 }
 
 // picks [rows][6] i32 and weights [rows][6] fp16 from logits (fp32, or fp16 when `tab` is given and f16_log != 0).

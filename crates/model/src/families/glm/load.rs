@@ -51,6 +51,8 @@ impl LoadOptions {
 /// The device regions of a plan, indexed by [`RegionId`] (`None` for a region the plan does not use).
 pub struct Regions {
     views: Vec<Option<DevBuf>>,
+    /// Bytes of the views that are a shard read in place ([`Regions::insert`]): host page cache, not device memory.
+    mapped: u64,
 }
 
 impl Regions {
@@ -71,13 +73,51 @@ impl Regions {
         }
         Ok(r.subview(offset as usize, bytes as usize))
     }
-    /// Bytes of device memory the regions hold.
+    /// Set region `id`'s view (a region read in place: [`map_in_place`]).
+    pub fn insert(&mut self, id: u32, view: DevBuf) {
+        if self.views.len() <= id as usize {
+            self.views.resize_with(id as usize + 1, || None);
+        }
+        self.mapped += view.bytes() as u64;
+        self.views[id as usize] = Some(view);
+    }
+    /// Bytes of the regions read in place from their shard (page cache, not device memory: not in [`Regions::bytes`]).
+    pub fn mapped_bytes(&self) -> u64 {
+        self.mapped
+    }
+    /// Bytes of device memory the regions hold (a region read in place is not device memory: [`Regions::mapped_bytes`]).
     pub fn bytes(&self) -> u64 {
-        self.views.iter().flatten().map(|v| v.bytes() as u64).sum()
+        self.views.iter().flatten().map(|v| v.bytes() as u64).sum::<u64>() - self.mapped
     }
     pub fn count(&self) -> usize {
         self.views.iter().flatten().count()
     }
+}
+
+/// Map every [`RegionKind::Mapped`] region of `plan` (the embedding read in place): its one plain item's bytes, read-only from its
+/// shard, become the region's view. Refused by name where the GPU cannot read pageable memory, or for a region that is not one
+/// unconverted item at offset 0.
+pub fn map_in_place(dir: &Path, plan: &LoadPlan, regions: &mut Regions) -> Result<(), ModelError> {
+    for r in plan.regions.iter().filter(|r| r.kind == RegionKind::Mapped) {
+        if !gb_cuda::rt::pageable_memory_access() {
+            return Err(ModelError::Config(format!(
+                "{EMBED_IN_PLACE_ENV}: this device does not read pageable memory, so the embedding cannot be read in place"
+            )));
+        }
+        let items: Vec<&LoadItem> = plan.items.iter().filter(|i| i.region == r.id).collect();
+        let [it] = items[..] else {
+            return Err(ModelError::Config(format!("mapped region {} holds {} items, not one", r.id, items.len())));
+        };
+        if it.dst != 0 || it.xform != Xform::None || it.dst_bytes != it.bytes {
+            return Err(ModelError::Config(format!("`{}` cannot be read in place (offset {}, {:?})", it.name, it.dst, it.xform)));
+        }
+        let path = dir.join(&plan.files[it.file as usize]);
+        let block = Block::map_file_readonly(&path, it.offset, it.bytes as usize)
+            .map_err(|e| ModelError::Config(format!("mapping `{}` from {} failed ({e})", it.name, path.display())))?;
+        regions.insert(r.id, DevBuf::view(&Arc::new(block), 0, it.bytes as usize));
+        eprintln!("rexl3 event=glm_embed_in_place tensor={} bytes={} offset={}", it.name, it.bytes, it.offset);
+    }
+    Ok(())
 }
 
 /// `MemAvailable` in bytes (`None` where /proc/meminfo has none).
@@ -110,7 +150,7 @@ pub fn allocate(plan: &LoadPlan, floor_bytes: u64) -> Result<Regions, ModelError
         let block = Arc::new(Block::alloc(r.bytes as usize)?);
         views[r.id as usize] = Some(DevBuf::view(&block, 0, r.bytes as usize));
     }
-    Ok(Regions { views })
+    Ok(Regions { views, mapped: 0 })
 }
 
 fn gib(b: u64) -> f64 {
@@ -325,7 +365,8 @@ pub fn boot_mapped_with(
     let mtp_layer = with_mtp.then(|| pack.config.mtp_layer_index(0));
     let plan = pack.plan.select_regions(keep_prefix_mtp(nl, mtp_layer));
     let t = Instant::now();
-    let regions = allocate(&plan, o.floor_bytes)?;
+    let mut regions = allocate(&plan, o.floor_bytes)?;
+    map_in_place(dir, &pack.plan, &mut regions)?;
     let alloc_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
     let report = run(dir, &plan, &regions, &o.loader)?;
@@ -345,6 +386,23 @@ pub fn keep_prefix_mtp(layers: usize, mtp_layer: Option<usize>) -> impl Fn(&Regi
         RegionKind::Global => true,
         RegionKind::Trunk(l) | RegionKind::Experts(l) => *l < layers || Some(*l) == mtp_layer,
         RegionKind::Vision => false,
+        // read in place: mapped at boot, never allocated (`boot_mapped_with`)
+        RegionKind::Mapped => false,
+    }
+}
+
+/// `REXL3_GLM_EMBED_IN_PLACE`: `1` / `on` reads the embedding table in place from its shard (`RegionKind::Mapped`: no device copy, the
+/// shard's page cache instead, -1.18 GiB of a rank's plan on GLM-5.3-Flash) where the GPU reads pageable memory; unset, `0` or `off` (the
+/// default, every shipped GLM profile) keeps the device copy. Anything else is refused by name. The gathers read the same bytes, so
+/// every output is the copy's bit for bit (`crates/cuda/tests/glue.rs`, the any-address test).
+pub const EMBED_IN_PLACE_ENV: &str = "REXL3_GLM_EMBED_IN_PLACE";
+
+/// [`EMBED_IN_PLACE_ENV`] from a lookup.
+pub fn embed_in_place_from(get: impl Fn(&str) -> Option<String>) -> Result<bool, String> {
+    match get(EMBED_IN_PLACE_ENV).as_deref().map(str::trim) {
+        None | Some("0" | "off") => Ok(false),
+        Some("1" | "on") => Ok(true),
+        Some(v) => Err(format!("{EMBED_IN_PLACE_ENV}={v:?}: expected 1, on, 0 or off (unset: the device copy)")),
     }
 }
 
@@ -378,6 +436,20 @@ impl LoadPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_embed_in_place_setting_parses_or_is_refused_by_name() {
+        let of = |v: Option<&str>| {
+            super::embed_in_place_from(|k| (k == super::EMBED_IN_PLACE_ENV).then(|| v.map(String::from)).flatten())
+        };
+        assert_eq!(of(None), Ok(false));
+        for (v, want) in [("0", false), ("off", false), ("1", true), ("on", true), (" on ", true)] {
+            assert_eq!(of(Some(v)), Ok(want), "{v:?}");
+        }
+        for bad in ["", "yes", "true", "2", "ON"] {
+            assert!(of(Some(bad)).unwrap_err().contains(super::EMBED_IN_PLACE_ENV), "{bad:?}");
+        }
+    }
+
     use super::*;
 
     fn f32b(v: &[f32]) -> Vec<u8> {

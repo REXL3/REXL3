@@ -4,7 +4,8 @@
 //! `ExpertOwnership::range(288, r, 2)`: every MoE layer is subbanks of the owned experts) made ranks 0 and 1 of an in-process group
 //! (`LoopbackGroup`, a thread and a stream each; the pair buffer summed by the loopback collective). Every candidate and every fp16 logit
 //! of every call must be byte-identical across the ranks and equal to the one-model run, which runs with graphs on and with graphs off.
-//! The negative control (both ranks own 0..144) must differ.
+//! The negative control (both ranks own 0..144): under P2 rank 1 is refused by name before it joins (it must own combine group 1); under
+//! P1, which has no such check, its answers must differ. Both run whatever the process's contract.
 //!
 //! The script (as `glm_tp.rs`): a 2,300-token prompt in 512-row chunks (the batched expert path, past the DSA sparse threshold, so the
 //! indexer and its `wq_b` run), a 200-token prompt in 128-row chunks, a 37-token prompt, a 9-row window of three sequences with partial
@@ -24,6 +25,7 @@ mod glm_support;
 use gb_cuda::moe::ExpertOwnership;
 use gb_cuda::DevBuf;
 use gb_exl3::f16::{f16_to_f64, f64_to_f16};
+use gb_model::families::glm::contract::PrefillContract;
 use gb_model::families::glm::device::{FfnDevice, GlmDevice, MixerDevice, WqBDevice};
 use gb_model::families::glm::load::{boot_mapped, LoadOptions};
 use gb_model::families::glm::model::{GlmModel, ModelOptions};
@@ -143,7 +145,7 @@ fn region_bytes(plan: &gb_model::families::glm::LoadPlan) -> (u64, u64, u64) {
             RegionKind::Global => g += r.bytes,
             RegionKind::Trunk(_) => t += r.bytes,
             RegionKind::Experts(_) => e += r.bytes,
-            RegionKind::Vision => {}
+            RegionKind::Vision | RegionKind::Mapped => {}
         }
     }
     (g, t, e)
@@ -320,9 +322,21 @@ fn redsnow_prefix_two_ranks_equal_one_model_byte_for_byte() {
     );
     drop((a, b));
 
-    // the negative control: both ranks load and own 0..144 (144..288 computed by nobody, 0..144 counted twice): the answers must differ
+    // the negative control: both ranks load and own 0..144 (144..288 computed by nobody, 0..144 counted twice). Under P2 the rank check
+    // refuses it by name before the rank joins (`check_p2_tp`: rank r owns combine group r); under P1, which has no such check, the
+    // answers must differ. Both run here, whatever the process's contract (`set_prefill_contract` before `enable_tp`)
     let (mut a, _) = load(&dir, layers, Some(&owns[0]), |_| {});
     let (mut b, _) = load(&dir, layers, Some(&owns[0]), |_| {});
+    b.set_prefill_contract(PrefillContract::P2).unwrap();
+    let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(120)).into_iter();
+    let _rank0 = comms.next().unwrap();
+    let e = b.enable_tp(Arc::new(comms.next().unwrap()), owns[0].clone()).expect_err("P2: rank 1 owning 0..144 must be refused");
+    let e = e.to_string();
+    assert!(e.contains("rank 1 must own the experts of combine group 1"), "{e}");
+    assert!(b.tp().is_none(), "a refused rank did not join");
+    eprintln!("negative control under P2 (rank 1 owns 0..144): refused before it joins: {e}");
+    a.set_prefill_contract(PrefillContract::P1).unwrap();
+    b.set_prefill_contract(PrefillContract::P1).unwrap();
     let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(120)).into_iter();
     a.enable_tp(Arc::new(comms.next().unwrap()), owns[0].clone()).unwrap();
     b.enable_tp(Arc::new(comms.next().unwrap()), owns[0].clone()).unwrap();
@@ -334,7 +348,10 @@ fn redsnow_prefix_two_ranks_equal_one_model_byte_for_byte() {
     assert_eq!(n0, n1, "the overlapping ranks still agree with each other");
     let differ = n0.iter().zip(&ref_graphs).filter(|(x, y)| x != y).count();
     assert!(differ > 0, "an ownership that does not partition the experts went unnoticed");
-    eprintln!("negative control (both ranks own 0..144): {differ} of {} answering calls differ from the one model", n0.len());
+    eprintln!(
+        "negative control under P1 (both ranks own 0..144): {differ} of {} answering calls differ from the one model",
+        n0.len()
+    );
     drop((a, b));
     eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
 }
@@ -440,12 +457,25 @@ fn a_ranks_nextn_layer_binds_as_subbanks_and_is_refused_by_name_where_it_would_r
     .unwrap();
     m.begin_slot(0).unwrap();
     let toks: Vec<u32> = (0..37).map(|i| 1000 + i).collect();
-    let e = m.prefill_chunk(0, 0, &toks, Some(COUNT)).err().expect("the NextN layer's share must be refused").to_string();
-    assert!(e.contains(MTP_SHARE), "{e}");
-    eprintln!("a prefill outside a group refuses: {e}");
+    // under both prefill contracts (the process's first, then the other), by name and before the chunk's first launch: the refused chunk
+    // left no work on the stream (a launch failure would surface at the sync)
+    let first = m.prefill_contract();
+    let other_contract = if first == PrefillContract::P2 { PrefillContract::P1 } else { PrefillContract::P2 };
+    for c in [first, other_contract] {
+        m.set_prefill_contract(c).unwrap();
+        let e = m.prefill_chunk(0, 0, &toks, Some(COUNT)).err().expect("the NextN layer's share must be refused").to_string();
+        assert!(e.contains(MTP_SHARE), "{c:?}: {e}");
+        m.sync().unwrap();
+        eprintln!("a prefill outside a group refuses ({c:?}): {e}");
+    }
     m.end_slot(0);
+    // the joins below use a one-rank communicator, which P2 refuses for any share (`check_p2_tp`: a group of one rank owns every
+    // expert) before it looks at the share: they run under P1, where the share itself is what is checked. A P2 rank joins a group of two
+    // (`redsnow_prefix_two_ranks_equal_one_model_byte_for_byte`, `tests/glm_tp_mtp.rs`)
+    m.set_prefill_contract(PrefillContract::P1).unwrap();
     let other = ExpertOwnership::range(E, 1, 2).unwrap();
     let e = m.enable_tp(Arc::new(SingleRank), other).unwrap_err().to_string();
+    assert!(e.contains("routed experts are subbanks of"), "{e}");
     eprintln!("enable_tp with another rank's share refuses: {e}");
     m.enable_tp(Arc::new(SingleRank), own.clone()).expect("a rank's NextN share is accepted (lane L12)");
     drop(m);

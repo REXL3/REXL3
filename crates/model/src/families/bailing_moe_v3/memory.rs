@@ -70,9 +70,11 @@ impl MemoryModel for BailingMemory<'_> {
         AllocPlan::slot_items(self.cfg).iter().map(|i| i.bytes).sum()
     }
 
-    /// One window row of every KDA layer's record (the 63 window records hold `WINDOW_ROWS` rows each).
+    /// MemoryProfile prices records at its 64-row scheduling window, while the runtime keeps 128 physical rows per KDA
+    /// layer (the window plus its drafts). Scale the per-row figure so `window_record_bytes()` equals the real allocation.
     fn window_record_bytes_per_row(&self) -> u64 {
-        AllocPlan::window_row_items(self.cfg).iter().map(|i| i.bytes).sum()
+        let physical: u64 = AllocPlan::window_row_items(self.cfg).iter().map(|i| i.bytes).sum();
+        physical * alloc::KDA_WINDOW_RECORD_ROWS as u64 / alloc::WINDOW_ROWS as u64
     }
 
     /// Every buffer of a forward for a prefill chunk of `rows` rows (`AllocPlan::scratch_items`), the shared prefill KDA record and the
@@ -143,8 +145,8 @@ mod tests {
         assert_eq!(p.state_bytes_per_seq(), 63 * layer);
         assert_eq!(p.state_bytes_per_seq(), 537_772_284);
         assert_eq!(p.drafter_state_bytes_per_slot(), 0);
-        assert_eq!(p.window_record_bytes_per_row(), 63 * 82_176);
-        assert_eq!(p.window_record_bytes(), 63 * 82_176 * 64);
+        assert_eq!(p.window_record_bytes_per_row(), 2 * 63 * 82_176);
+        assert_eq!(p.window_record_bytes(), 63 * 82_176 * alloc::KDA_WINDOW_RECORD_ROWS as u64);
     }
 
     #[test]
@@ -169,5 +171,73 @@ mod tests {
         assert!(memory_profile(&c, &opts()).is_ok());
         let e = memory_profile(&c, &MemoryOptions { mtp: true, ..opts() }).unwrap_err();
         assert!(matches!(e, MemoryError::Inconsistent(m) if m.contains("no NextN layer")));
+    }
+
+    /// The planner prices the bytes the runtime allocates, not an approximation: `Scratch::new`'s buffers plus the KDA
+    /// records and workspace, at the family's default chunk and at smaller ones. Any buffer added to the
+    /// runtime without a matching item in `alloc::AllocPlan::scratch_items` breaks this.
+    #[test]
+    fn scratch_and_record_bytes_equal_the_runtime_allocation() {
+        if !gb_cuda::rt::kernels_built() {
+            eprintln!("not run: this build has no CUDA kernels");
+            return;
+        }
+        for prefill in [super::alloc::DEFAULT_PREFILL_CHUNK, 128, 512, 2048] {
+            let c = real();
+            let prefill = alloc::prefill_chunk_for(prefill);
+            let s = match crate::families::bailing_moe_v3::model::Scratch::new(&c, prefill) {
+                Ok(s) => s,
+                // a stub build (no nvcc) cannot allocate device buffers: the runtime side of this check needs a GPU
+                Err(_) if cfg!(rexl3_no_cuda) => return,
+                Err(e) => panic!("scratch alloc at {prefill} rows: {e}"),
+            };
+            let allocated = s.allocated_bytes() + crate::families::bailing_moe_v3::model::kda_alloc_bytes(&c, prefill);
+            let scratch: u64 = AllocPlan::scratch_items(&c, prefill).iter().map(|i| i.bytes).sum();
+            let windows: u64 =
+                AllocPlan::window_row_items(&c).iter().map(|i| i.bytes).sum::<u64>() * alloc::KDA_WINDOW_RECORD_ROWS as u64;
+            let planned = scratch + windows;
+            assert_eq!(allocated, planned, "prefill_rows={prefill}: the plan must price exactly what is allocated");
+            // The profile carries the same two numbers, without double-counting the window records in scratch.
+            let p = memory_profile(&c, &MemoryOptions { prefill_rows: prefill, mtp: true, ..opts() }).unwrap();
+            assert_eq!(p.scratch_bytes(), scratch, "the profile's scratch is the plan's items");
+            assert_eq!(p.window_record_bytes(), windows, "the profile prices all 128 physical record rows");
+            eprintln!(
+                "prefill_rows={prefill}: scratch+records {} B ({:.3} GiB), engine_reserve {:.3} GiB",
+                allocated,
+                allocated as f64 / (1u64 << 30) as f64,
+                p.engine_reserve_bytes() as f64 / (1u64 << 30) as f64,
+            );
+        }
+    }
+
+    /// The shared prefill record: one `prefill_rows` record for every KDA layer, plus 63 small window records — the
+    /// change that makes 2,048-row slices fit (63 prefill-sized records would be ~10 GiB at 2,048 rows).
+    #[test]
+    fn the_prefill_record_is_shared_across_the_kda_layers() {
+        let c = real();
+        let rows = alloc::DEFAULT_PREFILL_CHUNK;
+        let per_row = c.kda_record_bytes_per_row_per_layer();
+        let naive = c.kda_layers().len() as u64 * rows as u64 * per_row;
+        let shared = crate::families::bailing_moe_v3::model::kda_alloc_bytes(&c, rows);
+        assert!(naive > 4 * shared, "{naive} vs {shared}");
+        assert_eq!(
+            shared,
+            (63 * alloc::KDA_WINDOW_RECORD_ROWS as u64 + rows as u64) * per_row
+                + rows as u64 * alloc::kda_workspace_bytes_per_row(&c) as u64
+        );
+    }
+
+    #[test]
+    fn the_profile_reports_its_engine_reserve() {
+        let c = real();
+        for prefill in [128, 512, 2048, 4096] {
+            let p = memory_profile(&c, &MemoryOptions { prefill_rows: prefill, mtp: true, ..opts() }).unwrap();
+            eprintln!(
+                "prefill_rows={prefill} -> scratch {:.4} GiB, engine_reserve {:.4} GiB, window_record {:.4} GiB",
+                p.scratch_bytes() as f64 / (1u64 << 30) as f64,
+                p.engine_reserve_bytes() as f64 / (1u64 << 30) as f64,
+                p.window_record_bytes() as f64 / (1u64 << 30) as f64,
+            );
+        }
     }
 }

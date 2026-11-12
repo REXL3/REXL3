@@ -246,7 +246,10 @@ impl TpVision {
 
     /// The call of the chunk `at..end` of `prompt` in `slot` (`end == prompt.len()` asks for `candidates`): a core prefill when no image
     /// row is inside it, else a [`PrefillImage`] with the rows read now. When the call would not fit [`TpVision::frame_budget`] the chunk
-    /// is ended earlier (halved until it fits); a chunk of one row that does not fit is refused by name. Returns the chunk's end too.
+    /// is ended earlier (halved until it fits) on the slice grid `grid` (`prefix::slice_grid`: under P2 a whole number of 16-row KDA
+    /// chunks from `at`, which starts on its segment's grid, so the chunk after it continues the segment where P2 can,
+    /// `GlmModel::p2_segment_of`; 1 under P1); a chunk of one row that does not fit is refused by name. Returns the chunk's end too.
+    #[allow(clippy::too_many_arguments)]
     pub fn chunk_call(
         &self,
         slot: usize,
@@ -255,7 +258,9 @@ impl TpVision {
         at: usize,
         mut end: usize,
         candidates: usize,
+        grid: usize,
     ) -> Result<(ChunkCall, usize), ModelError> {
+        let grid = grid.max(1);
         loop {
             let want = (end == prompt.len()).then_some(candidates as u32);
             let batch =
@@ -286,7 +291,10 @@ impl TpVision {
                     self.frame_budget
                 )));
             }
-            end = at + (end - at) / 2;
+            // an earlier end is never the prompt's: it ends on the grid (half, rounded down to it; below one grid step, half as before,
+            // which a 16 KiB feature row never reaches under a frame of MiBs)
+            let half = (end - at) / 2;
+            end = at + if half >= grid { half - half % grid } else { half };
         }
     }
 }
@@ -539,13 +547,13 @@ mod tests {
         let ims = [span(2, 32, host(32, (1, 32), 3))];
         let mut v = TpVision { source: Box::new(HostFeatures), image_token: Some(7), frame_budget: MAX_IMAGE_BODY };
         v.check_images(&prompt, &ims).unwrap();
-        let (c, end) = v.chunk_call(0, &prompt, &ims, 0, 40, 4).unwrap();
+        let (c, end) = v.chunk_call(0, &prompt, &ims, 0, 40, 4, 1).unwrap();
         assert_eq!(end, 40);
         let ChunkCall::Image(c) = c else { panic!("an image chunk") };
         assert_eq!((c.splice.len(), c.splice[0].n, c.want), (1, 32, Some(4)));
         // a budget of about 9 rows: 40 -> 20 -> 10 rows, the rows of the image inside it only, no candidates (not the end)
         v.frame_budget = 9 * ROW_BYTES + 4096;
-        let (c, end) = v.chunk_call(0, &prompt, &ims, 0, 40, 4).unwrap();
+        let (c, end) = v.chunk_call(0, &prompt, &ims, 0, 40, 4, 1).unwrap();
         assert_eq!(end, 10);
         let ChunkCall::Image(c) = c else { panic!("an image chunk") };
         assert!(c.encoded_len() <= v.frame_budget);
@@ -556,11 +564,38 @@ mod tests {
         assert_eq!(c.splice[0].data, want);
         // not even one row fits: refused by name, nothing read
         v.frame_budget = ROW_BYTES;
-        let e = v.chunk_call(0, &prompt, &ims, 2, 40, 4).unwrap_err().to_string();
+        let e = v.chunk_call(0, &prompt, &ims, 2, 40, 4, 1).unwrap_err().to_string();
         assert!(e.contains("frame of a tensor-parallel call"), "{e}");
         // a chunk with no image row is the core prefill whatever the budget
-        let (c, end) = v.chunk_call(0, &prompt, &ims, 34, 40, 4).unwrap();
+        let (c, end) = v.chunk_call(0, &prompt, &ims, 34, 40, 4, 1).unwrap();
         assert_eq!((end, matches!(c, ChunkCall::Text(_, Some(4)))), (40, true));
+    }
+
+    /// Under P2 a chunk ended early for the frame ends on the 16-row grid from its start (the chunk after it continues the segment there);
+    /// under P1 it halves as before. A chunk of 50 rows, 48 of them image rows, with room for about 30: P1 ends it at 25 rows, P2 at 16
+    /// (half, 25, rounded down to the grid), and every row of the image the chunk holds is the image's.
+    #[test]
+    fn a_chunk_ended_early_for_the_frame_ends_on_the_p2_grid() {
+        use super::super::contract::PrefillContract;
+        use super::super::prefix::slice_grid;
+        let prompt: Vec<u32> = (0..50).map(|i| if (1..49).contains(&i) { 7 } else { i }).collect();
+        let ims = [span(1, 48, host(48, (1, 48), 5))];
+        let mut v = TpVision { source: Box::new(HostFeatures), image_token: Some(7), frame_budget: 30 * ROW_BYTES + 4096 };
+        v.check_images(&prompt, &ims).unwrap();
+        assert_eq!((slice_grid(PrefillContract::P1), slice_grid(PrefillContract::P2)), (1, 16));
+        let (_, end) = v.chunk_call(0, &prompt, &ims, 0, 50, 4, slice_grid(PrefillContract::P1)).unwrap();
+        assert_eq!(end, 25, "P1: half");
+        let (c, end) = v.chunk_call(0, &prompt, &ims, 0, 50, 4, slice_grid(PrefillContract::P2)).unwrap();
+        assert_eq!(end, 16, "P2: half rounded down to the 16-row grid");
+        let ChunkCall::Image(c) = c else { panic!("an image chunk") };
+        assert_eq!((c.splice[0].dst_row, c.splice[0].n, c.want), (1, 15, None));
+        // from a start on the grid, the next early end is on it too (16 + 16 = 32 rows from the segment's first row)
+        let (_, end) = v.chunk_call(0, &prompt, &ims, 16, 50, 4, 16).unwrap();
+        assert_eq!(end, 32);
+        // a chunk that fits is the planned one, on the grid or not (the prompt's end)
+        v.frame_budget = MAX_IMAGE_BODY;
+        let (_, end) = v.chunk_call(0, &prompt, &ims, 32, 50, 4, 16).unwrap();
+        assert_eq!(end, 50);
     }
 
     #[test]

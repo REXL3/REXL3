@@ -159,6 +159,25 @@ mod gpu {
                 out: *mut c_void,
                 stream: *mut c_void,
             ) -> i32;
+            pub fn gb_dflash_attn_vis(
+                q: *const c_void,
+                block_k: *const c_void,
+                block_v: *const c_void,
+                kc: *const c_void,
+                vc: *const c_void,
+                slots: *const c_void,
+                p: *const c_void,
+                n_seq: i32,
+                n_q_heads: i32,
+                n_kv_heads: i32,
+                cap: i32,
+                window: i32,
+                rows: i32,
+                causal: i32,
+                ws: *mut c_void,
+                out: *mut c_void,
+                stream: *mut c_void,
+            ) -> i32;
             pub fn gb_dflash_selector_walk(
                 anchor: *const c_void,
                 topk_ids: *const c_void,
@@ -408,6 +427,32 @@ mod gpu {
         out: &mut DevBuf,
         stream: &Stream,
     ) -> Result<(), CudaError> {
+        attn_vis(q, block_k, block_v, kc, vc, slots, p, n_seq, n_q_heads, n_kv_heads, cap, window, rows, true, ws, out, stream)
+    }
+
+    /// [`attn`] with the block's own visibility chosen: `causal` (row `t` sees block rows `0..=t`, what [`attn`] runs) or
+    /// bidirectional (every row sees every row of its block, for a draft trained with `is_causal: false`). The context keys are the
+    /// same either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attn_vis(
+        q: &DevBuf,
+        block_k: &DevBuf,
+        block_v: &DevBuf,
+        kc: &DevBuf,
+        vc: &DevBuf,
+        slots: &DevBuf,
+        p: &DevBuf,
+        n_seq: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        cap: usize,
+        window: usize,
+        rows: usize,
+        causal: bool,
+        ws: &mut DevBuf,
+        out: &mut DevBuf,
+        stream: &Stream,
+    ) -> Result<(), CudaError> {
         need(q, n_seq * rows * n_q_heads * 128 * 2, "attn q");
         need(block_k, n_seq * rows * n_kv_heads * 128 * 2, "attn block_k");
         need(block_v, n_seq * rows * n_kv_heads * 128 * 2, "attn block_v");
@@ -416,7 +461,7 @@ mod gpu {
         need(out, n_seq * rows * n_q_heads * 128 * 2, "attn out");
         need(ws, attn_workspace_bytes(n_seq, window, n_q_heads, rows), "attn workspace");
         let rc = unsafe {
-            ffi::gb_dflash_attn(
+            ffi::gb_dflash_attn_vis(
                 q.ptr(),
                 block_k.ptr(),
                 block_v.ptr(),
@@ -430,6 +475,7 @@ mod gpu {
                 cap as i32,
                 window as i32,
                 rows as i32,
+                causal as i32,
                 ws.ptr(),
                 out.ptr(),
                 stream.raw(),
@@ -853,6 +899,22 @@ pub mod cpu {
     /// positions `0..p` as `[p, kv_heads*hd]` (absolute positions, no ring). Row t sees ctx `kpos >= p + t - window`
     /// and block rows `0..=t`. Returns `[rows, q_heads*hd]`.
     pub fn attention(d: &Dims, q: &[f64], bk: &[f64], bv: &[f64], ctx_k: &[f64], ctx_v: &[f64], p: usize) -> Vec<f64> {
+        attention_vis(d, q, bk, bv, ctx_k, ctx_v, p, true)
+    }
+
+    /// [`attention`] with the block's visibility chosen: block rows `0..=t` when `causal`, every block row otherwise (the
+    /// GPU's `attn_vis`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_vis(
+        d: &Dims,
+        q: &[f64],
+        bk: &[f64],
+        bv: &[f64],
+        ctx_k: &[f64],
+        ctx_v: &[f64],
+        p: usize,
+        causal: bool,
+    ) -> Vec<f64> {
         let (hd, kvw, qw) = (d.head_dim, d.kv_heads * d.head_dim, d.q_heads * d.head_dim);
         let rows = q.len() / qw;
         assert_eq!(ctx_k.len(), p * kvw);
@@ -871,7 +933,7 @@ pub mod cpu {
                     scores.push(qv.iter().zip(kv).map(|(a, b)| a * b).sum::<f64>() * scale);
                     vals.push(&ctx_v[kp * kvw + kvh * hd..kp * kvw + (kvh + 1) * hd]);
                 }
-                for j in 0..=t {
+                for j in 0..if causal { t + 1 } else { rows } {
                     let kv = &bk[j * kvw + kvh * hd..j * kvw + (kvh + 1) * hd];
                     scores.push(qv.iter().zip(kv).map(|(a, b)| a * b).sum::<f64>() * scale);
                     vals.push(&bv[j * kvw + kvh * hd..j * kvw + (kvh + 1) * hd]);
@@ -1275,9 +1337,23 @@ mod tests {
             run_attn_case_block(st, ps, slots_of, seed, bench_iters, 8)
         }
 
+        fn run_attn_case_block(st: &Stream, ps: &[usize], slots_of: &[usize], seed: u64, bench_iters: usize, rows: usize) -> f64 {
+            run_attn_case_vis(st, ps, slots_of, seed, bench_iters, rows, true).0
+        }
+
         /// The same at a block of `rows` (8 the trained value, 16 `REXL3_DRAFT_BLOCK`): the CPU reference is block agnostic
         /// (row t sees the context rows and block rows 0..=t whatever the block), so it checks both.
-        fn run_attn_case_block(st: &Stream, ps: &[usize], slots_of: &[usize], seed: u64, bench_iters: usize, rows: usize) -> f64 {
+        /// [`run_attn_case_block`] with the block's visibility chosen (`causal` false: every block row sees every block row);
+        /// returns the time per run and the output bits.
+        fn run_attn_case_vis(
+            st: &Stream,
+            ps: &[usize],
+            slots_of: &[usize],
+            seed: u64,
+            bench_iters: usize,
+            rows: usize,
+            causal: bool,
+        ) -> (f64, Vec<u16>) {
             let n_seq = ps.len();
             let layout = DraftCtxLayout::qwen38(4);
             let mut rng = Rng(seed);
@@ -1317,13 +1393,14 @@ mod tests {
             ws.memset_async(0xFF, st).unwrap(); // NaN bytes: the kernel must not read what it did not write
             let mut out = DevBuf::zeroed(n_seq * rows * qw * 2).unwrap();
             let run = |ws: &mut DevBuf, out: &mut DevBuf| {
-                attn(&dq, &dbk, &dbv, &dkc, &dvc, &dslots, &dp, n_seq, 32, 8, layout.cap, 2048, rows, ws, out, st).unwrap();
+                attn_vis(&dq, &dbk, &dbv, &dkc, &dvc, &dslots, &dp, n_seq, 32, 8, layout.cap, 2048, rows, causal, ws, out, st)
+                    .unwrap();
             };
             run(&mut ws, &mut out);
             st.sync().unwrap();
             let got: Vec<u16> = out.to_vec().unwrap();
             for s in 0..n_seq {
-                let want = cpu::attention(
+                let want = cpu::attention_vis(
                     &D,
                     &q[s * rows * qw..(s + 1) * rows * qw],
                     &bk[s * rows * kvw..(s + 1) * rows * kvw],
@@ -1331,9 +1408,10 @@ mod tests {
                     &ctx[s].0,
                     &ctx[s].1,
                     ps[s],
+                    causal,
                 );
                 assert_close(
-                    &format!("attn block {rows} seq {s} P {}", ps[s]),
+                    &format!("attn block {rows} causal {causal} seq {s} P {}", ps[s]),
                     &unbf(&got[s * rows * qw..(s + 1) * rows * qw]),
                     &want,
                     0.99999,
@@ -1346,14 +1424,34 @@ mod tests {
             st.sync().unwrap();
             assert_eq!(out.to_vec::<u16>().unwrap(), got, "attn is not run-to-run reproducible");
             if bench_iters == 0 {
-                return 0.0;
+                return (0.0, got);
             }
             let t0 = std::time::Instant::now();
             for _ in 0..bench_iters {
                 run(&mut ws, &mut out);
             }
             st.sync().unwrap();
-            t0.elapsed().as_secs_f64() / bench_iters as f64 * 1e6
+            (t0.elapsed().as_secs_f64() / bench_iters as f64 * 1e6, got)
+        }
+
+        /// The bidirectional block (a draft trained with `is_causal: false`, GLM-5.3-Flash's) against the f64 reference at the edge
+        /// positions, at both blocks; it differs from the causal block (the flag is read); and a sequence's rows are the same bits alone
+        /// and inside a batch of four (row invariance: each block is independent).
+        #[test]
+        fn attn_bidirectional_block_matches_the_reference_and_is_batch_invariant() {
+            let Some(st) = dev() else { return };
+            for rows in [8usize, 16] {
+                for (i, &p) in [1usize, 63, 2047, 2048, 2561, 4607].iter().enumerate() {
+                    run_attn_case_vis(&st, &[p], &[i % 4], 300 + i as u64, 0, rows, false);
+                }
+                run_attn_case_vis(&st, &[0, 7, 100, 2047], &[0, 1, 2, 3], 321, 0, rows, false);
+            }
+            let (_, bidir) = run_attn_case_vis(&st, &[100], &[1], 330, 0, 8, false);
+            let (_, causal) = run_attn_case_vis(&st, &[100], &[1], 330, 0, 8, true);
+            assert_ne!(bidir, causal, "the visibility flag changed nothing");
+            // the last row sees every block row either way: its bits agree
+            let qw = 32 * 128;
+            assert_eq!(bidir[7 * qw..], causal[7 * qw..], "the last row of the block sees the same keys under both visibilities");
         }
 
         #[test]

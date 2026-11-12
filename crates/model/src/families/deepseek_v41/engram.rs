@@ -273,6 +273,11 @@ fn dequant_row_256_to_bf16(e: &[u8], k: &[u8], dst: &mut [u16; 256]) {
 struct Mapping {
     ptr: *const u8,
     len: usize,
+    /// What `mmap` returned and the length it mapped: the page-aligned base at or below `ptr`, and `len` plus the
+    /// shift. `drop` releases these, never `ptr`/`len`: `ptr` is unaligned whenever the tensor's file offset is (the
+    /// normal case inside a shard), and `munmap` refuses an unaligned address with EINVAL. Null for owned bytes.
+    map_base: *mut libc::c_void,
+    map_len: usize,
     /// `Some` when the bytes are owned (the boot-time EXL3->fp8 conversion), in which case `drop`
     /// frees the `Vec` and never unmaps.
     owned: Option<Vec<u8>>,
@@ -315,7 +320,7 @@ impl Mapping {
         }
         // SAFETY: the mapping covers [map_off, map_off + map_len) and the tensor starts delta bytes in.
         let base = ptr.cast::<u8>();
-        Ok(Self { ptr: unsafe { base.add(delta) }, len, owned: None })
+        Ok(Self { ptr: unsafe { base.add(delta) }, len, map_base: ptr, map_len, owned: None })
     }
 
     fn bytes(&self) -> &[u8] {
@@ -327,7 +332,7 @@ impl Mapping {
     fn owned_bytes(bytes: Vec<u8>) -> Self {
         let ptr = bytes.as_ptr();
         let len = bytes.len();
-        Self { ptr, len, owned: Some(bytes) }
+        Self { ptr, len, map_base: std::ptr::null_mut(), map_len: 0, owned: Some(bytes) }
     }
 
     /// The mapping's base address — what an H2D copy would be handed, never a copy of the table.
@@ -341,10 +346,10 @@ impl Drop for Mapping {
         if self.owned.is_some() {
             return; // the Vec frees itself; there was never a mapping
         }
-        // SAFETY: ptr and len came from one mmap and are unmapped exactly once, here.
+        // SAFETY: map_base and map_len are what one mmap returned and mapped; they are unmapped exactly once, here.
         unsafe {
-            libc::madvise(self.ptr.cast_mut().cast(), self.len, libc::MADV_DONTNEED);
-            libc::munmap(self.ptr.cast_mut().cast(), self.len);
+            libc::madvise(self.map_base, self.map_len, libc::MADV_DONTNEED);
+            libc::munmap(self.map_base, self.map_len);
         }
     }
 }
@@ -1773,6 +1778,30 @@ mod tests {
         assert_eq!(round_bf16(f32::from_bits(0x3F81_8000)), f32::from_bits(0x3F82_0000), "tie, mantissa odd, rounds up");
         assert_eq!(round_bf16(f32::from_bits(0x3F80_1000)), 1.0, "just above 1.0 still rounds to 1.0");
         assert_eq!(round_bf16(f32::from_bits(0x3F80_FFFF)), f32::from_bits(0x3F81_0000), "just below the next bf16");
+    }
+
+    /// A tensor at an unaligned offset inside a shard (the normal case: the data section follows an 8-byte length and
+    /// a JSON header of any size) is released on drop, like one at a page boundary: the file leaves this process's maps.
+    /// `drop` used to hand `munmap` the shifted tensor pointer, which it refuses, so the mapping stayed until exit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_mapping_at_any_offset_is_released_on_drop() {
+        let dir = std::env::temp_dir().join(format!("rexl3-engram-unmap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shard.bin");
+        let body: Vec<u8> = (0..3 * 4096u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &body).unwrap();
+        let name = path.to_str().unwrap().to_string();
+        let mapped = || std::fs::read_to_string("/proc/self/maps").unwrap().lines().filter(|l| l.ends_with(&name)).count();
+        for offset in [0usize, 100, 4096, 4096 + 100, 2 * 4096 - 8] {
+            let m = Mapping::open(&path, offset as u64, 8).unwrap();
+            assert_eq!(m.bytes(), &body[offset..offset + 8], "offset {offset}: the tensor's own bytes");
+            assert_eq!(mapped(), 1, "offset {offset}: mapped while alive");
+            drop(m);
+            assert_eq!(mapped(), 0, "offset {offset}: still mapped after drop");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     // ---- the token map -------------------------------------------------------------------------------------------

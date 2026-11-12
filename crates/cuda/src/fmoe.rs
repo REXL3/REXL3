@@ -18,7 +18,7 @@ mod ffi {
     crate::launchers! {
         pub fn gb_fmoe_workspace_bytes(max_tokens: i32, top_k: i32, h: i32, i: i32, kc: i32) -> usize;
         pub fn gb_fmoe_forward(
-            x: *const c_void, logits: *const c_void, shared_gate: *const c_void,
+            x: *const c_void, logits: *const c_void, logits_f32: i32, shared_gate: *const c_void,
             g_t: *const u64, g_su: *const u64, g_sv: *const u64,
             u_t: *const u64, u_su: *const u64, u_sv: *const u64,
             d_t: *const u64, d_su: *const u64, d_sv: *const u64,
@@ -30,13 +30,14 @@ mod ffi {
         ) -> i32;
         pub fn gb_fmoe_unpack(trellis: *const c_void, w: *mut c_void, k: i32, n: i32, k2: i32, stream: *mut c_void) -> i32;
         pub fn gb_fmoe_group_route(
-            logits: *const c_void, shared_gate: *const c_void, expert_bias: *const f32, scale: f32,
+            logits: *const c_void, logits_f32: i32, shared_gate: *const c_void, expert_bias: *const f32, scale: f32,
             sel: *mut i32, wts: *mut f32, ws: *mut c_void,
             t: i32, ne: i32, k: i32, n_group: i32, topk_group: i32, stream: *mut c_void,
         ) -> i32;
+        pub fn gb_fmoe_set_legacy(legacy: i32) -> i32;
         pub fn gb_fmoep_workspace_bytes(max_tokens: i32, top_k: i32, ne: i32, h: i32, i: i32) -> usize;
         pub fn gb_fmoep_forward(
-            x: *const c_void, logits: *const c_void, shared_gate: *const c_void,
+            x: *const c_void, logits: *const c_void, logits_f32: i32, shared_gate: *const c_void,
             g_t: *const u64, g_su: *const u64, g_sv: *const u64,
             u_t: *const u64, u_su: *const u64, u_sv: *const u64,
             d_t: *const u64, d_su: *const u64, d_sv: *const u64,
@@ -46,6 +47,31 @@ mod ffi {
             expert_bias: *const f32, n_group: i32, topk_group: i32,
             routed_limit: f32, shared_limit: f32, routed_scaling: f32,
         ) -> i32;
+    }
+}
+
+/// Element type of the router logits handed to [`forward`] / [`prefill`] / [`group_route`]. Ling-3.1's
+/// `router_dtype = "fp32"` passes [`LogitsDtype::F32`]; every other family's bf16 logits pass [`LogitsDtype::Bf16`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogitsDtype {
+    Bf16,
+    F32,
+}
+
+impl LogitsDtype {
+    /// Bytes one logit occupies.
+    pub const fn size(self) -> usize {
+        match self {
+            LogitsDtype::Bf16 => 2,
+            LogitsDtype::F32 => 4,
+        }
+    }
+    /// The C ABI's `logits_f32` flag.
+    const fn code(self) -> i32 {
+        match self {
+            LogitsDtype::Bf16 => 0,
+            LogitsDtype::F32 => 1,
+        }
     }
 }
 
@@ -130,12 +156,14 @@ pub struct SwigluLimit {
     pub shared: f32,
 }
 
-/// One MoE layer for `shape.t` rows: route (top-k softmax of `logits` bf16 `[t, ne]`, shared expert weighted by
+/// One MoE layer for `shape.t` rows: route (top-k softmax of `logits` `[t, ne]` of `ld` — bf16, or fp32 for
+/// Ling-3.1's `router_dtype = "fp32"`; shared expert weighted by
 /// sigmoid(`shared_gate` bf16 `[t]`)), every expert run once for all rows that picked it, `out` bf16 `[t, h]`.
 /// `gr` (`None`: legacy softmax) and `limits` select the group-limited noaux_tc router and the SwiGLU clamps.
 pub fn forward(
     x: &DevBuf,
     logits: &DevBuf,
+    ld: LogitsDtype,
     shared_gate: &DevBuf,
     tb: &ExpertTables<'_>,
     out: &mut DevBuf,
@@ -151,7 +179,7 @@ pub fn forward(
         return Err(CudaError(1));
     }
     need(x, t * h * 2, "fmoe x")?;
-    need(logits, t * ne * 2, "fmoe logits")?;
+    need(logits, t * ne * ld.size(), "fmoe logits")?;
     need(shared_gate, t * 2, "fmoe shared gate")?;
     tb.check(ne + 1, "fmoe")?;
     need(out, t * h * 2, "fmoe out")?;
@@ -167,6 +195,7 @@ pub fn forward(
         ffi::gb_fmoe_forward(
             x.ptr(),
             logits.ptr(),
+            ld.code(),
             shared_gate.ptr(),
             gt,
             gsu,
@@ -199,6 +228,12 @@ pub fn forward(
     CudaError::check(rc)
 }
 
+/// Test/debug hook: when true, [`forward`] uses the legacy global-partial kernels (the wave-6b shared-memory
+/// K-reduction path is skipped). Returns the previous setting. Used by the A/B bit-exactness tests.
+pub fn set_legacy(legacy: bool) -> bool {
+    unsafe { ffi::gb_fmoe_set_legacy(legacy as i32) != 0 }
+}
+
 /// W `[k][n]` fp16 through FrostMoE's own tile decoder (test oracle check against `gb_exl3_reconstruct`).
 /// `k2` is twice the bits (2..16, i.e. 1.0, 1.5, 2.5, 3.5 bits).
 pub fn unpack(trellis: &DevBuf, w: &mut DevBuf, k: usize, n: usize, k2: usize, st: &Stream) -> Result<(), CudaError> {
@@ -212,6 +247,7 @@ pub fn unpack(trellis: &DevBuf, w: &mut DevBuf, k: usize, n: usize, k2: usize, s
 /// the shared expert as entry `top_k`, exactly as [`forward`] routes them (see [`GroupRoute`]).
 pub fn group_route(
     logits: &DevBuf,
+    ld: LogitsDtype,
     shared_gate: &DevBuf,
     expert_bias: &DevBuf,
     scale: f32,
@@ -226,7 +262,7 @@ pub fn group_route(
     if t == 0 || t > 64 || ne == 0 || ne > 512 || top_k == 0 || top_k > 16 || n_group < 2 || topk_group == 0 {
         return Err(CudaError(1));
     }
-    need(logits, t * ne * 2, "fmoe group route logits")?;
+    need(logits, t * ne * ld.size(), "fmoe group route logits")?;
     need(shared_gate, t * 2, "fmoe group route shared gate")?;
     need(expert_bias, ne * 4, "fmoe group route expert bias")?;
     let sel_bytes = t * (top_k + 1) * 4;
@@ -236,6 +272,7 @@ pub fn group_route(
     let rc = unsafe {
         ffi::gb_fmoe_group_route(
             logits.ptr(),
+            ld.code(),
             shared_gate.ptr(),
             expert_bias.ptr() as *const f32,
             scale,
@@ -281,6 +318,7 @@ pub fn prefill_workspace(max_tokens: usize, top_k: usize, ne: usize, h: usize, i
 pub fn prefill(
     x: &DevBuf,
     logits: &DevBuf,
+    ld: LogitsDtype,
     shared_gate: &DevBuf,
     tb: &ExpertTables<'_>,
     out: &mut DevBuf,
@@ -296,7 +334,7 @@ pub fn prefill(
         return Err(CudaError(1));
     }
     need(x, t * h * 2, "fmoe prefill x")?;
-    need(logits, t * ne * 2, "fmoe prefill logits")?;
+    need(logits, t * ne * ld.size(), "fmoe prefill logits")?;
     need(shared_gate, t * 2, "fmoe prefill shared gate")?;
     tb.check(ne + 1, "fmoe prefill")?;
     need(out, t * h * 2, "fmoe prefill out")?;
@@ -312,6 +350,7 @@ pub fn prefill(
         ffi::gb_fmoep_forward(
             x.ptr(),
             logits.ptr(),
+            ld.code(),
             shared_gate.ptr(),
             gt,
             gsu,

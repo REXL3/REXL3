@@ -18,7 +18,7 @@
 
 use super::alloc::{MTP_MAX_DEPTH, MTP_TAP_CAP};
 use super::backend::window_is_text;
-use super::model::DraftAsk;
+use super::model::{DflashAsk, DraftAsk};
 use super::tp_mtp::DraftModel;
 use crate::error::ModelError;
 use gb_engine::ProposeRequest;
@@ -47,7 +47,12 @@ pub enum Source {
     None,
     Copy,
     Mtp,
+    /// The DFlash2 draft model (`--draft`).
+    Dflash,
 }
+
+/// The sources the telemetry counts.
+const SOURCES: usize = 4;
 
 impl Source {
     fn idx(self) -> usize {
@@ -55,15 +60,26 @@ impl Source {
             Source::None => 0,
             Source::Copy => 1,
             Source::Mtp => 2,
+            Source::Dflash => 3,
         }
     }
-    fn of(c: Choice) -> Self {
-        match c {
-            Choice::None => Source::None,
-            Choice::Copy(_) => Source::Copy,
-            Choice::Mtp(_) => Source::Mtp,
+    /// The source of an arbiter choice: its model drafter (`Choice::Mtp`) is the NextN layer or, when one is loaded, the DFlash2 draft.
+    fn of(c: Choice, drafter: ModelDrafter) -> Self {
+        match (c, drafter) {
+            (Choice::None, _) => Source::None,
+            (Choice::Copy(_), _) => Source::Copy,
+            (Choice::Mtp(_), ModelDrafter::NextN) => Source::Mtp,
+            (Choice::Mtp(_), ModelDrafter::Dflash2 { .. }) => Source::Dflash,
         }
     }
+}
+
+/// The model drafter behind the arbiter's `Choice::Mtp`: the pack's NextN layer, or a DFlash2 draft given with `--draft` (then the NextN layer
+/// is not loaded; the draft's cost model is priced from its weight bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelDrafter {
+    NextN,
+    Dflash2 { weight_bytes: u64 },
 }
 
 /// What a backend speculates with.
@@ -80,6 +96,8 @@ pub struct SpecConfig {
     /// Rank 0 of a two-rank tensor-parallel group (the sc_4.10bpw pack on two GB10s): the arbiter prices rounds with the tables measured
     /// there ([`VERIFY_MS_TP`], [`MTP_COST_TP`] / [`MTP_COST_TP_RESTRICTED`]) instead of the single-node 2.25bpw ones. Set by the TP boot.
     pub two_ranks: bool,
+    /// The model drafter ([`ModelDrafter::NextN`] unless the engine loaded a DFlash2 draft).
+    pub drafter: ModelDrafter,
 }
 
 /// Keyed-noise drafting unless `REXL3_GLM_DRAFT_NOISE=0` (the result of the live A/B is in `docs/GLM53.md`, "Keyed-noise drafting").
@@ -87,7 +105,14 @@ pub const DRAFT_NOISE_DEFAULT: DraftPick = DraftPick::Keyed;
 
 impl SpecConfig {
     pub fn new(mode: SpecMode) -> Self {
-        Self { mode, mtp_depth: MTP_DEFAULT_DEPTH, restricted_head: false, noise: DRAFT_NOISE_DEFAULT, two_ranks: false }
+        Self {
+            mode,
+            mtp_depth: MTP_DEFAULT_DEPTH,
+            restricted_head: false,
+            noise: DRAFT_NOISE_DEFAULT,
+            two_ranks: false,
+            drafter: ModelDrafter::NextN,
+        }
     }
 
     /// `new`, with the depth from `REXL3_MTP_DEPTH` when it is set (a malformed value is an error: a measurement must not silently run at the
@@ -238,6 +263,15 @@ impl GlmCost {
     /// The tables a backend prices with: the two-rank group's when `cfg.two_ranks`, one node's otherwise; the restricted head's draft model
     /// when `cfg.restricted_head`.
     pub fn for_config(cfg: &SpecConfig) -> Self {
+        if let ModelDrafter::Dflash2 { weight_bytes } = cfg.drafter {
+            // the DFlash2 draft runs on one node or on rank 0 of a group; the windows are the topology's
+            let d = super::dflash::dflash_cost(weight_bytes);
+            return if cfg.two_ranks {
+                Self::with_tables(VERIFY_MS_TP, d).with_per_stream(VERIFY_PER_STREAM_MS_TP)
+            } else {
+                Self::new(d)
+            };
+        }
         match (cfg.two_ranks, cfg.restricted_head) {
             (true, true) => Self::with_tables(VERIFY_MS_TP, MTP_COST_TP_RESTRICTED).with_per_stream(VERIFY_PER_STREAM_MS_TP),
             (true, false) => Self::with_tables(VERIFY_MS_TP, MTP_COST_TP).with_per_stream(VERIFY_PER_STREAM_MS_TP),
@@ -399,16 +433,16 @@ fn cost_log(line: std::fmt::Arguments<'_>) {
 #[derive(Clone, Debug, Default)]
 pub struct SpecStats {
     /// Rounds a stream's window was fed with drafts from the source (`Source::None`: rounds with no drafts at all).
-    pub rounds: [u64; 3],
+    pub rounds: [u64; SOURCES],
     /// Drafts the engine verified, drafts accepted, tokens committed (accepted + 1 per round), by source.
-    pub verified: [u64; 3],
-    pub accepted: [u64; 3],
-    pub committed: [u64; 3],
+    pub verified: [u64; SOURCES],
+    pub accepted: [u64; SOURCES],
+    pub committed: [u64; SOURCES],
     /// Per source and depth `j` (index `j - 1`): rounds that verified a depth-`j` draft, and of those the rounds where it was accepted.
-    pub reached: [[u64; DEPTHS]; 3],
-    pub hits: [[u64; DEPTHS]; 3],
+    pub reached: [[u64; DEPTHS]; SOURCES],
+    pub hits: [[u64; DEPTHS]; SOURCES],
     /// Rounds by how many drafts rode in the window, per source (index = drafts, 0..=DEPTHS): what the arbiter or the fixed depth really asked for.
-    pub by_depth: [[u64; DEPTHS + 1]; 3],
+    pub by_depth: [[u64; DEPTHS + 1]; SOURCES],
     /// Wall milliseconds and calls of the MTP draft call (absorb + chain), and the rows its absorbs held.
     pub mtp_ms: f64,
     pub mtp_calls: u64,
@@ -474,12 +508,12 @@ struct SlotSpec {
     /// Totals of this sequence, for the line `end` logs.
     rounds: u64,
     committed: u64,
-    by_source: [u64; 3],
+    by_source: [u64; SOURCES],
 }
 
 impl SlotSpec {
     fn new() -> Self {
-        Self { copy: CopyDrafter::new(COPY_MIN_MATCH, COPY_MAX), round: None, rounds: 0, committed: 0, by_source: [0; 3] }
+        Self { copy: CopyDrafter::new(COPY_MIN_MATCH, COPY_MAX), round: None, rounds: 0, committed: 0, by_source: [0; SOURCES] }
     }
 }
 
@@ -501,10 +535,12 @@ impl SpecRuntime {
                 if cfg.restricted_head { "restricted" } else { "full" }
             );
         }
+        let dflash = matches!(cfg.drafter, ModelDrafter::Dflash2 { .. });
         let arb = ArbiterConfig {
             allow_mtp: cfg.mode.uses_mtp(),
             allow_copy: cfg.mode.uses_copy(),
-            max_mtp_depth: MTP_MAX_DEPTH,
+            // the DFlash2 block proposes up to seven drafts a round at almost the same cost as one
+            max_mtp_depth: if dflash { super::dflash::MAX_DEPTH } else { MTP_MAX_DEPTH },
             max_rows: super::alloc::WINDOW_ROWS,
             ..ArbiterConfig::default()
         };
@@ -528,13 +564,14 @@ impl SpecRuntime {
         let s = std::mem::replace(&mut self.slots[slot], SlotSpec::new());
         if s.rounds > 0 {
             eprintln!(
-                "rexl3 event=spec_seq slot={slot} rounds={} tokens={} tokens_per_round={:.3} rounds_none={} rounds_copy={} rounds_mtp={}",
+                "rexl3 event=spec_seq slot={slot} rounds={} tokens={} tokens_per_round={:.3} rounds_none={} rounds_copy={} rounds_mtp={} rounds_dflash={}",
                 s.rounds,
                 s.committed,
                 s.committed as f64 / s.rounds as f64,
                 s.by_source[0],
                 s.by_source[1],
-                s.by_source[2]
+                s.by_source[2],
+                s.by_source[3]
             );
         }
     }
@@ -546,6 +583,9 @@ impl SpecRuntime {
         reqs: &[ProposeRequest],
         images: &[Vec<std::ops::Range<usize>>],
     ) -> Result<Vec<Option<Vec<u32>>>, ModelError> {
+        if m.has_dflash() {
+            return self.propose_dflash(m, reqs);
+        }
         let mode = self.cfg.mode;
         let head = m.has_mtp() && mode.uses_mtp();
         // the previous round's commits (the KDA flips and the tapped rows joining their slots' stores) are applied lazily, at the next forward: apply them
@@ -667,6 +707,107 @@ impl SpecRuntime {
         Ok(out)
     }
 
+    /// [`SpecRuntime::propose`] with the DFlash2 draft as the model drafter: the same choices (the arbiter's `Choice::Mtp(d)` is a DFlash2 round
+    /// asking for `d` drafts), but the draft's context is built at the commits, so there is nothing to absorb here and no store to overflow, and
+    /// a prompt's image rows are context like any other (the draft reads the trunk's hidden rows, never a placeholder's embedding).
+    fn propose_dflash<M: DraftModel + ?Sized>(
+        &mut self,
+        m: &mut M,
+        reqs: &[ProposeRequest],
+    ) -> Result<Vec<Option<Vec<u32>>>, ModelError> {
+        let mode = self.cfg.mode;
+        let copy: Vec<Vec<u32>> = reqs
+            .iter()
+            .map(|r| if mode.uses_copy() { self.slots[r.slot].copy.propose(r.tokens, r.max) } else { Vec::new() })
+            .collect();
+        let model = mode.uses_mtp();
+        // the previous round's commits are applied lazily, at the next forward: apply them (their kept rows join the draft's contexts) BEFORE
+        // asking whether each context ends where its sequence does, or every stream looks one round behind and never drafts again
+        if model {
+            m.flush()?;
+        }
+        let ready: Vec<bool> = reqs.iter().map(|r| model && r.max > 0 && m.dflash_ready(r.slot, r.tokens.len())).collect();
+        let picks: Vec<Choice> = match mode {
+            SpecMode::Auto => {
+                let asks: Vec<Ask> = reqs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| Ask {
+                        stream: r.slot,
+                        max: r.max,
+                        copy_len: copy[i].len().min(r.max),
+                        mtp_ok: ready[i],
+                        absorb_rows: 0,
+                        must_absorb: false,
+                    })
+                    .collect();
+                self.arbiter.choose(&self.cost, &asks)
+            }
+            SpecMode::Mtp => reqs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| if ready[i] { Choice::Mtp(super::dflash::MAX_DEPTH.min(r.max)) } else { Choice::None })
+                .collect(),
+            SpecMode::Copy => {
+                (0..reqs.len()).map(|i| if copy[i].is_empty() { Choice::None } else { Choice::Copy(copy[i].len()) }).collect()
+            }
+            SpecMode::None => vec![Choice::None; reqs.len()],
+        };
+        let mut out: Vec<Option<Vec<u32>>> = vec![Some(Vec::new()); reqs.len()];
+        let mut choice = picks.clone();
+        let asked: Vec<usize> = (0..reqs.len()).filter(|&i| matches!(picks[i], Choice::Mtp(d) if d > 0)).collect();
+        if !asked.is_empty() {
+            let keyed = keyed_samplers(self.cfg.noise, &asked.iter().map(|&i| reqs[i].sampling).collect::<Vec<_>>());
+            let asks: Vec<DflashAsk> = asked
+                .iter()
+                .zip(keyed)
+                .map(|(&i, sampling)| DflashAsk {
+                    slot: reqs[i].slot,
+                    tokens: reqs[i].tokens,
+                    depth: picks[i].drafts(),
+                    sampling,
+                })
+                .collect();
+            let depth = asks.iter().map(|a| a.depth).max().unwrap_or(0);
+            let t = Instant::now();
+            let drafts = m.dflash_draft(&asks)?;
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            self.stats.mtp_ms += ms;
+            self.stats.mtp_calls += 1;
+            cost_log(format_args!("D {} 0 {depth} {ms:.4}", asks.len()));
+            self.cost.observe_draft(asks.len(), 0, depth, ms);
+            for (&i, d) in asked.iter().zip(drafts) {
+                if d.is_empty() {
+                    choice[i] = Choice::None;
+                } else {
+                    out[i] = Some(d);
+                }
+            }
+        }
+        for i in 0..reqs.len() {
+            match picks[i] {
+                Choice::Copy(n) => out[i] = Some(copy[i][..n.min(copy[i].len())].to_vec()),
+                Choice::Mtp(_) if choice[i] == Choice::None && !copy[i].is_empty() && mode != SpecMode::Mtp => {
+                    out[i] = Some(copy[i].clone());
+                    choice[i] = Choice::Copy(copy[i].len());
+                }
+                _ => {}
+            }
+        }
+        for (i, r) in reqs.iter().enumerate() {
+            let drafts = out[i].clone().unwrap_or_default();
+            let c = match choice[i] {
+                Choice::Copy(_) if drafts.is_empty() => Choice::None,
+                Choice::Copy(_) => Choice::Copy(drafts.len()),
+                Choice::Mtp(_) if drafts.is_empty() => Choice::None,
+                Choice::Mtp(_) => Choice::Mtp(drafts.len()),
+                Choice::None => Choice::None,
+            };
+            self.slots[r.slot].round = Some(Round { choice: c, drafts, verified: 0 });
+        }
+        Ok(out)
+    }
+
     /// A verify window of `rows` rows in all took `ms` of wall time (the forward and its top-k).
     pub fn on_window(&mut self, rows: usize, ms: f64) {
         self.on_window_of(1, rows, ms);
@@ -696,7 +837,7 @@ impl SpecRuntime {
             Some(r) => (if r.verified == 0 { Choice::None } else { r.choice }, r.verified),
             None => (Choice::None, 0),
         };
-        let source = Source::of(choice);
+        let source = Source::of(choice, self.cfg.drafter);
         s.rounds += 1;
         s.committed += accepted as u64 + 1;
         s.by_source[source.idx()] += 1;
@@ -863,6 +1004,24 @@ mod tests {
         // the restricted head saves its share of every head the call runs: one in the first draft, one in each chained draft
         assert!(MTP_COST_RESTRICTED.ms(1, 3, 2) < MTP_COST.ms(1, 3, 2) - 2.0);
         assert!(MTP_COST_RESTRICTED.ms(1, 3, 0) <= MTP_COST.ms(1, 3, 0) + 0.2, "an absorb alone runs no head");
+    }
+
+    #[test]
+    fn a_dflash2_drafter_prices_its_rounds_with_its_own_cost_on_the_topologys_windows() {
+        let d = ModelDrafter::Dflash2 { weight_bytes: 2_342_160_896 };
+        let one = GlmCost::for_config(&SpecConfig { drafter: d, ..SpecConfig::new(SpecMode::Auto) });
+        let two = GlmCost::for_config(&SpecConfig { drafter: d, two_ranks: true, ..SpecConfig::new(SpecMode::Auto) });
+        let cost = super::super::dflash::dflash_cost(2_342_160_896);
+        assert!((one.mtp_ms(1, 0, 7) - cost.ms(1, 0, 7)).abs() < 1e-9 && (two.mtp_ms(1, 0, 7) - cost.ms(1, 0, 7)).abs() < 1e-9);
+        assert!((one.verify_ms(8) - 94.6).abs() < 1e-9, "one node's windows");
+        assert!((two.verify_ms(8) - 92.4).abs() < 1e-9, "a two-rank group's windows");
+        assert!((two.verify_ms_of(2, 8) - (92.4 + VERIFY_PER_STREAM_MS_TP)).abs() < 1e-9);
+        // its rounds are counted as the DFlash2 source, the NextN layer's as MTP
+        assert_eq!(Source::of(Choice::Mtp(3), d), Source::Dflash);
+        assert_eq!(Source::of(Choice::Mtp(3), ModelDrafter::NextN), Source::Mtp);
+        // and the arbiter may ask it for up to seven drafts
+        let r = SpecRuntime::new(SpecConfig { drafter: d, ..SpecConfig::new(SpecMode::Auto) }, 1);
+        assert_eq!(r.arbiter.cfg.max_mtp_depth, 7);
     }
 
     #[test]

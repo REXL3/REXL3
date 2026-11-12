@@ -203,6 +203,11 @@ impl Admission {
         self.kv_in_use = self.kv_in_use.saturating_add(tokens); // tokens <= the pool's tokens when it is declared
         Ok(slot)
     }
+    /// The live slots and the tokens each was admitted for (prompt + max new tokens): what a slot may still claim pages for. The engine's
+    /// pool-page prefix cache keeps that many pages free for them (`Engine::pool_room`).
+    pub fn reserved(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.slots.iter().enumerate().filter_map(|(i, s)| s.map(|(_, tokens)| (i, tokens)))
+    }
     pub fn release(&mut self, slot: usize) {
         if let Some((bytes, tokens)) = self.slots.get_mut(slot).and_then(|s| s.take()) {
             self.used = self.used.saturating_sub(bytes);
@@ -248,6 +253,10 @@ impl BlockPool {
     }
     pub fn free_blocks(&self) -> usize {
         self.free.len()
+    }
+    /// Pages in the pool, free or not.
+    pub fn total_blocks(&self) -> usize {
+        self.refs.len()
     }
     pub fn blocks_for(&self, tokens: usize) -> usize {
         tokens.div_ceil(self.block_tokens)
@@ -674,10 +683,13 @@ impl DraftCost {
         }
     }
     /// The sequences one draft round carries at this draft's block (`group` was set for the trained 8: a 16-row block halves it).
+    /// That is `group * 8 / block`, never more than `group`, which is the model's `MAX_DRAFT_SEQS.min(128 / block)` at the
+    /// group of 16 the serving cost uses. Multiplying first matters: dividing first made every block from 9 to 15 rows a
+    /// round of 8. `saturating_mul` keeps the unbounded default group unbounded.
     fn group_of(&self) -> usize {
         match self.block {
             0 | 8 => self.group,
-            b => (self.group / b * 8).max(1),
+            b => (self.group.saturating_mul(8) / b).clamp(1, self.group),
         }
     }
     /// Milliseconds of a draft for `drafting` streams and `head_rows` rows through the head; nothing when nothing drafts. Past one
@@ -1926,5 +1938,25 @@ mod tests {
             let cost = &tables[rnd(3) as usize];
             assert_eq!(choose_budget(cost, &demands, max_rows), naive_budget(cost, &demands, max_rows), "{demands:?} {max_rows}");
         }
+    }
+    /// A draft round at a 9- to 16-row block carries what the model holds, `MAX_DRAFT_SEQS.min(128 / block)` at the serving
+    /// group of 16 (`costs.rs`): 14 at 9 rows, 10 at 12, 8 at 15 and 16. Dividing first priced every block from 9 to 15 as rounds
+    /// of 8, so a 10-stream draft at a 12-row block cost two rounds where the model runs one.
+    #[test]
+    fn a_draft_round_carries_the_sequences_the_model_holds_at_every_block() {
+        let at =
+            |b: usize| DraftCost::new(vec![(1, 1.0), (64, 64.0)], vec![(1, 0.1), (64, 0.2)], 0.0).with_group(16).with_block(b);
+        for b in 8..=16usize {
+            assert_eq!(at(b).group_of(), 16usize.min(128 / b), "block {b}");
+        }
+        let c = at(12);
+        assert_eq!(c.ms(10, 10), c.round_ms(10, 10), "10 streams at a 12-row block are one round");
+        assert!(c.ms(11, 11) > c.round_ms(11, 11), "11 are two");
+        // the trained block and the depth block are unchanged
+        assert_eq!((at(8).group_of(), at(16).group_of()), (16, 8));
+        // the unbounded default stays unbounded, and a group of 1 stays 1
+        let free = DraftCost::new(vec![(1, 1.0)], vec![(1, 0.1)], 0.0).with_block(12);
+        assert_eq!(free.group_of(), usize::MAX / 12);
+        assert_eq!(at(12).with_group(1).group_of(), 1);
     }
 }

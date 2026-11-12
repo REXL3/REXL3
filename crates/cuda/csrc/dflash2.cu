@@ -139,7 +139,7 @@ __global__ void __launch_bounds__(32 * 8)
 // 3. Draft attention. 8..16 query rows per sequence (the draft block: REXL3_DRAFT_BLOCK, 8 the trained value), 32 q heads,
 //    8 kv heads (group 4), head_dim 128. Row t (query position P+t) sees ctx keys kpos in [max(0,P-window)... with
 //    kpos >= P+t-window, kpos < P] and block keys 0..=t. Phase 1: one block per (key chunk, kv head, sequence) writes
-//    (m, l, acc[128]) per (row, q head); chunk `nchunks` is the in-block (causal) chunk, ONE 64-key tile whatever the
+//    (m, l, acc[128]) per (row, q head); chunk `nchunks` is the in-block chunk (causal, or bidirectional for a draft trained so), ONE 64-key tile whatever the
 //    block: keys `block..63` of it are padding and never visible (vis = key <= i). Phase 2 merges chunks in index order.
 //    m is kept in the log2 domain (scores pre-multiplied by scale * log2(e)).
 //
@@ -164,7 +164,8 @@ template <int ROWS>
 __global__ void __launch_bounds__(AT)
     attn_split_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ bk, const __nv_bfloat16* __restrict__ bv,
                       const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc, const int* __restrict__ slots,
-                      const int* __restrict__ Pv, float* __restrict__ ws, int cap, int window, int nchunks, int n_kv_heads, int n_q_heads) {
+                      const int* __restrict__ Pv, float* __restrict__ ws, int cap, int window, int nchunks, int n_kv_heads, int n_q_heads,
+                      int causal) {
     constexpr int NQ = GQA * ROWS;  // queries per kv head
     extern __shared__ float smem_dyn[];  // Qs, Ss, s_alpha, s_m, s_l (dynamic: NQ=64 needs more than the static limit)
     float* Qs = smem_dyn;
@@ -286,7 +287,9 @@ __global__ void __launch_bounds__(AT)
             for (int i = 0; i < ROWS; ++i) {
                 bool vis;
                 if (is_blk) {
-                    vis = key <= i;  // causal inside the block (keys `block..63` are padding and never visible)
+                    // causal: block keys 0..=i; bidirectional: every real block row. Keys `block..63` of the tile are padding and
+                    // never visible either way.
+                    vis = causal ? (key <= i) : (key < ROWS);
                 } else {
                     const int kp = kpos0 + key;
                     vis = (kp < P) && (kp + window >= P + i);
@@ -534,8 +537,8 @@ static bool attn_rows_ok(int rows) { return rows == 8 || rows == 16; }
 
 template <int ROWS>
 static int attn_launch(const void* q, const void* block_k, const void* block_v, const void* kc, const void* vc, const void* slots,
-                       const void* P, int n_seq, int n_q_heads, int n_kv_heads, int cap, int window, void* ws, void* out,
-                       void* stream) {
+                       const void* P, int n_seq, int n_q_heads, int n_kv_heads, int cap, int window, int causal, void* ws,
+                       void* out, void* stream) {
     constexpr int NQ = GQA * ROWS;
     // Qs, Ss, s_alpha, s_m, s_l: dynamic shared (NQ=64 of a 16-block is past the 48 KB static limit); the tile stays static
     const size_t smem = (size_t)(NQ * HD + NQ * SSTRIDE + 3 * NQ) * sizeof(float);
@@ -547,7 +550,8 @@ static int attn_launch(const void* q, const void* block_k, const void* block_v, 
     dim3 grid(nchunks + 1, n_kv_heads, n_seq);
     attn_split_kernel<ROWS><<<grid, AT, smem, gb_stream(stream)>>>(
         (const __nv_bfloat16*)q, (const __nv_bfloat16*)block_k, (const __nv_bfloat16*)block_v, (const __nv_bfloat16*)kc,
-        (const __nv_bfloat16*)vc, (const int*)slots, (const int*)P, (float*)ws, cap, window, nchunks, n_kv_heads, n_q_heads);
+        (const __nv_bfloat16*)vc, (const int*)slots, (const int*)P, (float*)ws, cap, window, nchunks, n_kv_heads, n_q_heads,
+        causal);
     int rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
     dim3 mg(ROWS * n_q_heads, n_seq);
@@ -564,14 +568,24 @@ GB_EXPORT size_t gb_dflash_attn_workspace_bytes(int n_seq, int window, int n_q_h
 // kc, vc: bf16 [n_slots, cap, n_kv_heads, 128] (this layer's ring); slots, P: i32 [n_seq] (cache slot, position of block row 0 = number of
 // committed context tokens); out: bf16 [n_seq*rows, n_q_heads*128]. n_q_heads == 4 * n_kv_heads. window: 2048. cap >= window.
 // rows: the draft block, 8 (the trained value) or 16 (the depth study's; REXL3_DRAFT_BLOCK).
+// `causal`: 1 for block rows that see block rows 0..=t (the Qwen3.8 draft, as the engine has always run it), 0 for a bidirectional block
+// (every row sees every block row; the GLM-5.3-Flash draft, whose config says `is_causal: false`). The context keys are the same either way.
+GB_EXPORT int gb_dflash_attn_vis(const void* q, const void* block_k, const void* block_v, const void* kc, const void* vc, const void* slots,
+                                 const void* P, int n_seq, int n_q_heads, int n_kv_heads, int cap, int window, int rows, int causal,
+                                 void* ws, void* out, void* stream) {
+    if (n_seq <= 0) return 0;
+    if (n_q_heads != GQA * n_kv_heads || cap < window || window <= 0 || !attn_rows_ok(rows) || (causal != 0 && causal != 1))
+        return (int)cudaErrorInvalidValue;
+    if (rows == 16)
+        return attn_launch<16>(q, block_k, block_v, kc, vc, slots, P, n_seq, n_q_heads, n_kv_heads, cap, window, causal, ws, out, stream);
+    return attn_launch<8>(q, block_k, block_v, kc, vc, slots, P, n_seq, n_q_heads, n_kv_heads, cap, window, causal, ws, out, stream);
+}
+
+// The causal block (the Qwen3.8 draft's): `gb_dflash_attn_vis` with causal = 1.
 GB_EXPORT int gb_dflash_attn(const void* q, const void* block_k, const void* block_v, const void* kc, const void* vc, const void* slots,
                              const void* P, int n_seq, int n_q_heads, int n_kv_heads, int cap, int window, int rows, void* ws, void* out,
                              void* stream) {
-    if (n_seq <= 0) return 0;
-    if (n_q_heads != GQA * n_kv_heads || cap < window || window <= 0 || !attn_rows_ok(rows)) return (int)cudaErrorInvalidValue;
-    if (rows == 16)
-        return attn_launch<16>(q, block_k, block_v, kc, vc, slots, P, n_seq, n_q_heads, n_kv_heads, cap, window, ws, out, stream);
-    return attn_launch<8>(q, block_k, block_v, kc, vc, slots, P, n_seq, n_q_heads, n_kv_heads, cap, window, ws, out, stream);
+    return gb_dflash_attn_vis(q, block_k, block_v, kc, vc, slots, P, n_seq, n_q_heads, n_kv_heads, cap, window, rows, 1, ws, out, stream);
 }
 
 // anchor: i32 [n_seq]; topk_ids: i32 [n_seq, rows, k]; topk_vals: f32 [n_seq, rows, k]; gate: bf16 or f32 [n_seq, rows, rank];

@@ -55,6 +55,11 @@ pub struct SnapPool {
     ring: DevBuf,
     /// `[slots][hidden]` fp16: the drafter's carry (only with the NextN layer).
     carry: Option<DevBuf>,
+    /// With a DFlash2 draft: per draft layer, its context ring's K and V of the snapshot's window, `[slots][window][kv_heads x head_dim]` bf16
+    /// (`Draft::save_window`), and per slot the positions they hold (`None`: the draft's context was not sound, so a restore drafts nothing).
+    draft_k: Vec<DevBuf>,
+    draft_v: Vec<DevBuf>,
+    draft_win: Vec<Option<std::ops::Range<usize>>>,
     free: Vec<u32>,
     meta: Vec<Option<SnapMeta>>,
 }
@@ -66,10 +71,15 @@ impl SnapPool {
     }
 
     pub fn new(cfg: &GlmConfig, slots: usize, mtp: bool) -> Result<Self, ModelError> {
+        Self::new_with(cfg, slots, mtp, false)
+    }
+
+    /// [`SnapPool::new`] whose slots also keep a DFlash2 draft's window (`draft`).
+    pub fn new_with(cfg: &GlmConfig, slots: usize, mtp: bool, draft: bool) -> Result<Self, ModelError> {
         if slots == 0 {
             return Err(ModelError::Config("a prefix cache needs at least one snapshot slot".into()));
         }
-        let layout = SnapLayout::of(cfg, mtp).map_err(ModelError::Config)?;
+        let layout = SnapLayout::of_with(cfg, mtp, draft).map_err(ModelError::Config)?;
         // every slot is written by a snapshot before a restore reads it (`SnapMeta` says which hold one): nothing is zeroed at boot
         let (mut kda_s, mut kda_conv) = (Vec::new(), Vec::new());
         for _ in 0..layout.kda_layers {
@@ -78,13 +88,81 @@ impl SnapPool {
         }
         let ring = DevBuf::alloc(slots * layout.ring_bytes() as usize)?;
         let carry = if mtp { Some(DevBuf::alloc(slots * layout.carry as usize)?) } else { None };
-        Ok(Self { slots, layout, kda_s, kda_conv, ring, carry, free: (0..slots as u32).rev().collect(), meta: vec![None; slots] })
+        let (mut draft_k, mut draft_v) = (Vec::new(), Vec::new());
+        if layout.draft_window > 0 {
+            let per_layer = layout.draft_window as usize / (2 * crate::draft::LAYERS);
+            for _ in 0..crate::draft::LAYERS {
+                draft_k.push(DevBuf::alloc(slots * per_layer)?);
+                draft_v.push(DevBuf::alloc(slots * per_layer)?);
+            }
+        }
+        Ok(Self {
+            slots,
+            layout,
+            kda_s,
+            kda_conv,
+            ring,
+            carry,
+            draft_k,
+            draft_v,
+            draft_win: vec![None; slots],
+            free: (0..slots as u32).rev().collect(),
+            meta: vec![None; slots],
+        })
+    }
+
+    /// Copy the positions `w` of `slot`'s draft context into snapshot `snap` (`None`: the context was not sound; the snapshot says so).
+    pub(super) fn save_draft_window(
+        &mut self,
+        snap: u32,
+        draft: &crate::draft::Draft,
+        slot: usize,
+        w: Option<std::ops::Range<usize>>,
+        stream: &Stream,
+    ) -> Result<(), ModelError> {
+        if self.draft_k.is_empty() {
+            return Ok(());
+        }
+        if let Some(r) = &w {
+            draft.save_window(slot, r.start, r.len(), &mut self.draft_k, &mut self.draft_v, snap as usize, stream)?;
+        }
+        self.draft_win[snap as usize] = w;
+        Ok(())
+    }
+
+    /// Put snapshot `snap`'s draft window (of a snapshot of `len` tokens) back into `slot`'s ring; returns the first position it holds, or
+    /// `None` when the snapshot keeps no sound window (the slot then drafts nothing for this sequence).
+    pub(super) fn load_draft_window(
+        &self,
+        snap: u32,
+        draft: &mut crate::draft::Draft,
+        slot: usize,
+        len: usize,
+        stream: &Stream,
+    ) -> Result<Option<usize>, ModelError> {
+        match self.draft_win.get(snap as usize).cloned().flatten() {
+            Some(r) if r.end == len && !self.draft_k.is_empty() => {
+                draft.load_window(slot, r.start, r.len(), &self.draft_k, &self.draft_v, snap as usize, stream)?;
+                Ok(Some(r.start))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Bytes allocated on the device.
     pub fn allocated_bytes(&self) -> u64 {
         let sum = |v: &[DevBuf]| v.iter().map(|b| b.bytes() as u64).sum::<u64>();
-        sum(&self.kda_s) + sum(&self.kda_conv) + self.ring.bytes() as u64 + self.carry.as_ref().map_or(0, |c| c.bytes() as u64)
+        sum(&self.kda_s)
+            + sum(&self.kda_conv)
+            + self.ring.bytes() as u64
+            + self.carry.as_ref().map_or(0, |c| c.bytes() as u64)
+            + sum(&self.draft_k)
+            + sum(&self.draft_v)
+    }
+
+    /// Bytes of the draft windows of the pool (0 without a DFlash2 draft).
+    pub fn draft_window_bytes(&self) -> u64 {
+        self.draft_k.iter().chain(&self.draft_v).map(|b| b.bytes() as u64).sum()
     }
 
     pub fn free_count(&self) -> usize {
@@ -100,6 +178,7 @@ impl SnapPool {
     pub fn free_slot(&mut self, s: u32) {
         assert!((s as usize) < self.slots && !self.free.contains(&s), "snapshot slot {s} freed twice or out of range");
         self.meta[s as usize] = None;
+        self.draft_win[s as usize] = None;
         self.free.push(s);
     }
 
@@ -230,7 +309,7 @@ impl GlmModel {
         if self.snaps.is_some() {
             return Err(ModelError::Config("the prefix cache is already enabled".into()));
         }
-        let pool = SnapPool::new(&self.cfg, slots, self.mtp.is_some())?;
+        let pool = SnapPool::new_with(&self.cfg, slots, self.mtp.is_some(), self.dflash.is_some())?;
         pool.check_dims(self.kda_dims)?;
         self.snaps = Some(pool);
         Ok(())
@@ -246,6 +325,19 @@ impl GlmModel {
         self.snaps.is_some() && self.s.pf.is_some()
     }
 
+    /// The KV pool's physical state for a pool-page prefix cache (`gb_engine::Backend::prefix_pool_room`). The write-ahead is how far the NextN
+    /// drafter writes its own cache entries past a sequence's length (`mtp_draft`: chain row `k` of a sequence of `n` tokens at position
+    /// `n + k - 1`, `k <= MTP_MAX_DEPTH`): `MTP_MAX_DEPTH` positions with the drafter loaded, none without.
+    pub fn kv_pool_room(&self) -> gb_engine::PoolRoom {
+        gb_engine::PoolRoom {
+            page_tokens: BLOCK_TOKENS,
+            pool_pages: self.kv_tab.total_blocks(),
+            free_pages: self.kv_tab.free_blocks(),
+            slot_pages: self.kv_tab.slot_blocks(),
+            write_ahead_tokens: if self.has_mtp() { crate::families::glm::alloc::MTP_MAX_DEPTH } else { 0 },
+        }
+    }
+
     /// Snapshot slots no capture holds right now.
     pub fn prefix_free_snapshots(&self) -> usize {
         self.snaps.as_ref().map_or(0, |s| s.free_count())
@@ -254,7 +346,8 @@ impl GlmModel {
     /// Bytes of one slot of the snapshot pool as it was built (0 without one): a rank of a KDA head split holds its own heads' state
     /// (`SnapPool::check_dims`), so this is what two ranks of a group compare (`tp::GlmCall::EnableSnapshots`).
     pub fn prefix_snapshot_bytes(&self) -> u64 {
-        self.snaps.as_ref().map_or(0, |s| s.allocated_bytes() / s.slots as u64)
+        // a DFlash2 draft's windows are rank 0's own (the draft runs there alone): what the ranks compare is the trunk's state
+        self.snaps.as_ref().map_or(0, |s| (s.allocated_bytes() - s.draft_window_bytes()) / s.slots as u64)
     }
 
     /// What snapshot slot `snap` says about itself (`None`: it holds no snapshot).
@@ -319,7 +412,8 @@ impl GlmModel {
             c.copy_range_from(snap as usize * h2, m.store(), slot * MTP_TAP_CAP * h2, h2, stream)?;
         }
         sp.meta[snap as usize] = Some(SnapMeta { len, mtp_ok, digest: None });
-        stream.sync()?;
+        self.dflash_snapshot(slot, snap, len)?;
+        self.stream.sync()?;
         Ok(())
     }
 
@@ -482,6 +576,8 @@ impl GlmModel {
         // under P2 the restored state opens the slot's next prefill segment at `len`: the snapshot was taken on its own segment's 16-row grid, so
         // the resumed chunks fall where the fresh prefill's do (`docs/GLM_PREFILL_P2.md` 8.1)
         self.p2_open_segment(slot, len);
+        // the draft's context of the snapshot's window (a draft only proposes: its state is restored for its acceptance, not for any byte)
+        self.dflash_restore(slot, snap, len)?;
         // a sealed snapshot is verified: the slot must now hold exactly what was captured (a copy that did not happen, a stale or reused page,
         // another slot's state: refused, and the engine prefills the prompt cold, which begins the slot again)
         if let Some(want) = meta.digest {

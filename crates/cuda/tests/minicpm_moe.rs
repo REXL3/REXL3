@@ -157,7 +157,20 @@ fn bench_decode_moe_kc_sweep() {
             let shape = fmoe::Shape { t: rows, ne: NE, top_k: TK, h: H, i: I, kc, max_tokens: 64 };
             let ms = ms_per_call(&st, 192, |i| {
                 let (x, l, g) = &sets[i % 64];
-                fmoe::forward(x, l, g, &o.tables(), &mut out, shape, None, fmoe::SwigluLimit::default(), &mut ws, &st).unwrap();
+                fmoe::forward(
+                    x,
+                    l,
+                    fmoe::LogitsDtype::Bf16,
+                    g,
+                    &o.tables(),
+                    &mut out,
+                    shape,
+                    None,
+                    fmoe::SwigluLimit::default(),
+                    &mut ws,
+                    &st,
+                )
+                .unwrap();
             });
             line += &format!("  frost kc={kc:<2} {:7.1} us ({:5.1} us/row)", ms * 1e3, ms * 1e3 / rows as f64);
         }

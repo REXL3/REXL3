@@ -98,6 +98,56 @@ fn hcx_decode_fast_bit_exact_vs_ref_rows_1to8() {
 }
 
 #[test]
+fn hcx_decode_fast_bit_exact_vs_ref_multi_pass() {
+    // Multi-pass windows: 9 and 17 split into (8+1) and (8+8+1) passes, exercising the per-pass NT dispatch
+    // including tail passes; 64 is a full 8x8 run.
+    let Some(st) = gpu() else { return };
+    for t in [9usize, 17, 64] {
+        for seed in 0..2u64 {
+            let mut rng = Rng(seed * 701 + t as u64);
+            let x: Vec<f32> = rng.vec(t * HC * H, -2.0, 2.0);
+            let nw = fill_half(&mut rng, HC * H);
+            let down = fill_half(&mut rng, R * HC * H);
+            let up = fill_half(&mut rng, HC * H * R);
+            let iw = fill_half(&mut rng, HC * HC * H);
+            let mut dx = DevBuf::zeroed(t * HC * H * 4).unwrap();
+            dx.upload(&x).unwrap();
+            let mut dnw = DevBuf::zeroed(HC * H * 2).unwrap();
+            dnw.upload(&nw).unwrap();
+            let mut ddown = DevBuf::zeroed(R * HC * H * 2).unwrap();
+            ddown.upload(&down).unwrap();
+            let mut dup = DevBuf::zeroed(HC * H * R * 2).unwrap();
+            dup.upload(&up).unwrap();
+            let mut diw = DevBuf::zeroed(HC * HC * H * 2).unwrap();
+            diw.upload(&iw).unwrap();
+            let scr = hcx::scratch_bytes(HC, R);
+            let mut y_new = DevBuf::zeroed(t * H * 2).unwrap();
+            let mut y_ref = DevBuf::zeroed(t * H * 2).unwrap();
+            let mut ij_new = DevBuf::zeroed(t * HC * 4).unwrap();
+            let mut ij_ref = DevBuf::zeroed(t * HC * 4).unwrap();
+            let mut s_new = DevBuf::zeroed(scr).unwrap();
+            let mut s_ref = DevBuf::zeroed(scr).unwrap();
+            let m = mixer(&dnw, &ddown, &dup, &diw);
+            hcx::pre(&dx, &m, &mut y_new, Some(&mut ij_new), &mut s_new, H, HC, R, EPS, t, &st).unwrap();
+            hcx::pre_ref(&dx, &m, &mut y_ref, Some(&mut ij_ref), &mut s_ref, H, HC, R, EPS, t, &st).unwrap();
+            let yn: Vec<u16> = dl(&y_new, &st);
+            let yr: Vec<u16> = dl(&y_ref, &st);
+            let inj_new: Vec<f32> = dl(&ij_new, &st);
+            let inj_ref: Vec<f32> = dl(&ij_ref, &st);
+            let yd = yn.iter().zip(&yr).filter(|(a, b)| a != b).count();
+            let id = inj_new.iter().zip(&inj_ref).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                (yd, id),
+                (0, 0),
+                "hcx multi-pass bits differ at t={t} seed={seed}: y diff {yd}/{}, inj diff {id}/{}",
+                yn.len(),
+                inj_new.len()
+            );
+        }
+    }
+}
+
+#[test]
 fn hcx_decode_fast_bit_exact_vs_ref_single_c_iter_rank64() {
     // rank=64: every lane runs exactly one c-iteration, so the double-buffer prefetch path is never taken.
     // If this passes while rank=320 fails, the prefetch/swap is implicated; if it fails too, the core math is.
@@ -367,7 +417,7 @@ fn hcx_perf_bench() {
     let mut s_new = DevBuf::zeroed(scr).unwrap();
     let mut s_ref = DevBuf::zeroed(scr).unwrap();
     let m = mixer(&dnw, &ddown, &dup, &diw);
-    for t in [1usize, 4, 8] {
+    for t in [1usize, 2, 3, 4, 5, 6, 7, 8] {
         let us_fast = median_us(WARM, ITERS, || {
             hcx::pre(&dx, &m, &mut y, Some(&mut ij), &mut s_new, H, HC, R, EPS, t, &st).unwrap();
             st.sync().unwrap();

@@ -120,6 +120,20 @@
       "speculative_decoding": "MTP (auto)",
       "version": "v1",
       "vision": "off (owner exception through 2026-12-31)"
+    },
+    {
+      "approval_sha256": "0842a29237d60ed80b20260b8ec8dca8a6f18753c5aad9a0c155e2f68958ef3a",
+      "architectures": "BailingMoeV3ForCausalLM",
+      "context": "262,144 (single-node)",
+      "evidence": "ling31-flash-1019-sage-1.51-v1-evidence.tar.gz",
+      "family": "ling-3.1",
+      "model": "ling-3.1-flash-1019",
+      "pack_format": "EXL3 1.51 bpw",
+      "prefix_cache": "on (disk-backed)",
+      "runtime_id": "ling31-flash-1019-sage-1.51",
+      "speculative_decoding": "MTP (mtp)",
+      "version": "v1",
+      "vision": "off (text-only model; owner exception through 2027-03-31)"
     }
   ],
   "notes": "REXL3 v0.1.1: engine 75031112 with the tester fixes, MiniCPM-V-4.7-35B-A3B and two-node RED-SNOW-5.3-Flash, GLM-5.3-Flash and DeepSeek-V4.1-Flash-1017 runtimes, and requalified Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL versions.",

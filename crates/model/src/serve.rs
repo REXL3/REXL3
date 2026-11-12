@@ -234,6 +234,10 @@ pub struct ServeOptions {
     pub spec_tree: bool,
     /// The prefix cache. A family that has none (`ModelFamily::prefix_cache`) is started with this forced to `Off`.
     pub prefix_cache: PrefixCacheOption,
+    /// `--prefix-cache pool`: the cache keeps its entries in the KV pool's idle pages (no pages of its own; the planner's
+    /// `plan_memory_pool_cached`, the engine's room step) instead of a region of its own. With `prefix_cache` `On`; one slot; refused by name
+    /// for a family that has not built it (`ModelFamily::prefix_cache_in_pool`). `false`: the cache of `prefix_cache`, as always.
+    pub prefix_pool: bool,
     /// Tensor parallelism across processes (`--tp-ranks`, `--tp-rank`, `--tp-peer`; `docs/NEMOTRON_TP.md`). `None`, and a group of one
     /// rank, are the single-process engine.
     pub tp: Option<TpOptions>,
@@ -401,6 +405,7 @@ impl ServeOptions {
             verify_pack: false,
             spec_tree: true,
             prefix_cache: DEFAULT_PREFIX_CACHE,
+            prefix_pool: false,
             tp: None,
         }
     }
@@ -468,9 +473,8 @@ pub fn check_pack_dirs(o: &ServeOptions) -> Result<(), ModelError> {
         Some(d) => Some(open(d)?),
         None => None,
     };
-    let is_dsv41 = std::fs::read_to_string(o.model_dir.join("config.json"))
-        .is_ok_and(|s| s.contains("deepseek_v41") || s.contains("qwen3_5_moe"));
-    check_packs(&target, draft.as_ref(), o.allow_unvalidated_pack || is_dsv41).map_err(|e| match e {
+    // Only the operator's flag widens the gate: no family, and nothing a pack's config says, serves an unlisted pack without it.
+    check_packs(&target, draft.as_ref(), o.allow_unvalidated_pack).map_err(|e| match e {
         ModelError::Config(m) => ModelError::Config(format!("{}: {m}", o.model_dir.display())),
         e => e,
     })?;
@@ -480,32 +484,85 @@ pub fn check_pack_dirs(o: &ServeOptions) -> Result<(), ModelError> {
     Ok(())
 }
 
-/// Check the target (and draft) fingerprints against the validated list. Records both as boot facts.
-pub fn check_packs(target: &Pack, draft: Option<&Pack>, allow_unvalidated: bool) -> Result<(), ModelError> {
+/// What the pack gate decided for a target (and a draft): the target's validated name, and how the draft was validated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackVerdict {
+    /// The `pack_validated` boot fact: the listed pair's name, or the target's own entry.
+    pub pack: &'static str,
+    /// The `draft_validated` boot fact: `listed (<pair>)` for a listed pair, `structural (<geometry>)` for a draft that passed
+    /// [`crate::draft::structural_check`]; `None` without a draft.
+    pub draft: Option<String>,
+}
+
+/// The pack gate's rule, on fingerprints and the draft's structural check (pure, for the tests). A TARGET is validated only by the list
+/// (the pairs of [`crate::fingerprint::validated_pack`], or its own entry). A DRAFT only proposes (the verify window decides every committed
+/// token, so drafted == serial whatever it proposes), so it is validated by structure: a listed pair keeps its name, and any other draft of
+/// a validated target passes when its config and tensors match a DFlash2 geometry of the engine for that target (`structural`, its
+/// geometry or every mismatch). `Err` is the refusal, by name.
+pub fn pack_verdict(
+    target: &str,
+    draft: Option<(&str, &Result<&'static crate::draft::DraftGeom, String>)>,
+) -> Result<PackVerdict, String> {
+    let d_fp = draft.map(|(fp, _)| fp);
+    if let Some(name) = crate::fingerprint::validated_pack(target, d_fp) {
+        return Ok(PackVerdict { pack: name, draft: d_fp.map(|_| format!("listed ({name})")) });
+    }
+    let Some(alone) = crate::fingerprint::validated_pack(target, None) else {
+        return Err(format!(
+            "this pack is not one this release was validated on (target {target}, draft {}); pass --allow-unvalidated-pack to serve it anyway",
+            d_fp.unwrap_or("none")
+        ));
+    };
+    match draft {
+        Some((_, Ok(g))) => Ok(PackVerdict { pack: alone, draft: Some(format!("structural ({})", g.name)) }),
+        Some((fp, Err(why))) => Err(format!(
+            "the draft {fp} is not a DFlash2 draft this engine runs for this target ({why}); pass --allow-unvalidated-pack to serve it anyway"
+        )),
+        None => Ok(PackVerdict { pack: alone, draft: None }),
+    }
+}
+
+/// Check the target against the validated list and the draft by structure ([`pack_verdict`]). Records the fingerprints and the verdict as
+/// boot facts (`pack_validated`, `draft_validated`); returns the target's fingerprint.
+pub fn check_packs(target: &Pack, draft: Option<&Pack>, allow_unvalidated: bool) -> Result<String, ModelError> {
     let t = crate::fingerprint::fingerprint(&target.ck);
     let d = draft.map(|p| crate::fingerprint::fingerprint(&p.ck));
     boot::fact("target_fingerprint", t.clone());
     if let Some(d) = &d {
         boot::fact("draft_fingerprint", d.clone());
     }
-    match crate::fingerprint::validated_pack(&t, d.as_deref()) {
-        Some(name) => {
-            boot::fact("pack_validated", name);
-            Ok(())
+    let structural = draft.map(|p| crate::draft::structural_check(p, &target.ck.config));
+    match pack_verdict(&t, d.as_deref().zip(structural.as_ref())) {
+        Ok(v) => {
+            boot::fact("pack_validated", v.pack);
+            if let Some(dv) = v.draft {
+                eprintln!("rexl3 event=draft_validated draft={} how=\"{dv}\"", d.as_deref().unwrap_or("none"));
+                boot::fact("draft_validated", dv);
+            }
+            Ok(t)
         }
-        None if allow_unvalidated => {
+        Err(why) if allow_unvalidated => {
             boot::fact("pack_validated", "no (--allow-unvalidated-pack)");
             boot::fact("pack_warning", UNVALIDATED_PACK_WARNING);
+            if d.is_some() {
+                boot::fact("draft_validated", "no (--allow-unvalidated-pack)");
+            }
             eprintln!(
-                "rexl3 level=warn event=unvalidated_pack target={t} draft={} warning=\"{UNVALIDATED_PACK_WARNING}\"",
+                "rexl3 level=warn event=unvalidated_pack target={t} draft={} reason=\"{why}\" warning=\"{UNVALIDATED_PACK_WARNING}\"",
                 d.as_deref().unwrap_or("none")
             );
-            Ok(())
+            Ok(t)
         }
-        None => Err(ModelError::Config(format!(
-            "this pack is not one this release was validated on (target {t}, draft {}); pass --allow-unvalidated-pack to serve it anyway",
-            d.as_deref().unwrap_or("none")
-        ))),
+        Err(why) => Err(ModelError::Config(why)),
+    }
+}
+
+/// What `--print-fingerprints` says of a draft beside its fingerprint: `structural (<geometry>)`, or why it is not a draft this engine
+/// runs for the target.
+pub fn draft_structure_line(target: &Pack, draft: &Pack) -> String {
+    match crate::draft::structural_check(draft, &target.ck.config) {
+        Ok(g) => format!("structural ({})", g.name),
+        Err(why) => format!("structurally invalid: {why}"),
     }
 }
 
@@ -661,6 +718,28 @@ fn refuse_unsupported_window(family: &dyn crate::family::ModelFamily, o: &ServeO
     Ok(())
 }
 
+/// `--prefix-cache pool` is refused by name for a family whose backend does not keep cache entries in its KV pool's idle pages
+/// (`ModelFamily::prefix_cache_in_pool`), and for a cache that is off or sized in MiB (a pool cache has no size of its own): a flag that
+/// silently ran another cache would let an operator believe the window's memory is not doubled when it is.
+fn refuse_unbuilt_pool_cache(family: &dyn crate::family::ModelFamily, o: &ServeOptions) -> Result<(), ModelError> {
+    if !o.prefix_pool {
+        return Ok(());
+    }
+    if !family.prefix_cache_in_pool() {
+        return Err(ModelError::Config(format!(
+            "--prefix-cache pool: the {} family keeps its prefix cache in a region of its own; use --prefix-cache on or --prefix-cache-mib",
+            family.id()
+        )));
+    }
+    if o.prefix_cache != PrefixCacheOption::On {
+        return Err(ModelError::Config(format!(
+            "--prefix-cache pool needs the cache on and takes no size (it was {:?}): drop --prefix-cache-mib",
+            o.prefix_cache
+        )));
+    }
+    Ok(())
+}
+
 /// A family can serve text before its vision tower exists (GLM-5.3-Flash today): asked for images (`o.vision` is the server's slot for the
 /// tower), it refuses by name, before anything is loaded, and says how to serve text.
 fn refuse_unbuilt_vision(plan: &crate::family::FamilyPlan, o: &ServeOptions) -> Result<(), ModelError> {
@@ -694,6 +773,7 @@ pub fn start_in(registry: &Registry, o: &ServeOptions) -> Result<Box<dyn ServeEn
     let id = plan.family;
     let missing = plan.missing_components();
     refuse_unsupported_window(family, o)?;
+    refuse_unbuilt_pool_cache(family, o)?;
     refuse_unbuilt_vision(&plan, o)?;
     refuse_unoffered_drafter(&plan, o)?;
     refuse_tensor_parallel(family, o, 0)?;
@@ -788,6 +868,7 @@ pub fn start_follower_in(registry: &Registry, o: &ServeOptions) -> Result<(), Mo
     check_options(o)?;
     let (family, plan) = registry.probe(&o.model_dir)?;
     refuse_tensor_parallel(family, o, 1)?;
+    refuse_unbuilt_pool_cache(family, o)?;
     refuse_unbuilt_vision(&plan, o)?;
     // every rank checks its own pack against the list, as rank 0 does (the group's flags are one list: `rexl3-cluster` serve.flags)
     check_pack_dirs(o)?;
@@ -839,6 +920,24 @@ pub fn build_engine(o: &ServeOptions) -> Result<QwenEngine, ModelError> {
         (true, Some(dir)) => {
             // the draft's shapes are compiled in: its config.json must say they are the ones the pack was built with, for this target
             crate::shapes::check_draft_dir(dir, &cfg)?;
+            // and its pack is a DFlash2 draft of the Qwen3.8 geometry for this target (the one structural check every family asks)
+            let expect = crate::draft::DraftExpect {
+                hidden: cfg.hidden,
+                vocab: cfg.vocab,
+                tap_layers: crate::forward::TAP_LAYERS,
+                target_layers: cfg.layers.len(),
+            };
+            match crate::draft::check_draft_pack(dir, &crate::draft::DraftGeom::QWEN38, &expect) {
+                Ok(_) => {}
+                Err(e) if o.allow_unvalidated_pack => eprintln!("rexl3 level=warn event=unvalidated_draft reason=\"{e}\""),
+                Err(e) => {
+                    return Err(ModelError::Config(format!(
+                        "{}: the draft is not a DFlash2 draft this engine runs for this target ({e}); pass --allow-unvalidated-pack to serve \
+                         it anyway",
+                        dir.display()
+                    )))
+                }
+            }
             Some(Pack::open(dir)?)
         }
         _ => None,
@@ -1314,6 +1413,33 @@ mod tests {
         assert_eq!(super::prefix_config_from(&|_| None).unwrap(), gb_engine::PrefixConfig::default());
     }
 
+    /// `--prefix-cache pool` starts only a family that built it (GLM), and only with the cache on and no MiB size; off, it is never in the way.
+    #[test]
+    fn the_pool_page_cache_is_refused_by_name_where_it_is_not_built() {
+        use crate::family::ModelFamily;
+        use PrefixCacheOption::*;
+        let glm = crate::families::glm::GlmFamily;
+        let qwen = crate::families::qwen::QwenFamily;
+        let mut o = ServeOptions::new("/m".into());
+        o.prefix_cache = On;
+        o.prefix_pool = true;
+        assert!(refuse_unbuilt_pool_cache(&glm, &o).is_ok());
+        let e = refuse_unbuilt_pool_cache(&qwen, &o).unwrap_err().to_string();
+        assert!(e.contains("--prefix-cache pool") && e.contains(qwen.id()), "{e}");
+        for asked in [Mib(1024), Off, Auto] {
+            o.prefix_cache = asked;
+            let e = refuse_unbuilt_pool_cache(&glm, &o).unwrap_err().to_string();
+            assert!(e.contains("--prefix-cache pool"), "{asked:?}: {e}");
+        }
+        // not asked for: nothing is refused, whatever the family
+        o.prefix_pool = false;
+        for asked in [Mib(1024), Off, Auto, On] {
+            o.prefix_cache = asked;
+            assert!(refuse_unbuilt_pool_cache(&qwen, &o).is_ok() && refuse_unbuilt_pool_cache(&glm, &o).is_ok());
+        }
+        assert!(glm.prefix_cache_in_pool() && !qwen.prefix_cache_in_pool());
+    }
+
     #[test]
     fn the_prefix_cache_is_off_only_for_a_family_without_one() {
         use PrefixCacheOption::*;
@@ -1583,6 +1709,37 @@ mod tests {
         f.extend_from_slice(&[0, 0x3f, 0, 0x40]);
         std::fs::write(dir.join("model.safetensors"), f).unwrap();
         dir
+    }
+
+    /// The pack gate's rule: a target only by the list; a draft by the list (its pair keeps its name) or by its structure.
+    #[test]
+    fn a_draft_is_validated_by_structure_and_a_target_only_by_the_list() {
+        use crate::draft::DraftGeom;
+        use crate::fingerprint::{validated_pack, VALIDATED, VALIDATED_GLM53_DRAFT};
+        let (pair, glm, published) = VALIDATED_GLM53_DRAFT[0];
+        let ok: Result<&'static DraftGeom, String> = Ok(&DraftGeom::GLM53_FLASH);
+        let bad: Result<&'static DraftGeom, String> = Err("hidden_size 5120 (expected 4096)".into());
+        // the published draft: its listed pair
+        let v = pack_verdict(glm, Some((published, &ok))).unwrap();
+        assert_eq!((v.pack, v.draft.as_deref()), (pair, Some(&*format!("listed ({pair})"))));
+        // any other draft of the GLM target that passes the structural check: the target's entry, the draft structural (no flag)
+        let v = pack_verdict(glm, Some(("sha256:own-quant", &ok))).unwrap();
+        assert_eq!(v.pack, validated_pack(glm, None).unwrap());
+        assert_eq!(v.draft.as_deref(), Some("structural (glm53-flash)"));
+        // a draft that fails it: refused by name, with the mismatch and the flag that overrides it
+        let e = pack_verdict(glm, Some(("sha256:other", &bad))).unwrap_err();
+        assert!(e.contains("sha256:other") && e.contains("hidden_size 5120") && e.contains("--allow-unvalidated-pack"), "{e}");
+        // a target off the list stays gated whatever its draft
+        let e = pack_verdict("sha256:unlisted", Some(("sha256:any", &ok))).unwrap_err();
+        assert!(e.contains("is not one this release was validated on") && e.contains("sha256:unlisted"), "{e}");
+        assert!(pack_verdict("sha256:unlisted", None).is_err());
+        // the Qwen3.8 pair is what it was: its name, its draft listed; the target alone too
+        let (qname, qt, qd) = VALIDATED[0];
+        let qok: Result<&'static DraftGeom, String> = Ok(&DraftGeom::QWEN38);
+        assert_eq!(pack_verdict(qt, Some((qd, &qok))).unwrap().pack, qname);
+        assert_eq!(pack_verdict(qt, None).unwrap(), PackVerdict { pack: qname, draft: None });
+        // no draft: the target's entry
+        assert_eq!(pack_verdict(glm, None).unwrap().draft, None);
     }
 
     /// A pack that is not on the validated list (the toy pack here): without `--allow-unvalidated-pack` it is refused by its directory and fingerprint

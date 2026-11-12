@@ -319,6 +319,12 @@ pub trait ModelFamily: Sync {
     fn prefix_cache(&self) -> bool {
         false
     }
+    /// Whether the family's prefix cache can keep its entries in the KV pool's idle pages (`--prefix-cache pool`, `ServeOptions::prefix_pool`):
+    /// its backend reports the pool (`gb_engine::Backend::prefix_pool_room`) and its planner plans no pages for the cache
+    /// (`plan::plan_memory_pool_cached`). **`false` unless a family builds it**: the start refuses the option by name for the rest.
+    fn prefix_cache_in_pool(&self) -> bool {
+        false
+    }
     /// Whether the family sizes its verify window by `ServeOptions::window_rows` (`--window-rows`). A family that does not says so by
     /// leaving this `false`: the start refuses an explicit non-default value for it by name instead of ignoring the flag. Opt in only when
     /// `build` honours the option (its records, scratch and row budget) and the row-invariance tests cover the widest window.

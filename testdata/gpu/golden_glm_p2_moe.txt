@@ -23,3 +23,21 @@ p2m glm-moe-chain-2grp-v1 5/4-bit E=48 rows=37 y c7f907f462d82ddf out b79d7da3df
 p2m glm-moe-fold128-2grp-v1 5/4-bit E=48 rows=37 y 190cd54f95acfec5 out 3e94cf5ee561f489
 p2m glm-moe-chain-2grp-v1 5/4-bit E=48 rows=300 y b36e339c9c37c29c out 4ffd24a63650ad57
 p2m glm-moe-fold128-2grp-v1 5/4-bit E=48 rows=300 y 652c0040e2c97378 out 5a77b70905a69436
+p2m glm-moe-chain-2grp-v1 6/6-bit E=48 rows=1 y ce23a46fb9a6d649 out 9911b07e9b868652
+p2m glm-moe-fold128-2grp-v1 6/6-bit E=48 rows=1 y efbaa4c2ad1cdc68 out 7ef462bdc60548b0
+p2m glm-moe-chain-2grp-v1 6/6-bit E=48 rows=37 y 5def460fcdc783de out 03826bbccbce2914
+p2m glm-moe-fold128-2grp-v1 6/6-bit E=48 rows=37 y b30d48403f08cf1b out 64d271c50de21a14
+p2m glm-moe-chain-2grp-v1 6/6-bit E=48 rows=300 y aa087470f2efa94a out 98e1a871a6fae30e
+p2m glm-moe-fold128-2grp-v1 6/6-bit E=48 rows=300 y b6ff93160fad5514 out 09f05641db9028a3
+p2m glm-moe-chain-2grp-v1 6/4-bit E=48 rows=1 y 5210f2d517b92f4f out 64517235a1e19359
+p2m glm-moe-fold128-2grp-v1 6/4-bit E=48 rows=1 y 5ed85a6396c565a1 out 955a678f2c3d95be
+p2m glm-moe-chain-2grp-v1 6/4-bit E=48 rows=37 y 100cb91a7117e0b0 out e743cd4a739a7072
+p2m glm-moe-fold128-2grp-v1 6/4-bit E=48 rows=37 y 082234d4a4087390 out e5a777d2a1a912e8
+p2m glm-moe-chain-2grp-v1 6/4-bit E=48 rows=300 y 158d80b481aab310 out 432f03bff122d9e8
+p2m glm-moe-fold128-2grp-v1 6/4-bit E=48 rows=300 y 56e64e048e5291d7 out adbfcd8478bab93c
+p2m glm-moe-chain-2grp-v1 6/5/4-bit split E=48 rows=1 y 9be5a63bc9a3ac44 out 41491b8b98f2cefb
+p2m glm-moe-fold128-2grp-v1 6/5/4-bit split E=48 rows=1 y dd3addd6b9218192 out a5a1089fa59ab87e
+p2m glm-moe-chain-2grp-v1 6/5/4-bit split E=48 rows=37 y 47678dee112ad84e out 7d6e11e766731dc4
+p2m glm-moe-fold128-2grp-v1 6/5/4-bit split E=48 rows=37 y ad5aad5e7638a3b5 out f32b83a1601c370a
+p2m glm-moe-chain-2grp-v1 6/5/4-bit split E=48 rows=300 y 07710604740d72ed out be3bfb2b385eeea0
+p2m glm-moe-fold128-2grp-v1 6/5/4-bit split E=48 rows=300 y a0abe7016182896e out 24de19c5c88b7c7f

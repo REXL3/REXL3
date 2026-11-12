@@ -24,9 +24,10 @@
 //! * the names the rest of the family codes against ([`Msg`], [`Link`], [`Rendezvous`], [`run_follower`],
 //!   [`boot_leader_group`], ...), which are the neutral ones at this family's call type.
 //!
-//! What is deliberately NOT here: the DSpark draft round (`check_tp_plain` refuses the drafting for a group boot, and
-//! the leader's [`Dsv41Runtime::propose_mtp`] refuses it again at the seam — a draft round would desync the ranks, so
-//! it can never run silently), and the vision splice (this branch's tower is not bound; the server's vision gate
+//! What is deliberately NOT here: the DSpark draft round as a group call (the leader runs it on rank 0 alone, after a
+//! flush, on the NextN layers a drafting group replicates to every rank; without them the leader's
+//! [`Dsv41Runtime::propose_mtp`] refuses it by name, so a round never leaves the follower inside a combine), and the
+//! vision splice (this branch's tower is not bound; the server's vision gate
 //! refuses image serves for it). The core calls (begin/end slot, prefill, window, commit, flush) ride the neutral
 //! protocol; a prefill travels as the model's own single-sequence batch ([`prefill_batch`]/[`prefill_of`]), so what
 //! the follower reconstructs is exactly what `Dsv41Model::prefill_chunk` would have built itself.
@@ -130,8 +131,8 @@ pub struct Dsv41Facts {
     pub engram_token_map: String,
     /// The engram sidecar (`REXL3_DSV41_ENGRAM_SHARDS`): the raw text (`unset` = none).
     pub engram_shards: String,
-    /// The speculative mode as a group may run it (`--spec`; a group boots `none` — `check_tp_plain` refuses the
-    /// drafting, this names the flag at the rendezvous).
+    /// The speculative mode the rank was started with (`--spec`), named at the rendezvous so every rank of a group was
+    /// asked the same.
     pub spec: String,
     /// The prefix cache this rank was started with (`--prefix-cache`): every rank of a group must be asked the same.
     pub cache_request: String,
@@ -1192,9 +1193,9 @@ impl<R: Dsv41Runtime> Dsv41Runtime for TpLeader<R> {
         self.forward_call(call, |m, _| m.inner.prefill_logits_rows(slot, start, tokens), |v| logits_rows_digest(v))
     }
 
-    /// The DSpark draft round is refused BY NAME, never forwarded: a group boot refuses the drafting
-    /// (`check_tp_plain`), and this is the seam a late `--spec` flip would hit — a draft round on one rank would
-    /// leave the other inside a combine, which is a desync, not an error.
+    /// The DSpark draft round is never forwarded: rank 0 runs it alone, after a flush, on its replicated NextN layers.
+    /// Without them it is refused BY NAME — a draft round that needed the other rank would leave it inside a combine,
+    /// which is a desync, not an error.
     fn propose_mtp(&mut self, slot: usize, tokens: &[u32], max: usize) -> Result<Option<DraftRound>, ModelError> {
         // the plain entry stays the argmax walk: a sampled caller passes its Sampling down `propose_mtp_sampled`
         let greedy = gb_sampling::Sampling { temperature: 0.0, ..gb_sampling::Sampling::default() };

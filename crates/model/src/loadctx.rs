@@ -94,6 +94,14 @@ impl<'p> LoadCtx<'p> {
         Self::new(LoadMode::from_env())
     }
 
+    /// [`LoadCtx::from_env`] whose device arena allocates blocks of `bytes` (a small pack whose tensors all fit one block, sized to the pack,
+    /// leaves none of a default block's unused tail). Call it before anything is declared.
+    pub fn from_env_with_block(bytes: usize) -> Self {
+        let mut c = Self::from_env();
+        c.arena = Arena::new(bytes);
+        c
+    }
+
     pub fn mode(&self) -> LoadMode {
         self.mode
     }

@@ -101,6 +101,28 @@ fn the_sc410_image_kits_cap_the_image_preparation_credit_on_rank_0_only() {
     }
 }
 
+/// `--all` is for the commands that act on every group. A command that acts on one group refuses it by name, before it builds
+/// any script; it used to act on the first group only and exit 0. The read-only commands still take every group.
+#[test]
+fn a_one_group_command_refuses_all() {
+    let f = example("cluster.dp-fleet.json");
+    let f = f.to_str().unwrap();
+    for cmd in ["up", "down", "supervise", "logs", "exec", "env"] {
+        let o = run(&[cmd, "--cluster", f, "--all", "--dry-run", "--skip-check"]);
+        assert_eq!(o.status.code(), Some(2), "{cmd}: {}", text(&o));
+        assert!(text(&o).contains("--all applies to check, status and validate"), "{cmd}: {}", text(&o));
+        assert!(!text(&o).contains("### "), "{cmd}: built a script: {}", text(&o));
+        // the same command with the group named is unaffected (its own exit status is its own business)
+        let named = run(&[cmd, "--cluster", f, "--group", "g1", "--dry-run", "--skip-check"]);
+        assert!(!text(&named).contains("--all applies"), "{cmd} --group g1: {}", text(&named));
+    }
+    for cmd in ["check", "status"] {
+        let o = run(&[cmd, "--cluster", f, "--all", "--dry-run"]);
+        assert_eq!(o.status.code(), Some(0), "{cmd}: {}", text(&o));
+        assert!(text(&o).contains("g0") && text(&o).contains("g1"), "{cmd} --all covers both groups: {}", text(&o));
+    }
+}
+
 #[test]
 fn usage_errors_exit_2() {
     assert_eq!(run(&[]).status.code(), Some(2));

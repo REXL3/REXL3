@@ -3570,6 +3570,9 @@ impl MlaDsv4 {
         let ratio = cfg.ratio(self.layer_id) as usize;
         let mut n_cmp = 0usize;
         let mut fill_cmp_topk = 0usize;
+        // Leading rows of an indexer chunk that still take the fill selection (see `prefill_fill_rows`), and its width.
+        let mut fill_rows = 0usize;
+        let mut fill_rows_topk = 0usize;
         // TEMP-BISECT: REXL3_DSV41_NO_DSA skips the compressed half entirely (window attention only)
         let no_dsa = std::env::var_os("REXL3_DSV41_NO_DSA").is_some();
         if ratio > 0 && !no_dsa {
@@ -3594,6 +3597,14 @@ impl MlaDsv4 {
                 if !force_ix && n_pos <= ix.topk && n_blocks <= cfg.candidate_topk_blocks {
                     fill_cmp_topk = ix.topk;
                 } else {
+                    // The branch above is decided on the chunk's END, so without this the rows of one chunk that a
+                    // shorter chunk would have filled ran the indexer instead: a 2,048-row chunk from 0 sent row 1,023
+                    // (exactly `index_topk` valid entries at ratio 2) through `topk_kernel`, whose order differs from
+                    // the fill's, and the prompt's later tokens changed with the chunk size (chunked != whole).
+                    if prefill && !ced_replay_tail && !force_ix {
+                        fill_rows = prefill_fill_rows(start_pos, n, ratio, ix.topk, &cfg);
+                        fill_rows_topk = ix.topk;
+                    }
                     let iq = ix.heads * ix.dim;
                     let ix_scale = 1.0 / ((ix.dim * ix.heads) as f32).sqrt();
                     if prefill {
@@ -3777,6 +3788,27 @@ impl MlaDsv4 {
                     win as i32,
                     start_pos as i32,
                     fill_cmp_topk as i32,
+                    ratio as i32,
+                    st.raw(),
+                )
+            };
+            CudaError::check(rc)?;
+        }
+        // The rows a chunk ending at `ratio * index_topk` would have filled get the fill selection here, over the
+        // indexer's: the same launch as the fill branch, on the leading `fill_rows` rows (their window half is
+        // rewritten with the same values: `start_pos == 0` is `chunk_only` either way, and a `start_pos > 0` chunk's
+        // `split = win + n` exceeds both row counts; the CED tail call, the one with `split = n` at `start_pos > 0`,
+        // never sets `fill_rows`).
+        if fill_rows > 0 {
+            let rc = unsafe {
+                ffi::gb_dsv4_window_and_cmp_idxs(
+                    topk_ptr,
+                    fill_rows as i32,
+                    split as i32,
+                    sel.sel_stride as i32,
+                    win as i32,
+                    start_pos as i32,
+                    fill_rows_topk as i32,
                     ratio as i32,
                     st.raw(),
                 )
@@ -4401,6 +4433,85 @@ pub fn compressor_carry_restore(
     let (off, bytes) = ((seq_slot % MAX_SLOTS) * ratio * d * 4, ratio * d * 4);
     kv_state.copy_from_at(off, kv_src, 0, bytes, st)?;
     score_state.copy_from_at(off, score_src, 0, bytes, st)
+}
+
+/// How many leading rows of a prefill chunk `start_pos .. start_pos + n` take the **fill** selection (every compressed
+/// position, in order) when the chunk as a whole takes the indexer: the rows `p` with `p + 1 <= ratio * topk`.
+///
+/// The selection must be a property of the ROW, not of the chunk it was cut into. The chunk-level rule
+/// (`(start_pos + n) / ratio <= topk` fills every row) is exact for any grid that divides `ratio * topk`
+/// (1,024 rows at ratio 2, 512 at ratio 1): such a grid ends the chunk holding row `ratio * topk - 1` exactly at
+/// `ratio * topk`, so every row below it is filled and every row from it on runs the indexer. This returns that same
+/// split for ANY chunk, so a 2,048-row chunk (`dsv4_attn::MAX_ROWS`, the tp2 default) or a chunk a prefix-cache cut
+/// shifted selects exactly what those grids select. `0` when no row of the chunk is below the boundary, or when the
+/// boundary rows could need candidate blocks (never on this pack: 512 positions are 64 blocks of 8, against 2,048).
+pub fn prefill_fill_rows(start_pos: usize, n: usize, ratio: usize, topk: usize, cfg: &Dsv4Config) -> usize {
+    if ratio == 0 || topk == 0 {
+        return 0;
+    }
+    let boundary = ratio * topk;
+    if (boundary / ratio).div_ceil(cfg.candidate_block_size.max(1)) > cfg.candidate_topk_blocks {
+        return 0;
+    }
+    n.min(boundary.saturating_sub(start_pos))
+}
+
+#[cfg(test)]
+mod prefill_fill_rows_tests {
+    use super::*;
+
+    /// The split is the one a grid dividing `ratio * topk` makes: for every chunking of a prompt — any chunk size,
+    /// any start — a row is filled iff `p + 1 <= ratio * topk`, and a chunk that ends at or before the boundary is
+    /// the chunk-level fill (all its rows).
+    #[test]
+    fn a_rows_selection_does_not_depend_on_the_chunk_it_is_in() {
+        let cfg = Dsv4Config::v41();
+        for (ratio, topk) in [(2usize, 512usize), (1, 512), (2, 128), (1, 128)] {
+            let boundary = ratio * topk;
+            for chunk in [1usize, 16, 128, 256, 512, 1000, 1024, 1040, 1536, 2048] {
+                for offset in [0usize, 7, 128, 1000] {
+                    let len = 4_200usize;
+                    let mut start = 0usize;
+                    let mut first = true;
+                    while start < len {
+                        // a leading cut at `offset` (a prefix snapshot) shifts every later chunk off the grid
+                        let n = if first && offset > 0 { offset.min(len) } else { chunk.min(len - start) };
+                        first = false;
+                        let chunk_fills = (start + n) / ratio <= topk;
+                        let rows = if chunk_fills { n } else { prefill_fill_rows(start, n, ratio, topk, &cfg) };
+                        for r in 0..n {
+                            let p = start + r;
+                            let filled = r < rows;
+                            // the chunk-level fill (when the chunk ENDS within `boundary + ratio - 1`) keeps its rule;
+                            // every other row is decided by its own position
+                            if !chunk_fills {
+                                assert_eq!(
+                                    filled,
+                                    p < boundary,
+                                    "ratio {ratio} topk {topk} chunk {chunk} offset {offset}: row {p}"
+                                );
+                            } else {
+                                assert!(p < boundary + ratio - 1, "a filled chunk holds only rows below the floor slack");
+                            }
+                        }
+                        start += n;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pack's rows: at ratio 2 rows 0..=1023 are filled, row 1,024 runs the indexer; at ratio 1 rows 0..=511.
+    #[test]
+    fn the_packs_boundary_rows() {
+        let cfg = Dsv4Config::v41();
+        assert_eq!(prefill_fill_rows(0, 2048, 2, 512, &cfg), 1024, "a 2,048-row chunk from 0 fills 1,024 rows");
+        assert_eq!(prefill_fill_rows(0, 1040, 2, 512, &cfg), 1024);
+        assert_eq!(prefill_fill_rows(1024, 1024, 2, 512, &cfg), 0, "the second 1,024-row chunk fills nothing");
+        assert_eq!(prefill_fill_rows(1000, 100, 2, 512, &cfg), 24, "a cut at 1,000: rows 1,000..=1,023");
+        assert_eq!(prefill_fill_rows(0, 2048, 1, 512, &cfg), 512);
+        assert_eq!(prefill_fill_rows(0, 2048, 0, 512, &cfg), 0, "no compressed half");
+    }
 }
 
 #[cfg(test)]

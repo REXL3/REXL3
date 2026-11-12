@@ -316,3 +316,29 @@ fn scored_prefill_rows_are_bounded_when_generation_competes_and_limit_resets() {
     e.step().unwrap();
     assert_eq!(e.take_scores().len(), 1, "the temporary row limit must reset for score-only work");
 }
+/// A `prompt_logprobs` readout (`all_rows`) is refused by name, before any state is reserved, by a backend that reads out only
+/// the prompt's last row; it used to score the whole prompt and answer with no rows (a 500 from the server). The same backend
+/// still scores a last-row request, and a backend with the readout still serves both.
+#[test]
+fn an_all_rows_score_is_refused_by_a_backend_that_reads_out_only_the_last_row() {
+    let mut e = engine(4);
+    e.backend = e.backend.with_last_row_scores_only();
+    let before = e.admission().available();
+    let err = e.score_submit(ScoreRequest { prompt: vec![1; 16], cache: false, all_rows: true }).unwrap_err();
+    assert!(format!("{err:?}").contains("prompt_logprobs"), "{err:?}");
+    assert!(matches!(err, gb_engine::SubmitError::Invalid(_)), "a client error (400), not a backend failure: {err:?}");
+    assert_eq!(e.admission().available(), before, "the refusal reserves nothing");
+    let id = e.score_submit(ScoreRequest { prompt: vec![1; 16], cache: false, all_rows: false }).unwrap();
+    while e.busy() {
+        e.step().unwrap();
+    }
+    assert!(e.take_scores().iter().any(|(i, _)| *i == id), "a last-row score still runs");
+    let mut full = engine(4);
+    let id = full.score_submit(ScoreRequest { prompt: vec![1; 16], cache: false, all_rows: true }).unwrap();
+    while full.busy() {
+        full.step().unwrap();
+    }
+    let scores = full.take_scores();
+    let (_, s) = scores.iter().find(|(i, _)| *i == id).unwrap();
+    assert_eq!(s.logits_rows.len(), 16, "one row per prompt token");
+}

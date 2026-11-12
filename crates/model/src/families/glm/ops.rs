@@ -66,6 +66,9 @@ pub enum Op {
     HeadMean,
     /// The `lm_head` on the head rows.
     LmHead,
+    /// A DFlash2 draft's tap of layer `layer`'s output (the mean of the four streams right after the layer's last apply, before any norm),
+    /// into its column of the tap buffer. Reads the streams, writes nothing the forward reads.
+    Tap { layer: usize },
 }
 
 /// The kinds of layer `l`, from the config's recipe.
@@ -91,6 +94,48 @@ pub fn plan_forward_tap(cfg: &GlmConfig, layers: usize) -> Vec<Op> {
     let mut ops = build(cfg, layers, true, None);
     assert_eq!(ops.pop(), Some(Op::LmHead));
     ops
+}
+
+/// `ops` (a [`plan_forward`] or [`plan_forward_tap`] schedule) with a [`Op::Tap`] of each of `taps` right after the apply that ends that
+/// layer: the `ApplyPartials` into the next layer's attention site, or the last layer's `Apply`. The taps change nothing the forward
+/// computes (they only read the streams), so the schedule with taps is the schedule without them plus the taps ([`check_taps`]).
+pub fn with_taps(mut ops: Vec<Op>, taps: &[usize]) -> Result<Vec<Op>, String> {
+    if taps.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(format!("tap layers {taps:?} must be strictly increasing"));
+    }
+    for &layer in taps.iter().rev() {
+        let at = layer_end(&ops, layer).ok_or_else(|| format!("the schedule has no output of layer {layer} to tap"))?;
+        ops.insert(at + 1, Op::Tap { layer });
+    }
+    Ok(ops)
+}
+
+/// The index of the apply that ends `layer` (its FFN site's update) in `ops`.
+fn layer_end(ops: &[Op], layer: usize) -> Option<usize> {
+    let next = Site { layer: layer + 1, kind: SiteKind::Attn };
+    ops.iter().position(|op| *op == Op::ApplyPartials { next }).or_else(|| {
+        // the last layer ends with the plain apply, right after its own FFN
+        let ffn = ops.iter().position(|op| *op == Op::Finalize(Site { layer, kind: SiteKind::Ffn }))?;
+        ops[ffn..].iter().position(|op| *op == Op::Apply).map(|i| ffn + i)
+    })
+}
+
+/// The invariants of the taps of a schedule: exactly one [`Op::Tap`] for each of `taps` and no other, each right after the apply that ends its
+/// layer, and the schedule without its taps passing [`check_plan`].
+pub fn check_taps(cfg: &GlmConfig, layers: usize, head: bool, ops: &[Op], taps: &[usize]) -> Result<(), String> {
+    let found: Vec<usize> = ops.iter().filter_map(|o| if let Op::Tap { layer } = o { Some(*layer) } else { None }).collect();
+    if found != taps {
+        return Err(format!("taps of layers {found:?}, expected {taps:?}"));
+    }
+    for (i, op) in ops.iter().enumerate() {
+        if let Op::Tap { layer } = *op {
+            if i == 0 || layer_end(ops, layer) != Some(i - 1) {
+                return Err(format!("op {i}: the tap of layer {layer} must come right after the apply that ends the layer"));
+            }
+        }
+    }
+    let bare: Vec<Op> = ops.iter().copied().filter(|o| !matches!(o, Op::Tap { .. })).collect();
+    check_plan(cfg, layers, head, &bare)
 }
 
 /// A deliberate bug in the schedule, so the tests can show that the validator ([`check_plan`]) catches each one. Production passes none.
@@ -389,6 +434,51 @@ mod tests {
             // everything before the head is the plain plan's, so the tap sees the same hidden state the logits would have been made from
             assert_eq!(tap[..tap.len() - 1], plan_forward(&c, n, false)[..]);
         }
+    }
+
+    #[test]
+    fn the_dflash2_taps_sit_right_after_each_tapped_layer_and_change_nothing_else() {
+        let cfg = real();
+        let taps = crate::families::glm::dflash::TAP_LAYERS;
+        for head in [false, true] {
+            let bare = plan_forward(&cfg, 45, head);
+            let ops = with_taps(bare.clone(), &taps).unwrap();
+            check_taps(&cfg, 45, head, &ops, &taps).unwrap();
+            assert_eq!(ops.len(), bare.len() + taps.len());
+            // HF `hidden_states[i + 1]`: the streams after layer i's FFN update, before layer i + 1's attention site is finalized
+            for &l in &taps {
+                let i = ops.iter().position(|o| *o == Op::Tap { layer: l }).unwrap();
+                assert_eq!(ops[i - 1], Op::ApplyPartials { next: Site { layer: l + 1, kind: SiteKind::Attn } });
+                assert_eq!(ops[i + 1], Op::Finalize(Site { layer: l + 1, kind: SiteKind::Attn }));
+            }
+            assert_eq!(ops.iter().copied().filter(|o| !matches!(o, Op::Tap { .. })).collect::<Vec<_>>(), bare);
+        }
+        // the last layer's output is the plain apply's
+        let ops = with_taps(plan_forward(&cfg, 45, true), &[44]).unwrap();
+        let i = ops.iter().position(|o| *o == Op::Tap { layer: 44 }).unwrap();
+        assert_eq!((ops[i - 1], ops[i + 1]), (Op::Apply, Op::HeadMean));
+        check_taps(&cfg, 45, true, &ops, &[44]).unwrap();
+    }
+
+    #[test]
+    fn a_misplaced_or_missing_tap_is_caught() {
+        let cfg = real();
+        let taps = crate::families::glm::dflash::TAP_LAYERS;
+        let good = with_taps(plan_forward(&cfg, 45, true), &taps).unwrap();
+        // a tap one op early: before the apply, it would read the layer's input plus its attention update only
+        let mut early = good.clone();
+        let i = early.iter().position(|o| *o == Op::Tap { layer: 14 }).unwrap();
+        early.swap(i - 1, i);
+        assert!(check_taps(&cfg, 45, true, &early, &taps).unwrap_err().contains("layer 14"));
+        // a tap of the wrong layer, a missing tap
+        let mut wrong = good.clone();
+        let i = wrong.iter().position(|o| *o == Op::Tap { layer: 24 }).unwrap();
+        wrong[i] = Op::Tap { layer: 23 };
+        assert!(check_taps(&cfg, 45, true, &wrong, &taps).is_err());
+        let missing: Vec<Op> = good.iter().copied().filter(|o| *o != Op::Tap { layer: 42 }).collect();
+        assert!(check_taps(&cfg, 45, true, &missing, &taps).unwrap_err().contains("expected"));
+        assert!(with_taps(plan_forward(&cfg, 45, true), &[14, 5]).is_err(), "unordered tap layers");
+        assert!(with_taps(plan_forward(&cfg, 10, true), &taps).is_err(), "a tap past the layers run");
     }
 
     #[test]

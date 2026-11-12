@@ -61,6 +61,17 @@ mod ffi {
             stream: *mut c_void,
         ) -> i32;
 
+        pub fn gb_fn_hc_tap(
+            streams: *const c_void,
+            out: *mut c_void,
+            hidden_size: u32,
+            hc_mult: u32,
+            ld: u32,
+            col: u32,
+            num_tokens: u32,
+            stream: *mut c_void,
+        ) -> i32;
+
         pub fn gb_fn_hc_post(
             block_out: *const c_void,
             residual: *const c_void,
@@ -114,6 +125,38 @@ pub fn hc_expand(
         };
         CudaError::check(rc)
     }
+}
+
+/// The DFlash2 tap of `num_tokens` rows: the mean of the `hc_mult` f32 streams `[t, hc, h]` (summed in stream order in fp32, times
+/// `1 / hc`, one bf16 rounding) into the `h`-wide column band at `col` of `out`, bf16 `[t, ld]`. The streams are only read.
+pub fn hc_tap(
+    streams: &DevBuf,
+    out: &mut DevBuf,
+    hidden_size: usize,
+    hc_mult: usize,
+    ld: usize,
+    col: usize,
+    num_tokens: usize,
+    stream: &Stream,
+) -> Result<(), CudaError> {
+    if hc_mult == 0 || col + hidden_size > ld {
+        return Err(CudaError(1));
+    }
+    need(streams, num_tokens * hc_mult * hidden_size * 4, "hc_tap streams")?;
+    need(out, num_tokens * ld * 2, "hc_tap out")?;
+    let rc = unsafe {
+        ffi::gb_fn_hc_tap(
+            streams.ptr(),
+            out.ptr(),
+            hidden_size as u32,
+            hc_mult as u32,
+            ld as u32,
+            col as u32,
+            num_tokens as u32,
+            stream.raw(),
+        )
+    };
+    CudaError::check(rc)
 }
 
 /// Scratch of the reference pre-mix: `normed` f32 `[t, hc * h]`, `low` f32 `[t, rank]`.

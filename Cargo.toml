@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/vision", "crates/sampling", "crates/exl3", "crates/spec", "crates/sched", "crates/engine", "crates/cuda", "crates/server", "crates/model", "crates/router", "crates/cluster"]
+members = ["crates/vision", "crates/sampling", "crates/exl3", "crates/spec", "crates/sched", "crates/engine", "crates/cuda", "crates/quant", "crates/server", "crates/model", "crates/router", "crates/cluster"]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.89"
-version = "0.1.0"
+version = "0.1.1"
 publish = false
 license = "AGPL-3.0-only"
 

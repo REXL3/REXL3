@@ -5,14 +5,21 @@
 //! GPU test (`tests/ling31_alloc.rs`) can check that the two agree byte for byte.
 
 use super::config::BailingConfig;
-use gb_cuda::exl3_linear::{linear_workspace_bytes, prefill_scratch_bytes};
-use gb_cuda::{fmoe, glm_glue, kda, mla_gated};
-
+use gb_cuda::exl3_linear::linear_workspace_bytes;
+use gb_cuda::{fmoe, kda, mla_gated};
 /// Rows of the widest decode/verify window (all sequences together).
 pub const WINDOW_ROWS: usize = 64;
-/// Default prefill chunk rows (the server default is 4096; this family's plan prices its chunked scratch).
-pub const DEFAULT_PREFILL_CHUNK: usize = 512;
-pub const MAX_PREFILL_CHUNK: usize = 512;
+/// The decode kernels' window plus its drafts, and therefore the rows kept in each KDA window record.
+pub const MAX_ROWS: usize = 128;
+/// Default prefill chunk rows: wide chunks amortize MoE weight reads and the tensor-core EXL3 prefill GEMMs. The ONE shared
+/// prefill KDA record (instead of one per KDA layer) is what makes them fit.
+pub const DEFAULT_PREFILL_CHUNK: usize = 4096;
+pub const MAX_PREFILL_CHUNK: usize = 4096;
+/// Smallest prefill chunk (a narrower one only multiplies host round-trips).
+pub const MIN_PREFILL_CHUNK: usize = 128;
+/// `kda::window_chunked`'s chunk grid (16-row parallel recurrence): prefill chunks snap to it so a prefix cut never splits
+/// a chunk, which is also the prefix cache's `cut_align`.
+pub const PREFILL_ALIGN: usize = 16;
 /// FrostMoE K chunks of the decode MoE at hidden 4096 (32 x 128 blocks; 8 and 16 are the valid counts, 8 stages 4 blocks/chunk).
 pub const MOE_KC: usize = 8;
 /// Top-k depth of the decode/verify head's candidates (the most a request may ask for).
@@ -21,9 +28,17 @@ pub const MAX_CANDIDATES: usize = 64;
 pub const LM_HEAD_BITS: usize = 6;
 /// Committed trunk hidden rows kept per slot for MTP drafting (a device ring per slot).
 pub const CAP_TAPS: usize = 8192;
+/// Rows of one `kda::Record` kept per KDA layer for decode/verify windows. A window runs at most `MAX_ROWS` rows (the
+/// verify window of `WINDOW_ROWS` plus its drafts, one per row): the commit replays accepted prefixes from these records,
+/// so each KDA layer must keep its own. Prefill uses the ONE shared prefill record instead.
+pub const KDA_WINDOW_RECORD_ROWS: usize = MAX_ROWS;
 
+/// The prefill chunk the family runs at, from the requested rows: clamped into `MIN..=MAX` and snapped down to the KDA
+/// chunk grid (`0` means the default).
 pub fn prefill_chunk_for(rows: usize) -> usize {
-    rows.clamp(128, MAX_PREFILL_CHUNK)
+    let rows = if rows == 0 { DEFAULT_PREFILL_CHUNK } else { rows };
+    let c = rows.clamp(MIN_PREFILL_CHUNK, MAX_PREFILL_CHUNK);
+    (c / PREFILL_ALIGN * PREFILL_ALIGN).max(MIN_PREFILL_CHUNK)
 }
 
 pub fn max_prefill_chunk() -> usize {
@@ -35,15 +50,15 @@ pub fn kda_dims(cfg: &BailingConfig) -> kda::Dims {
     kda::Dims { heads: cfg.kda.heads, hidden: cfg.hidden }
 }
 
-/// The 128-column strips of the trunk `lm_head` the restricted MTP draft head keeps: the first 512 strips (the tokenizer's merge order
-/// puts the frequent tokens first), the numeric block (ids 98,304..103,423: the numbers 0..999, which the first strips do not hold and
-/// the answers of math, code and tables are full of) and the last strip (the special tokens).
+/// The 128-column strips of the trunk `lm_head` the restricted MTP draft head keeps: frequent tokens, the numeric block and
+/// the final special-token strip.
 pub fn draft_head_strips(cfg: &BailingConfig) -> [(usize, usize); 3] {
     let strips_full = cfg.vocab / 128;
     [(0, 512), (768, 810), (strips_full - 1, strips_full)]
 }
 
-/// The EXL3 decode workspace a window forward needs: the largest of every linear the forward runs, at `rows` rows.
+/// The EXL3 decode workspace a window forward needs: the largest of every linear the forward runs, at `rows` rows,
+/// including the fused KDA f/g decode launch (which rotates the input twice, one buffer per projection's `suh`).
 pub fn exl3_workspace_bytes(cfg: &BailingConfig, rows: usize) -> usize {
     let h = cfg.hidden;
     let ch = cfg.kda.channels();
@@ -61,29 +76,28 @@ pub fn exl3_workspace_bytes(cfg: &BailingConfig, rows: usize) -> usize {
         (ffn.dense_intermediate, h, 4),
         (h, cfg.vocab, LM_HEAD_BITS),
     ];
-    shapes.into_iter().map(|(k, n, bits)| linear_workspace_bytes(rows, k, n, bits)).max().unwrap_or(0)
+    let lin = shapes.into_iter().map(|(k, n, bits)| linear_workspace_bytes(rows, k, n, bits)).max().unwrap_or(0);
+    // the fused KDA f/g pair and qkv+f+g triple rotate the input once per projection into their own buffers (three xf
+    // at most), and the fused MLA q_a/kv_a pair adds the two split-partial buffers of its split-K plan
+    let fused = gb_cuda::ling_kda_proj_fused::workspace_bytes(rows, h).max(gb_cuda::ling_kda_proj_fused::pair_workspace_bytes(
+        rows,
+        h,
+        m.q_lora_rank,
+        m.kv_a_group_n(),
+    ));
+    lin.max(fused)
 }
 
-/// The EXL3 pinned prefill workspace a prefill chunk of `rows` needs: the largest of every trunk linear the prefill forward runs (the
-/// KDA qkv/f/g/o, the MLA q_a/q_b/kv_a/dense, the dense MLP gate/up/down, and the L72 MTP layer's; the head stays on the decode
-/// kernels, whose workspace is [`exl3_workspace_bytes`]).
+/// The direct-to-MMA prefill workspace: the rotated fp16 input of the widest trunk linear. The head stays on the decode
+/// kernels, whose workspace is [`exl3_workspace_bytes`]. The LP4 reconstruct-once path's two additional buffers are priced
+/// separately in `AllocPlan::scratch_items`.
 pub fn exl3_prefill_workspace_bytes(cfg: &BailingConfig, rows: usize) -> usize {
     let h = cfg.hidden;
     let ch = cfg.kda.channels();
     let m = &cfg.mla;
     let ffn = &cfg.ffn;
-    let shapes: [(usize, usize); 9] = [
-        (h, 3 * ch),
-        (h, ch),
-        (ch, h),
-        (h, m.q_lora_rank),
-        (m.q_lora_rank, m.heads * m.qk_head_dim()),
-        (h, m.kv_a_group_n()),
-        (m.heads * m.v_head_dim, h),
-        (h, ffn.dense_intermediate),
-        (ffn.dense_intermediate, h),
-    ];
-    shapes.into_iter().map(|(k, n)| prefill_scratch_bytes(rows, k, n)).max().unwrap_or(0)
+    let ks = [h, ch, m.q_lora_rank, m.heads * m.v_head_dim, ffn.dense_intermediate];
+    ks.into_iter().map(|k| gb_cuda::glm_p2::workspace_bytes(rows, k)).max().unwrap_or(0)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,13 +142,13 @@ impl AllocPlan {
         }
     }
 
-    /// Every item multiplied out for `p`: per slot times the slots, per page times the pages, per window row times
-    /// [`WINDOW_ROWS`], the rest once. The names are unique.
+    /// Every item multiplied out for `p`: per slot times the slots, per page times the pages, per KDA record row times
+    /// [`KDA_WINDOW_RECORD_ROWS`], the rest once. The names are unique.
     pub fn totals(&self, p: &AllocParams) -> Vec<(&'static str, u64)> {
         let times = |v: &[Item], n: usize| v.iter().map(move |i| (i.name, i.bytes * n as u64)).collect::<Vec<_>>();
         let mut out = times(&self.per_slot, p.slots);
         out.extend(times(&self.per_page, p.kv_blocks));
-        out.extend(times(&self.per_window_row, WINDOW_ROWS));
+        out.extend(times(&self.per_window_row, KDA_WINDOW_RECORD_ROWS));
         out.extend(times(&self.scratch, 1));
         out.extend(times(&self.post_alloc, 1));
         out
@@ -144,28 +158,48 @@ impl AllocPlan {
         self.totals(p).iter().map(|(_, b)| b).sum()
     }
 
-    /// One slot's state: the 63 KDA pools (two fp32 state buffers, the conv history of three raw qkv rows and the parity word each,
-    /// `kda::Dims::slot_bytes`).
+    /// One slot's state: every KDA layer's two fp32 state buffers, three raw qkv rows of conv history and parity word.
     pub fn slot_items(cfg: &BailingConfig) -> Vec<Item> {
         let kda = cfg.kda_layers().len() as u64;
         vec![Item { name: "kda_pools", bytes: kda * kda_dims(cfg).slot_bytes() as u64 }]
     }
 
-    /// One KV page of the MLA latent caches: the 9 trunk layers', plus the MTP layer's when it drafts (256 tokens of 576 bf16 each).
+    /// One KV page of the MLA latent caches: the trunk layers', plus the MTP layer's when it drafts.
     pub fn page_items(cfg: &BailingConfig, mtp: bool) -> Vec<Item> {
         let caches = cfg.mla_layers().len() as u64 + u64::from(mtp);
         let block = mla_gated::MlaGatedCache::block_bytes(gb_cuda::exl3_linear::Dtype::BF16) as u64;
         vec![Item { name: "mla_cache", bytes: caches * block }]
     }
 
-    /// One row of a decode/verify window: every KDA layer's record (the raw bf16 qkv row, the fp32 decay and beta).
+    /// One physical row of every KDA layer's decode/verify record. The records have `KDA_WINDOW_RECORD_ROWS` rows each.
     pub fn window_row_items(cfg: &BailingConfig) -> Vec<Item> {
         let kda = cfg.kda_layers().len() as u64;
         vec![Item { name: "kda_window_records", bytes: kda * kda_dims(cfg).record_bytes_per_row() as u64 }]
     }
 
-    /// Every activation and workspace buffer of a forward, sized for a prefill chunk of `chunk` rows (decode/verify windows take at
-    /// most [`WINDOW_ROWS`] and reuse them; the few window-only buffers are sized for a window).
+    /// The EXL3 decode workspace, exposed here for the runtime and its sizing test to share exactly the same shapes.
+    pub fn exl3_ws_bytes(cfg: &BailingConfig, rows: usize) -> usize {
+        exl3_workspace_bytes(cfg, rows)
+    }
+
+    /// The direct-to-MMA prefill workspace, likewise shared with the runtime allocation.
+    pub fn prefill_ws_bytes(cfg: &BailingConfig, rows: usize) -> usize {
+        exl3_prefill_workspace_bytes(cfg, rows)
+    }
+
+    /// The KDA allocation total used by the runtime sizing unit test: all window records, one shared prefill record and one workspace.
+    pub fn kda_items(cfg: &BailingConfig, chunk: usize) -> Vec<Item> {
+        let layers = cfg.kda_layers().len() as u64;
+        let per_row = kda_dims(cfg).record_bytes_per_row() as u64;
+        vec![
+            Item { name: "kda_window_recs", bytes: layers * KDA_WINDOW_RECORD_ROWS as u64 * per_row },
+            Item { name: "kda_prefill_rec", bytes: chunk as u64 * per_row },
+            Item { name: "kda_ws", bytes: chunk as u64 * kda_workspace_bytes_per_row(cfg) as u64 },
+        ]
+    }
+
+    /// Every activation and workspace buffer of a forward, sized for a prefill chunk of `chunk` rows, plus the shared
+    /// prefill KDA record and workspace. Decode/verify records are separate `per_window_row` items, not double-counted here.
     pub fn scratch_items(cfg: &BailingConfig, chunk: usize) -> Vec<Item> {
         let r = chunk as u64;
         let rw = WINDOW_ROWS as u64;
@@ -179,21 +213,14 @@ impl AllocPlan {
         let d = kda_dims(cfg);
         let sc = |name, bytes: u64| Item { name, bytes };
         vec![
-            // the shared prefill record (a prefill chunk commits each KDA layer as soon as it ran, so one record serves them all) and
-            // the KDA workspace
             sc("kda_prefill_record", r * d.record_bytes_per_row() as u64),
             sc("kda_workspace", r * kda::Workspace::bytes_per_row(d) as u64),
-            // ids, row slots and positions, sequence starts [rows + 1] and slots, the commit's keep counts: i32 each
             sc("row_arrays", r * 4 * 3 + (r + 1) * 4 + r * 4 * 2),
-            // hidden, the normed layer input and the final-normed rows, bf16 [rows, hidden] each
             sc("hidden", 3 * r * h * 2),
-            // the KDA qkv projection: bf16 [rows, 3 * channels] from a prefill chunk, f32 from a window
-            sc("kda_qkv", (r * 3 * ch * 2).max(rw * 3 * ch * 4)),
-            // the KDA f/g projections, f16 [rows, channels] each
+            // the KDA qkv projection: bf16 [rows, 3 * channels] from a P2 prefill chunk, f32 from a window and from a
+            // P1 prefill chunk (the row-invariant decode path), so the f32 branch is chunk-sized, not window-sized
+            sc("kda_qkv", (r * 3 * ch * 2).max(r * 3 * ch * 4)),
             sc("kda_fg", 2 * r * ch * 2),
-            // the MLA q_a [rows, q_lora_rank], q [rows, heads * qk_head_dim], kv [rows, kv_a_group_n], absorbed q and o latents
-            // [rows, heads, kv_lora_rank], rotated q rope [rows, heads, rope], the attention and gated outputs [rows, heads * v_head_dim]
-            // (the gated buffer also holds the KDA norm output [rows, channels]), 16-bit each
             sc(
                 "mla_acts",
                 r * 2
@@ -205,32 +232,32 @@ impl AllocPlan {
                         + heads * m.v_head_dim as u64
                         + (heads * m.v_head_dim as u64).max(ch)),
             ),
-            // the dense MLP's gate, up and SwiGLU outputs, bf16 [rows, intermediate] each (the mixers' and the down projection's
-            // outputs [rows, hidden] reuse them)
+            // The dense MLP's gate, up and SwiGLU outputs, bf16 [rows, intermediate] each.
             sc("dense_mlp", 3 * r * (ffn.dense_intermediate as u64).max(h) * 2),
-            // router logits bf16 [rows, experts], the shared expert's constant gate bf16 [rows], the MoE output bf16 [rows, hidden]
-            sc("moe_acts", r * e as u64 * 2 + r * 2 + r * h * 2),
+            // Ling's router is fp32; the shared gate and MoE output are bf16.
+            sc("moe_acts", r * e as u64 * 4 + r * 2 + r * h * 2),
             sc("moe_window_workspace", fmoe::workspace_bytes(WINDOW_ROWS, topk, cfg.hidden, ffn.moe_intermediate, MOE_KC) as u64),
             sc("moe_prefill_workspace", fmoe::prefill_workspace_bytes(chunk, topk, e, cfg.hidden, ffn.moe_intermediate) as u64),
-            // the head runs on windows and single rows only: f16 logits [window, vocab] and the top-k ids, values and workspace
             sc("logits", rw * cfg.vocab as u64 * 2),
             sc(
                 "topk",
                 rw * MAX_CANDIDATES as u64 * 4 * 2
-                    + glm_glue::topk_workspace_bytes(WINDOW_ROWS, cfg.vocab, MAX_CANDIDATES) as u64,
+                    + gb_cuda::ling_kda_proj_fused::topk_workspace_bytes(WINDOW_ROWS, cfg.vocab, MAX_CANDIDATES) as u64,
             ),
             sc("exl3_workspace", exl3_workspace_bytes(cfg, WINDOW_ROWS) as u64),
+            // the next sub-layer's fused input rotations (three f16 [rows, hidden] buffers at the decode window size)
+            // plus a fixed 1024-byte tail of self-resetting per-block counters (the fused dense gate/up epilogue's
+            // per-128-column-col silu-rotation counters and the P2 prefill fused chunk kernel's per-head counters)
+            sc("prerot_workspace", 3 * rw * h * 2 + 1024),
             sc("exl3_prefill_workspace", exl3_prefill_workspace_bytes(cfg, chunk) as u64),
-            // the MTP layer's token embeddings bf16 [rows, hidden] and its two single-row registers (head input, chain input)
+            // the split-key decode attention's fp32 partials: fixed size, whatever the rows, the context or the chunk
+            sc("mla_split_workspace", gb_cuda::ling_mla_attn::SPLIT_WS_BYTES as u64),
+            // e_next and the two single-row registers.
             sc("mtp_acts", r * h * 2 + 2 * h * 2),
         ]
     }
 
-    /// What the backend allocates after the plan that the memory profile does not count: the bf16 embedding table when it is copied to
-    /// the device (nothing when the kernels read it in place from its shard), the MTP tap rings and the restricted draft head (its strips
-    /// of the trunk head, its logits and decode workspace), the RoPE tables and the block table (sized by the KV pool's `kv_blocks`
-    /// pages), the KDA low-rank stand-ins the gate kernel never reads, and the experts' pointer tables (every MoE layer's, the MTP
-    /// layer's included: `BailingDevice::build` builds them whenever the pack has the layer).
+    /// What the backend allocates after the plan that the memory profile does not count.
     pub fn post_alloc_items(cfg: &BailingConfig, slots: usize, kv_blocks: usize, mtp: bool, embed_in_place: bool) -> Vec<Item> {
         let h = cfg.hidden as u64;
         let ch = cfg.kda.channels() as u64;
@@ -243,19 +270,22 @@ impl AllocPlan {
             sc("rope_tables", tokens * (mla_gated::ROPE_DIM / 2) as u64 * 4 * 2),
             sc("block_table", ((slots.max(1) * kv_blocks.max(1)) as u64 * 4).max(4)),
             sc("kda_dummies", 2 * 128 * h * 2 + 2 * ch * 128 * 2),
-            // 9 tables of a u64 pointer per expert (the shared one last) and the K2 table [experts + 1][3] i32, per MoE layer
             sc("expert_tables", moe_layers * (9 * nex * 8 + nex * 3 * 4)),
         ];
         if mtp {
             let strips: u64 = draft_head_strips(cfg).iter().map(|&(lo, hi)| (hi - lo) as u64).sum();
             let cols = strips * 128;
-            // `Exl3Weights::select_strips`: the kept strips' trellis, the whole input rotation and the kept output rotation, fp16
             let head = (h / 16) * strips * 64 * LM_HEAD_BITS as u64 * 4 + h * 2 + cols * 2;
             let ws = linear_workspace_bytes(1, cfg.hidden, cols as usize, LM_HEAD_BITS) as u64;
             v.extend([sc("mtp_tap_rings", slots as u64 * CAP_TAPS as u64 * h * 2), sc("mtp_draft_head", head + cols * 2 + ws)]);
         }
         v
     }
+}
+
+/// Bytes of one `kda::Workspace` row (`Workspace::bytes_per_row`: q/k/z f32, v/y f16, fa/ga f32 at the low-rank width).
+pub fn kda_workspace_bytes_per_row(cfg: &BailingConfig) -> usize {
+    kda::Workspace::bytes_per_row(kda_dims(cfg))
 }
 
 #[cfg(test)]
@@ -271,38 +301,74 @@ mod tests {
     #[test]
     fn slot_bytes_match_the_kda_pools() {
         let cfg = real();
-        let items = AllocPlan::slot_items(&cfg);
-        let sum: u64 = items.iter().map(|i| i.bytes).sum();
-        // per KDA layer: two f32 state buffers (64 heads x 128 x 128), the conv history (3 raw rows of q|k|v, bf16) and the parity word
+        let sum: u64 = AllocPlan::slot_items(&cfg).iter().map(|i| i.bytes).sum();
         let layer = 2 * 64 * 128 * 128 * 4 + 3 * 3 * 64 * 128 * 2 + 4;
         assert_eq!(layer, 8_536_068);
         assert_eq!(sum, 63 * layer);
         assert_eq!(sum, 537_772_284);
-        // ~513 MiB of KDA state per slot
-        assert_eq!(sum >> 20, 512);
+    }
+
+    #[test]
+    fn the_prefill_chunk_clamps_and_snaps_to_the_kda_grid() {
+        assert_eq!(prefill_chunk_for(4096), 4096);
+        assert_eq!(prefill_chunk_for(2048), 2048);
+        assert_eq!(prefill_chunk_for(0), DEFAULT_PREFILL_CHUNK);
+        assert_eq!(prefill_chunk_for(1), MIN_PREFILL_CHUNK);
+        assert_eq!(prefill_chunk_for(2063), 2048);
+        assert_eq!(prefill_chunk_for(1040), 1040);
+        assert_eq!(prefill_chunk_for(1033), 1024);
+        assert_eq!(prefill_chunk_for(usize::MAX), MAX_PREFILL_CHUNK);
+        for r in [128, 129, 511, 512, 2047, 2048, 4096, 8192] {
+            assert_eq!(prefill_chunk_for(r) % PREFILL_ALIGN, 0, "{r}");
+        }
     }
 
     #[test]
     fn a_window_row_is_every_kda_layers_record() {
         let cfg = real();
         let row: u64 = AllocPlan::window_row_items(&cfg).iter().map(|i| i.bytes).sum();
-        // the raw bf16 q|k|v row, the fp32 decay per key channel and the fp32 beta per head
         assert_eq!(row, 63 * (3 * 8192 * 2 + 8192 * 4 + 64 * 4));
-        assert_eq!(row * WINDOW_ROWS as u64 >> 20, 315, "the 64-row window records: 316 MiB");
+        assert_eq!(row * KDA_WINDOW_RECORD_ROWS as u64 >> 20, 631);
     }
 
     #[test]
-    fn the_prefill_record_is_one_record_of_the_chunk() {
+    fn the_shared_prefill_record_replaces_63_of_them() {
+        let cfg = real();
+        let per_row = cfg.kda_record_bytes_per_row_per_layer();
+        let old = 63 * 512 * per_row;
+        let items = AllocPlan::kda_items(&cfg, 2048);
+        assert_eq!(items.iter().find(|i| i.name == "kda_window_recs").unwrap().bytes, 63 * 128 * per_row);
+        assert_eq!(items.iter().find(|i| i.name == "kda_prefill_rec").unwrap().bytes, 2048 * per_row);
+        let saved = old - (63 * 128 + 2048) * per_row;
+        assert!(saved > 1 << 30, "the record change reclaims {saved} bytes");
+        assert_eq!(items.iter().find(|i| i.name == "kda_ws").unwrap().bytes, 2048 * kda_workspace_bytes_per_row(&cfg) as u64);
+    }
+
+    #[test]
+    fn the_prefill_scratch_matches_the_optimized_runtime_layout() {
         let cfg = real();
         let get = |v: &[Item], n: &str| v.iter().find(|i| i.name == n).unwrap().bytes;
         let s = AllocPlan::scratch_items(&cfg, 512);
         let per_layer_row = AllocPlan::window_row_items(&cfg)[0].bytes / 63;
-        assert_eq!(get(&s, "kda_prefill_record"), 512 * per_layer_row, "one record of 512 rows, not one per layer");
-        // the qkv buffer holds a chunk's bf16 projection or a window's f32 one, whichever is larger
-        assert_eq!(get(&s, "kda_qkv"), 512 * 3 * 8192 * 2);
-        assert_eq!(get(&AllocPlan::scratch_items(&cfg, 128), "kda_qkv"), 64 * 3 * 8192 * 4);
-        // the dense MLP's three buffers hold bf16 rows of the 10,240-wide intermediate
+        assert_eq!(get(&s, "kda_prefill_record"), 512 * per_layer_row);
+        assert_eq!(get(&s, "kda_qkv"), 512 * 3 * 8192 * 4);
+        assert_eq!(get(&AllocPlan::scratch_items(&cfg, 128), "kda_qkv"), 128 * 3 * 8192 * 4);
         assert_eq!(get(&s, "dense_mlp"), 3 * 512 * 10_240 * 2);
+        assert!(s.iter().find(|i| i.name == "recon_scratch").is_none());
+    }
+
+    #[test]
+    fn scratch_is_bounded() {
+        let cfg = real();
+        let sum: u64 = AllocPlan::scratch_items(&cfg, 2048).iter().map(|i| i.bytes).sum();
+        assert!(sum < 4 << 30, "scratch {} MiB", sum >> 20);
+    }
+
+    #[test]
+    fn the_workspace_sizing_fns_match_the_forward_sites() {
+        let cfg = real();
+        assert_eq!(AllocPlan::exl3_ws_bytes(&cfg, 64), crate::families::bailing_moe_v3::model::exl3_ws_bytes(&cfg, 64));
+        assert_eq!(AllocPlan::prefill_ws_bytes(&cfg, 2048), crate::families::bailing_moe_v3::model::prefill_ws_bytes(&cfg, 2048));
     }
 
     #[test]
@@ -312,13 +378,10 @@ mod tests {
         let v = AllocPlan::post_alloc_items(&cfg, 1, 129, true, true);
         assert_eq!(get(&v, "embedding_table"), Some(0));
         assert_eq!(get(&AllocPlan::post_alloc_items(&cfg, 1, 129, true, false), "embedding_table"), Some(157_184 * 4096 * 2));
-        // 129 pages of 256 positions, 32 cos and 32 sin f32 each
         assert_eq!(get(&v, "rope_tables"), Some(129 * 256 * 32 * 4 * 2));
         assert_eq!(get(&v, "block_table"), Some(129 * 4));
         assert_eq!(get(&v, "mtp_tap_rings"), Some(8192 * 4096 * 2));
-        // 68 MoE layers and the MTP layer, 513 entries each
         assert_eq!(get(&v, "expert_tables"), Some(69 * (9 * 513 * 8 + 513 * 12)));
-        // the draft head keeps 555 of the 1,228 strips at 6 bits: 256 k-tiles x 555 strips x 64 x 6 x 4 bytes of trellis
         assert_eq!(draft_head_strips(&cfg).iter().map(|&(lo, hi)| hi - lo).sum::<usize>(), 555);
         let head = get(&v, "mtp_draft_head").unwrap();
         assert!(head >= 256 * 555 * 64 * 6 * 4, "{head}");

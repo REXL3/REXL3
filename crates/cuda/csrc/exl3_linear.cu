@@ -245,10 +245,12 @@ __global__ void __launch_bounds__(WK * 32, 1) linear_kernel(
     const uint32_t* tiles = T + nb * stride_nb;
     const int col0 = nb * 128;
     bool prev = false;
+    // The lane's word index and bit offset are loop-invariant: `lane_start` depends only on `lane` and the compile-time
+    // K2, so computing them once per block (instead of per k tile, 160-320 iterations) removes redundant integer work.
+    int lane_word = 0, lane_offset = 0;
+    lane_start<K2>(lane, lane_word, lane_offset);
     if constexpr (step_shuffled<K2>()) {
-        int word, offset;
-        lane_start<K2>(lane, word, offset);
-        prev = word != lane / (8 / K2);
+        prev = lane_word != lane / (8 / K2);
     }
 
     for (int m0 = 0; m0 < M; m0 += 16 * NT) {
@@ -321,9 +323,9 @@ __global__ void __launch_bounds__(WK * 32, 1) linear_kernel(
                 for (int j = 0; j < JN; ++j) {
                     uint32_t w[LW];
                     if constexpr (PF) step_lane_words<K2, JN>(cur, j, lane, prev, w);
-                    else ldg_lane_words<K2>(tile + (size_t)i * stride_k + j * TW, lane, w);
+                    else ldg_lane_words_at<K2>(tile + (size_t)i * stride_k + j * TW, lane_word, w);
                     uint32_t b0[2], b1[2];
-                    decode_lane<K2, CB>(w, lane, b0, b1);
+                    decode_lane_at<K2, CB>(w, lane_offset, b0, b1);
 #pragma unroll
                     for (int p = 0; p < NT; ++p) {
                         mma16816(acc[p][j][0], a[p], b0);

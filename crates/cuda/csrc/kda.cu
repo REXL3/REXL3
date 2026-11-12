@@ -88,9 +88,8 @@ __device__ __forceinline__ float round_bf16(float x) { return __bfloat162float(_
 __device__ __forceinline__ float sigmoid_ieee(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 __device__ __forceinline__ void load4_bf16(const __nv_bfloat16* p, float (&x)[4]) {
-    const uint2 w = *reinterpret_cast<const uint2*>(p);
-    const __nv_bfloat162 a = *reinterpret_cast<const __nv_bfloat162*>(&w.x);
-    const __nv_bfloat162 b = *reinterpret_cast<const __nv_bfloat162*>(&w.y);
+    const __nv_bfloat162* p2 = reinterpret_cast<const __nv_bfloat162*>(p);
+    const __nv_bfloat162 a = __ldg(p2), b = __ldg(p2 + 1);
     x[0] = __low2float(a);
     x[1] = __high2float(a);
     x[2] = __low2float(b);
@@ -102,7 +101,7 @@ __device__ __forceinline__ void load4_bf16(const __nv_bfloat16* p, float (&x)[4]
 template <bool FROM_F32>
 __device__ __forceinline__ void load_raw4(const void* base, size_t idx, float (&x)[4]) {
     if (FROM_F32) {
-        const float4 t = *reinterpret_cast<const float4*>(reinterpret_cast<const float*>(base) + idx);
+        const float4 t = __ldg(reinterpret_cast<const float4*>(reinterpret_cast<const float*>(base) + idx));
         x[0] = round_bf16(t.x);
         x[1] = round_bf16(t.y);
         x[2] = round_bf16(t.z);
@@ -318,26 +317,31 @@ __global__ void __launch_bounds__(D) proj_out_kernel(
 constexpr int BG_NT = 256;
 constexpr int BG_RT = 8;
 
-template <int XT>
+template <int XT, int NH>
 __global__ void __launch_bounds__(BG_NT) beta_from_b_kernel(const void* x, const __nv_bfloat16* w_b, int rows,
                                                             int hidden, int heads, float* beta) {
-    __shared__ float sm[BG_RT][BG_NT / 32];
-    const int h = blockIdx.x;
+    __shared__ float sm[NH][BG_RT][BG_NT / 32];
+    const int h0 = blockIdx.x * NH;
     const int r0 = blockIdx.y * BG_RT;
     const int nvec = hidden / 8;
-    const __nv_bfloat16* wrow = w_b + (size_t)h * hidden;
-    float acc[BG_RT];
+    const __nv_bfloat16* wrow = w_b + (size_t)h0 * hidden;
+    float acc[NH][BG_RT];
 #pragma unroll
-    for (int r = 0; r < BG_RT; ++r) acc[r] = 0.0f;
+    for (int hh = 0; hh < NH; ++hh)
+#pragma unroll
+        for (int r = 0; r < BG_RT; ++r) acc[hh][r] = 0.0f;
     for (int v = threadIdx.x; v < nvec; v += BG_NT) {
-        const uint4 wu = __ldg(reinterpret_cast<const uint4*>(wrow) + v);
-        const __nv_bfloat162* b2 = reinterpret_cast<const __nv_bfloat162*>(&wu);
-        float wf[8];
+        float wf[NH][8];
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            const float2 t = __bfloat1622float2(b2[i]);
-            wf[2 * i] = t.x;
-            wf[2 * i + 1] = t.y;
+        for (int hh = 0; hh < NH; ++hh) {
+            const uint4 wu = __ldg(reinterpret_cast<const uint4*>(wrow + (size_t)hh * hidden) + v);
+            const __nv_bfloat162* b2 = reinterpret_cast<const __nv_bfloat162*>(&wu);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 t = __bfloat1622float2(b2[i]);
+                wf[hh][2 * i] = t.x;
+                wf[hh][2 * i + 1] = t.y;
+            }
         }
 #pragma unroll
         for (int r = 0; r < BG_RT; ++r) {
@@ -345,45 +349,68 @@ __global__ void __launch_bounds__(BG_NT) beta_from_b_kernel(const void* x, const
                 float xf[8];
                 load_x8<XT>(x, (size_t)(r0 + r) * nvec + v, xf);
 #pragma unroll
-                for (int i = 0; i < 8; ++i) acc[r] = __fmaf_rn(xf[i], wf[i], acc[r]);
+                for (int hh = 0; hh < NH; ++hh)
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) acc[hh][r] = __fmaf_rn(xf[i], wf[hh][i], acc[hh][r]);
             }
         }
     }
     const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
-    {
+#pragma unroll
+    for (int hh = 0; hh < NH; ++hh) {
         constexpr int N = BG_RT;
         float flat[N];
 #pragma unroll
-        for (int r = 0; r < N; ++r) flat[r] = acc[r];
+        for (int r = 0; r < N; ++r) flat[r] = acc[hh][r];
         const float part = halve_reduce<N>(flat, lane);
         const int idx = owned_index<N>(lane);
-        if ((lane & ((1 << (5 - log2c<N>())) - 1)) == 0) sm[idx % BG_RT][wid] = part;
+        if ((lane & ((1 << (5 - log2c<N>())) - 1)) == 0) sm[hh][idx % BG_RT][wid] = part;
     }
     __syncthreads();
-    if (threadIdx.x < BG_RT) {
-        const int rr = threadIdx.x;
+    if (threadIdx.x < NH * BG_RT) {
+        const int hh = threadIdx.x / BG_RT, rr = threadIdx.x % BG_RT;
         if (r0 + rr < rows) {
-            float s = sm[rr][0];
-            for (int wv = 1; wv < BG_NT / 32; ++wv) s = s + sm[rr][wv];
-            beta[(size_t)(r0 + rr) * heads + h] = round_bf16(sigmoid_ieee(s));
+            float s = sm[hh][rr][0];
+            for (int wv = 1; wv < BG_NT / 32; ++wv) s = s + sm[hh][rr][wv];
+            beta[(size_t)(r0 + rr) * heads + h0 + hh] = round_bf16(sigmoid_ieee(s));
         }
     }
 }
 
+template <int RT>
 __global__ void __launch_bounds__(256) full_fg_gate_kernel(const half* f, const half* g, const float* a_log,
                                                            const float* dt_bias, float lower, int rows, int heads,
                                                            float* g_decay, float* z) {
     const int C = heads * 128;
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int r = blockIdx.y;
+    const int idx = (blockIdx.x * 256 + threadIdx.x) * 4;
     if (idx >= C) return;
-    const int h = idx >> 7;
-    const size_t off = (size_t)r * C + idx;
-    const float fv = __half2float(f[off]);
-    const float zv = __half2float(g[off]);
-    const float decay = expf(a_log[h]);
-    g_decay[off] = expf(lower * sigmoid_ieee(decay * (fv + dt_bias[idx])));
-    z[off] = zv;
+    const int r0 = blockIdx.y * RT;
+    const float decay = expf(__ldg(a_log + (idx >> 7)));
+    const float4 dtb = __ldg(reinterpret_cast<const float4*>(dt_bias + idx));
+#pragma unroll
+    for (int rr = 0; rr < RT; ++rr) {
+        const int r = r0 + rr;
+        if (r < rows) {
+            const size_t off = (size_t)r * C + idx;
+            const uint2 uf = __ldg(reinterpret_cast<const uint2*>(f + off));
+            const uint2 ug = __ldg(reinterpret_cast<const uint2*>(g + off));
+            const half2* hf = reinterpret_cast<const half2*>(&uf);
+            const half2* hg = reinterpret_cast<const half2*>(&ug);
+            const float2 fa = __half22float2(hf[0]);
+            const float2 fb = __half22float2(hf[1]);
+            const float2 za = __half22float2(hg[0]);
+            const float2 zb = __half22float2(hg[1]);
+            const float4 fv = make_float4(fa.x, fa.y, fb.x, fb.y);
+            const float4 zv = make_float4(za.x, za.y, zb.x, zb.y);
+            const float4 d = make_float4(
+                expf(lower * sigmoid_ieee(decay * (fv.x + dtb.x))),
+                expf(lower * sigmoid_ieee(decay * (fv.y + dtb.y))),
+                expf(lower * sigmoid_ieee(decay * (fv.z + dtb.z))),
+                expf(lower * sigmoid_ieee(decay * (fv.w + dtb.w))));
+            *reinterpret_cast<float4*>(g_decay + off) = d;
+            *reinterpret_cast<float4*>(z + off) = zv;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -411,20 +438,19 @@ __global__ void __launch_bounds__(128) prep_kernel(
     const int ch0 = unit * D + lane * 4;
 
     // 4 channels x 4 taps of the conv weight (tap j multiplies x[t-3+j])
-    const uint4 w0 = __ldg(reinterpret_cast<const uint4*>(conv_w + (size_t)ch0 * 4));
-    const uint4 w1 = __ldg(reinterpret_cast<const uint4*>(conv_w + (size_t)ch0 * 4) + 1);
+    const __nv_bfloat162* w02 = reinterpret_cast<const __nv_bfloat162*>(conv_w + (size_t)ch0 * 4);
+    const __nv_bfloat162 wa0 = __ldg(w02), wa1 = __ldg(w02 + 1), wa2 = __ldg(w02 + 2), wa3 = __ldg(w02 + 3);
+    const __nv_bfloat162* w12 = w02 + 4;
+    const __nv_bfloat162 wb0 = __ldg(w12), wb1 = __ldg(w12 + 1), wb2 = __ldg(w12 + 2), wb3 = __ldg(w12 + 3);
     float wt[16];
-    {
-        const __nv_bfloat162* a = reinterpret_cast<const __nv_bfloat162*>(&w0);
-        const __nv_bfloat162* b = reinterpret_cast<const __nv_bfloat162*>(&w1);
-#pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            wt[2 * i] = __low2float(a[i]);
-            wt[2 * i + 1] = __high2float(a[i]);
-            wt[8 + 2 * i] = __low2float(b[i]);
-            wt[8 + 2 * i + 1] = __high2float(b[i]);
-        }
-    }
+    wt[0] = __low2float(wa0); wt[1] = __high2float(wa0);
+    wt[2] = __low2float(wa1); wt[3] = __high2float(wa1);
+    wt[4] = __low2float(wa2); wt[5] = __high2float(wa2);
+    wt[6] = __low2float(wa3); wt[7] = __high2float(wa3);
+    wt[8] = __low2float(wb0); wt[9] = __high2float(wb0);
+    wt[10] = __low2float(wb1); wt[11] = __high2float(wb1);
+    wt[12] = __low2float(wb2); wt[13] = __high2float(wb2);
+    wt[14] = __low2float(wb3); wt[15] = __high2float(wb3);
     int seq = 0, start = 0, send = 0, n_lim = 0;
     size_t pool = 0;
     bool have = false;
@@ -457,10 +483,8 @@ __global__ void __launch_bounds__(128) prep_kernel(
         load_raw4<FROM_F32>(qkv, (size_t)row * conv_dim + ch0, x0);
         if (raw_out) {  // this row's own raw value goes to the record
             const __nv_bfloat162 a = __floats2bfloat162_rn(x0[0], x0[1]), b = __floats2bfloat162_rn(x0[2], x0[3]);
-            uint2 u;
-            u.x = *reinterpret_cast<const unsigned*>(&a);
-            u.y = *reinterpret_cast<const unsigned*>(&b);
-            *reinterpret_cast<uint2*>(raw_out + (size_t)row * conv_dim + ch0) = u;
+            *reinterpret_cast<__nv_bfloat162*>(raw_out + (size_t)row * conv_dim + ch0) = a;
+            *(reinterpret_cast<__nv_bfloat162*>(raw_out + (size_t)row * conv_dim + ch0) + 1) = b;
         }
         float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
@@ -494,10 +518,8 @@ __global__ void __launch_bounds__(128) prep_kernel(
         } else {
             const int hv = unit - 2 * heads;
             const __nv_bfloat162 a = __floats2bfloat162_rn(c[0], c[1]), b = __floats2bfloat162_rn(c[2], c[3]);
-            uint2 u;
-            u.x = *reinterpret_cast<const unsigned*>(&a);
-            u.y = *reinterpret_cast<const unsigned*>(&b);
-            *reinterpret_cast<uint2*>(v + ((size_t)row * heads + hv) * D + lane * 4) = u;
+            *reinterpret_cast<__nv_bfloat162*>(v + ((size_t)row * heads + hv) * D + lane * 4) = a;
+            *(reinterpret_cast<__nv_bfloat162*>(v + ((size_t)row * heads + hv) * D + lane * 4) + 1) = b;
         }
     }
 }
@@ -569,15 +591,16 @@ template <int R>
 struct RowIn {
     float q[4], k[4], g[4], v, beta;
 
-    __device__ __forceinline__ void load(const float* qp, const float* kp, const __nv_bfloat16* vp, const float* gp,
-                                         const float* bp, int row, int head, int heads, int value0, int lane) {
+    __device__ __forceinline__ void load(const float* __restrict__ qp, const float* __restrict__ kp,
+                                         const __nv_bfloat16* __restrict__ vp, const float* __restrict__ gp,
+                                         const float* __restrict__ bp, int row, int head, int heads, int value0, int lane) {
         const size_t key = ((size_t)row * heads + head) * D + lane * 4;
-        const float4 kk = *reinterpret_cast<const float4*>(kp + key);
-        const float4 gg = *reinterpret_cast<const float4*>(gp + key);
+        const float4 kk = __ldg(reinterpret_cast<const float4*>(kp + key));
+        const float4 gg = __ldg(reinterpret_cast<const float4*>(gp + key));
         k[0] = kk.x; k[1] = kk.y; k[2] = kk.z; k[3] = kk.w;
         g[0] = gg.x; g[1] = gg.y; g[2] = gg.z; g[3] = gg.w;
         if (qp) {
-            const float4 qq = *reinterpret_cast<const float4*>(qp + key);
+            const float4 qq = __ldg(reinterpret_cast<const float4*>(qp + key));
             q[0] = qq.x; q[1] = qq.y; q[2] = qq.z; q[3] = qq.w;
         }
         v = __bfloat162float(vp[((size_t)row * heads + head) * D + value0 + row_of_lane<R>(lane)]);
@@ -588,16 +611,16 @@ struct RowIn {
 constexpr int W_STEP = 4;  // warps per block
 
 template <int R>
-__device__ __forceinline__ void load_state(float (&s)[R][4], const float* base, int value0, int lane) {
+__device__ __forceinline__ void load_state(float (&s)[R][4], const float* __restrict__ base, int value0, int lane) {
 #pragma unroll
     for (int r = 0; r < R; ++r) {
-        const float4 t = *reinterpret_cast<const float4*>(base + (size_t)(value0 + r) * D + lane * 4);
+        const float4 t = __ldg(reinterpret_cast<const float4*>(base + (size_t)(value0 + r) * D + lane * 4));
         s[r][0] = t.x; s[r][1] = t.y; s[r][2] = t.z; s[r][3] = t.w;
     }
 }
 
 template <int R>
-__device__ __forceinline__ void store_state(float* base, const float (&s)[R][4], int value0, int lane) {
+__device__ __forceinline__ void store_state(float* __restrict__ base, const float (&s)[R][4], int value0, int lane) {
 #pragma unroll
     for (int r = 0; r < R; ++r)
         *reinterpret_cast<float4*>(base + (size_t)(value0 + r) * D + lane * 4) = make_float4(s[r][0], s[r][1], s[r][2], s[r][3]);
@@ -646,37 +669,44 @@ __global__ void __launch_bounds__(32 * W_STEP) state_kernel(
 // gated RMSNorm with a sigmoid gate (the oracle's GatedRMSNorm, gate_act 1): y_core bf16 per head of 128, z f32 gate, weight
 // bf16 [128]: out = ((x * w) * rsqrt(mean(x^2) + eps)) * sigmoid(z), fp16. One warp per (row, head), 4 elements per lane.
 // ---------------------------------------------------------------------------------------------------------------
+template <int RT>
 __global__ void __launch_bounds__(128) norm_kernel(
         const __nv_bfloat16* __restrict__ y, const float* __restrict__ z, const __nv_bfloat16* __restrict__ w, float eps,
-        int heads, __half* __restrict__ out) {
-    const int row = blockIdx.x;
+        int rows, int heads, __half* __restrict__ out) {
+    const int r0 = blockIdx.x * RT;
     const int head = blockIdx.y * 4 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
-    const size_t off = ((size_t)row * heads + head) * D + lane * 4;
-    float x[4], wt[4];
-    load4_bf16(y + off, x);
+    float wt[4];
     load4_bf16(w + lane * 4, wt);
-    const float4 zv = *reinterpret_cast<const float4*>(z + off);
-    float ss = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 4; ++i) ss = ss + x[i] * x[i];
-    ss = warp_sum(ss);
-    const float rmf = 1.0f / sqrtf(ss / (float)D + eps);
-    const float zz[4] = {zv.x, zv.y, zv.z, zv.w};
-    __half2 h[2];
+    for (int rr = 0; rr < RT; ++rr) {
+        const int row = r0 + rr;
+        if (row >= rows) break;
+        const size_t off = ((size_t)row * heads + head) * D + lane * 4;
+        float x[4];
+        load4_bf16(y + off, x);
+        const float4 zv = __ldg(reinterpret_cast<const float4*>(z + off));
+        float ss = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 2; ++i) {
-        float o[2];
+        for (int i = 0; i < 4; ++i) ss = ss + x[i] * x[i];
+        ss = warp_sum(ss);
+        const float rmf = 1.0f / sqrtf(ss / (float)D + eps);
+        const float zz[4] = {zv.x, zv.y, zv.z, zv.w};
+        __half2 h[2];
 #pragma unroll
-        for (int e = 0; e < 2; ++e) {
-            const int c = 2 * i + e;
-            o[e] = ((x[c] * wt[c]) * rmf) * sigmoid_ieee(zz[c]);
+        for (int i = 0; i < 2; ++i) {
+            float o[2];
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+                const int c = 2 * i + e;
+                o[e] = ((x[c] * wt[c]) * rmf) * sigmoid_ieee(zz[c]);
+            }
+            h[i] = __floats2half2_rn(o[0], o[1]);
         }
-        h[i] = __floats2half2_rn(o[0], o[1]);
+        uint2 u;
+        u.x = *reinterpret_cast<const unsigned*>(&h[0]);
+        u.y = *reinterpret_cast<const unsigned*>(&h[1]);
+        *reinterpret_cast<uint2*>(out + off) = u;
     }
-    uint2 u;
-    u.x = *reinterpret_cast<const unsigned*>(&h[0]);
-    u.y = *reinterpret_cast<const unsigned*>(&h[1]);
-    *reinterpret_cast<uint2*>(out + off) = u;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -792,14 +822,24 @@ GB_EXPORT int gb_kda_gate_from_full_fg(const void* f_out, const void* g_out, con
                                        float* z_gate_out, float* beta_out, int rows, int hidden, int heads, void* stream) {
     if (rows < 0 || bad_heads(heads) || hidden <= 0 || hidden % 8 != 0) return ERR_INVALID;
     if (rows == 0) return 0;
+    if ((((uintptr_t)dt_bias | (uintptr_t)g_decay_out | (uintptr_t)z_gate_out | (uintptr_t)f_out | (uintptr_t)g_out) & 15) != 0)
+        return ERR_INVALID;
     cudaStream_t st = gb_stream(stream);
     const int C = heads * 128;
-    beta_from_b_kernel<X_BF16><<<dim3(heads, (rows + BG_RT - 1) / BG_RT), BG_NT, 0, st>>>(
-        x, (const __nv_bfloat16*)b_weight, rows, hidden, heads, beta_out);
+    if (rows <= BG_RT)
+        beta_from_b_kernel<X_BF16, 1><<<dim3(heads, (rows + BG_RT - 1) / BG_RT), BG_NT, 0, st>>>(
+            x, (const __nv_bfloat16*)b_weight, rows, hidden, heads, beta_out);
+    else
+        beta_from_b_kernel<X_BF16, 4><<<dim3(heads / 4, (rows + BG_RT - 1) / BG_RT), BG_NT, 0, st>>>(
+            x, (const __nv_bfloat16*)b_weight, rows, hidden, heads, beta_out);
     int rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
-    full_fg_gate_kernel<<<dim3((C + 255) / 256, rows), 256, 0, st>>>(
-        (const half*)f_out, (const half*)g_out, a_log, dt_bias, lower, rows, heads, g_decay_out, z_gate_out);
+    if (rows <= 8)
+        full_fg_gate_kernel<1><<<dim3((C / 4 + 255) / 256, rows), 256, 0, st>>>(
+            (const half*)f_out, (const half*)g_out, a_log, dt_bias, lower, rows, heads, g_decay_out, z_gate_out);
+    else
+        full_fg_gate_kernel<8><<<dim3((C / 4 + 255) / 256, (rows + 7) / 8), 256, 0, st>>>(
+            (const half*)f_out, (const half*)g_out, a_log, dt_bias, lower, rows, heads, g_decay_out, z_gate_out);
     return GB_CHECK_LAUNCH();
 }
 
@@ -856,8 +896,13 @@ GB_EXPORT int gb_kda_replay(const float* k, const void* v, const float* g, const
 GB_EXPORT int gb_kda_norm(const void* y, const float* z, const void* w, float eps, int rows, int heads, void* out, void* stream) {
     if (rows < 0 || bad_heads(heads)) return ERR_INVALID;
     if (rows == 0) return 0;
-    norm_kernel<<<dim3(rows, heads / 4), 128, 0, gb_stream(stream)>>>((const __nv_bfloat16*)y, z, (const __nv_bfloat16*)w, eps,
-                                                                    heads, (__half*)out);
+    cudaStream_t st = gb_stream(stream);
+    if (rows <= 8)
+        norm_kernel<1><<<dim3(rows, heads / 4), 128, 0, st>>>(
+            (const __nv_bfloat16*)y, z, (const __nv_bfloat16*)w, eps, rows, heads, (__half*)out);
+    else
+        norm_kernel<4><<<dim3((rows + 3) / 4, heads / 4), 128, 0, st>>>(
+            (const __nv_bfloat16*)y, z, (const __nv_bfloat16*)w, eps, rows, heads, (__half*)out);
     return GB_CHECK_LAUNCH();
 }
 

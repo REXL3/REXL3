@@ -29,7 +29,7 @@ use crate::moe_prefill::SharedScratchBig;
 use crate::rt::{CudaError, DevBuf, Stream};
 use core::ffi::c_void;
 use gb_exl3::Codebook;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 /// The K order of the P2 GEMM (both P2: a function of K alone, row-independent, deterministic).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,11 +50,16 @@ impl Variant {
     }
 }
 
-/// The K order a GLM P2 prefill runs: `Fold128` (Lane P, MEASURED on node 4, `tests/glm_p2_dense.rs`): against an fp64 reference the
-/// single chain shrinks the outputs of the long-K layers by 1.0e-5 to 1.3e-5 of their rms (K 12,288 and 16,384: the dense MLP's down, MLA
-/// o_proj), the decode path and `Fold128` by under 1e-6 at the same rms error; `Fold128` costs 5 to 8 % of the GEMM's time (64 to 74
-/// against 70 to 84 TFLOP/s at 2,048 rows on the big shapes), about 1 % of a prompt chunk (COMPUTED).
+/// The K order a GLM P2 prefill runs: `Fold128` (Lane P, MEASURED on node 4, `tests/glm_p2_dense.rs`): against an fp64
+/// reference the single chain shrinks the outputs of the long-K layers by 1.0e-5 to 1.3e-5 of their rms (K 12,288 and
+/// 16,384: the dense MLP's down, MLA o_proj), while `Fold128` costs 5 to 8 % of the GEMM's time (64 to 74 against 70
+/// to 84 TFLOP/s at 2,048 rows on the big shapes), about 1 % of a prompt chunk (COMPUTED).
 pub const DEFAULT_VARIANT: Variant = Variant::Fold128;
+
+/// The K order a Ling-3.1 P2 prefill runs: `Chain` (Lane LP3, MEASURED). `Chain` also measures higher MTP acceptance
+/// on the short-context decode prompt (0.53 vs 0.485 at 32 tokens) — `glm_p2_dense.cu` only runs during prefill,
+/// never during decode/verify, so the variant cannot move a decode bit.
+pub const LING_DEFAULT_VARIANT: Variant = Variant::Chain;
 
 /// The version of the P2 dense arithmetic this module runs (the K order, the rounding points, the epilogue order): GLM's prefix namespace
 /// and its TP Hello carry it, so any change that moves a P2 bit must change this string.
@@ -72,11 +77,41 @@ mod ffi {
                               y: *mut c_void, y_dtype: i32, ldy: i64, m: i32, k: i32, n: i32, bits: i32, codebook: i32, fold: i32,
                               tile_force: i32, stream: *mut c_void) -> i32;
         pub fn gb_glm_p2_pick_tile(m: i32, k: i32, n: i32, fold: i32) -> i32;
+        pub fn gb_ling_p2_supported(k: i32, n: i32, k2: i32, codebook: i32) -> i32;
+        pub fn gb_ling_p2_gemm(a: *const c_void, trellis: *const c_void, svh: *const c_void, bias: *const c_void,
+                               scale_f32: i32, y: *mut c_void, y_dtype: i32, ldy: i64, m: i32, k: i32, n: i32, k2: i32,
+                               codebook: i32, fold: i32, tile_force: i32, stream: *mut c_void) -> i32;
         pub fn gb_moe_swiglu_limit(g: *const c_void, u: *const c_void, a: *mut c_void, n: i64, limit: f32, stream: *mut c_void) -> i32;
     }
 }
 
 static LAUNCHES: AtomicU64 = AtomicU64::new(0);
+static LING_TILE_FORCE: AtomicI32 = AtomicI32::new(0);
+static LING_FOLD: AtomicI32 = AtomicI32::new(-1); // -1: default (Chain); 0: chain; 1: fold128
+
+/// Force the Ling direct GEMM tile (`BM * 10 + SN`; zero restores the kernel's pick). Benchmark hook only;
+/// tile selection does not change the arithmetic contract.
+pub fn set_ling_tile_force(tile: i32) {
+    LING_TILE_FORCE.store(tile, Ordering::Relaxed);
+}
+
+/// Benchmark hook: force the Ling direct GEMM K order (0 chain, 1 fold128). Does not change the arithmetic contract.
+pub fn set_ling_fold(fold: i32) {
+    LING_FOLD.store(fold, Ordering::Relaxed);
+}
+
+fn ling_fold() -> i32 {
+    let v = LING_FOLD.load(Ordering::Relaxed);
+    if v >= 0 {
+        v
+    } else {
+        (LING_DEFAULT_VARIANT == Variant::Fold128) as i32
+    }
+}
+
+fn ling_tile_force() -> i32 {
+    LING_TILE_FORCE.load(Ordering::Relaxed)
+}
 
 /// P2 GEMM launches of this process so far (every [`linear`] call and each of a [`gated`] call's three projections count one). A test reads
 /// it before and after a prefill to check that every dense linear of every prompt row went through P2.
@@ -224,6 +259,86 @@ pub fn linear_variant(
             codebook_code(w.codebook),
             (v == Variant::Fold128) as i32,
             tile,
+            st.raw(),
+        ))?;
+    }
+    LAUNCHES.fetch_add(1, Ordering::Relaxed);
+    LAUNCHES_HERE.with(|c| c.set(c.get() + 1));
+    Ok(())
+}
+
+/// Whether the Ling direct-to-MMA prefill GEMM takes a layer of `k2` (twice the bits, odd values included: Ling-3.1's
+/// half-integer widths). K and N multiples of 128, Mul1.
+pub fn ling_supported(k: usize, n: usize, k2: usize, codebook: Codebook) -> bool {
+    // SAFETY: a pure function of its integer arguments
+    unsafe { ffi::gb_ling_p2_supported(k as i32, n as i32, k2 as i32, codebook_code(codebook)) == 1 }
+}
+
+/// Ling-3.1 (LP3): `y [rows, n] = ((x * suh) H_K . W_q . H_N) * svh` over a `Lin`'s decomposed parts (trellis /
+/// suh / svh as stored in the pack, `suh` `[k]` fp16 and `svh` `[n]` fp16 exactly where the pack put them — the
+/// per-part slices the bailing device image hands over, so no gather and no copy of either scale), on the same
+/// tensor-core fold128 GEMM as [`linear_variant`]. The trellis is decoded straight into the MMA's B fragments
+/// (`exl3_linear_decode.cuh`: even AND odd `k2`, the 1.5 / 2.5 / 3.5-bit widths of Ling's dense projections), so
+/// no fp16 `W_q` is ever reconstructed in global memory. `ws` needs [`workspace_bytes`]`(rows, k)` bytes (it holds
+/// the rotated fp16 input when the call returns). Asynchronous on `st`.
+#[allow(clippy::too_many_arguments)]
+pub fn ling_linear_parts(
+    x: &DevBuf,
+    y: &mut DevBuf,
+    rows: usize,
+    x_dtype: Dtype,
+    y_dtype: Dtype,
+    k: usize,
+    n: usize,
+    k2: usize,
+    codebook: Codebook,
+    trellis: &DevBuf,
+    suh: &DevBuf,
+    svh: &DevBuf,
+    ws: &mut DevBuf,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    if rows == 0
+        || rows > i32::MAX as usize / k.max(n).max(1)
+        || !ling_supported(k, n, k2, codebook)
+        || x.bytes() < rows * k * x_dtype.size()
+        || y.bytes() < rows * n * y_dtype.size()
+        || trellis.bytes() < k * n * k2 / 16
+        || suh.bytes() < k * 2
+        || svh.bytes() < n * 2
+        || ws.bytes() < workspace_bytes(rows, k)
+    {
+        return Err(INVALID);
+    }
+    // SAFETY: sizes checked above; every pointer is a device allocation of at least that size; asynchronous on `st`
+    unsafe {
+        CudaError::check(ffi::gb_glm_p2_rotate(
+            x.ptr() as *const c_void,
+            x_dtype as i32,
+            k as i64,
+            suh.ptr() as *const c_void,
+            0,
+            ws.ptr(),
+            rows as i32,
+            k as i32,
+            st.raw(),
+        ))?;
+        CudaError::check(ffi::gb_ling_p2_gemm(
+            ws.ptr() as *const c_void,
+            trellis.ptr() as *const c_void,
+            svh.ptr() as *const c_void,
+            core::ptr::null(),
+            0,
+            y.ptr(),
+            y_dtype as i32,
+            n as i64,
+            rows as i32,
+            k as i32,
+            n as i32,
+            k2 as i32,
+            codebook_code(codebook),
+            ling_fold(),
+            ling_tile_force(),
             st.raw(),
         ))?;
     }

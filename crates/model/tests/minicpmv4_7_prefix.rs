@@ -23,6 +23,10 @@
 //! * `eviction_under_pressure_never_frees_what_a_running_sequence_uses`: entries evicted while a sequence that restored from them
 //!   decodes; the sequence's reply equals its uncached reply, and the books balance.
 //! * `a_snapshot_never_continues_a_prompt_of_the_other_arithmetic` and `a_failed_restore_ends_only_its_slot`: the guards.
+//! * `the_shipped_policy_serves_a_second_question_and_a_tool_loop_and_every_hit_is_the_uncached_reply`: the cut policy `engine_from`
+//!   installs (every other test here replaces it with the test policy): an extension hits 64 tokens before the end of the prompt it
+//!   extends, a second question about a document resumes inside the document, a tool loop is cached from turn 2 and never goes back,
+//!   every hit's reply equals the uncached reply, and the slot restored at the cut the engine took is the cold donor's slot at that cut.
 
 use gb_engine::{Backend, PrefixHandle, Request, RowOutput, RowRequest};
 use gb_model::families::minicpmv4_7::backend::MiniCpmBackend;
@@ -694,4 +698,75 @@ fn the_coopmk_prefill_arm_restores_exactly_too() {
     let got = one(e, request(&ext, sampled(4), 12, false, true));
     assert!(got.cached_tokens > 0, "the CoopMK arm's engine hit its own entry");
     same("coopmk arm, cached against uncached", &got, &want);
+}
+
+/// The shipped cut policy, on the real model: the engine as `engine_from` builds it (`Rig::load_shipped`, no test policy), driven with the
+/// shapes of the baseline gate's prefix-cache stage (one document, two questions) and long tool loop (311 tokens growing 57 to 59 a turn).
+/// The gated delta net's state cannot be cut back, so each hit needs a snapshot the policy planned inside the shared prefix; every hit's
+/// reply is compared with the same request's uncached reply, and the state restored at the cut the engine took with the cold donor's
+/// state at that cut (GDN state, convolution history, KV rows, rope delta).
+#[test]
+#[ignore]
+fn the_shipped_policy_serves_a_second_question_and_a_tool_loop_and_every_hit_is_the_uncached_reply() {
+    let Some(mut rig) = Rig::load_shipped(4, 16384, 512, 32) else { return };
+    let e = &mut rig.eng;
+
+    // an extension of a 900-token prompt hits that prompt's end cut, 64 tokens clear of its end (the test policy's would be 16)
+    let a = toks(61, 900);
+    assert_eq!(one(e, request(&a, greedy(), 12, false, true)).cached_tokens, 0, "a cold cache");
+    let b = cat(&a, &toks(62, 300));
+    let want = one(e, request(&b, greedy(), 24, false, false));
+    let got = one(e, request(&b, greedy(), 24, false, true));
+    assert_eq!(got.cached_tokens, 900 - 64, "the shipped end cut");
+    same("extension", &got, &want);
+
+    // one document of 8,003 tokens, two questions (one shared token, then 17 that differ: the question's words and the generation
+    // prompt): the second resumes at the first sighting's end cut, inside the document
+    let doc = toks(63, 8003);
+    let question = |q: u64| cat(&cat(&doc, &[1000]), &toks(64 + q, 17));
+    let (q1, q2) = (question(1), question(2));
+    assert_eq!(one(e, request(&q1, greedy(), 16, true, true)).cached_tokens, 0);
+    let want = one(e, request(&q2, greedy(), 16, true, false));
+    let hits = e.prefix_stats().hits;
+    let got = one(e, request(&q2, greedy(), 16, true, true));
+    assert_eq!(got.cached_tokens, q1.len() - 64, "the second question resumes at the first one's end cut");
+    assert!(got.cached_tokens >= q1.len() / 2 && got.cached_tokens <= doc.len() + 1);
+    assert_eq!(e.prefix_stats().hits, hits + 1);
+    same("second question", &got, &want);
+    let doc_cut = got.cached_tokens;
+
+    // a tool loop: each turn the last one's tokens without its 9-token generation prompt, then the call, the result and a new one
+    let lens = [311usize, 368, 425, 482, 539, 596, 653, 710, 767, 824, 883, 942, 1001];
+    let conversation = toks(80, 1001);
+    let mut cached = Vec::new();
+    for (k, &n) in lens.iter().enumerate() {
+        let turn = cat(&conversation[..n - 9], &toks(90 + k as u64, 9));
+        let want = one(e, request(&turn, greedy(), 12, false, false));
+        let got = one(e, request(&turn, greedy(), 12, false, true));
+        same(&format!("tool loop turn {}", k + 1), &got, &want);
+        cached.push(got.cached_tokens);
+    }
+    assert_eq!(cached[..2], [0, 311 - 64], "turn 2 resumes at turn 1's end cut: {cached:?}");
+    assert!(cached[1..].iter().all(|&c| c > 0), "cached from turn 2 on: {cached:?}");
+    assert!(cached.windows(2).all(|w| w[0] <= w[1]), "never decreasing: {cached:?}");
+    assert!(cached[12] + 300 >= 1001, "at most 300 tokens behind the conversation: {cached:?}");
+    assert_eq!(e.prefix_stats().restore_failures, 0);
+    eprintln!("shipped policy: extension hit 836, second question hit {doc_cut} of {}, tool loop {cached:?}", q2.len());
+
+    // the slot restored at the cut the engine took for the second question is the cold donor's slot at that cut, and the suffix ends at
+    // the uncached bits
+    let b = &mut rig.eng.backend;
+    let reference = cold(b, 3, &q2);
+    let d = donor(b, 2, &q1, &[doc_cut]);
+    assert_eq!(d.taken.len(), 1);
+    let (cut, handle, at_cut, _) = &d.taken[0];
+    b.prefix_restore(0, handle, *cut).unwrap_or_else(|e| panic!("restore at {cut}: {e}"));
+    assert_eq!(&digest(&mut b.m, 0, *cut), at_cut, "state, conv history and KV rows after the restore at {cut}");
+    let row = finish(b, 0, &q2, *cut);
+    assert!(row.bits_eq(&reference), "candidates of the second question after the restore at {cut}");
+    for s in [0, 2, 3] {
+        b.release(s);
+    }
+    b.prefix_release(d.taken.into_iter().next().unwrap().1);
+    assert!(b.take_error().is_none());
 }

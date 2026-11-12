@@ -324,6 +324,10 @@ impl<R: Dsv41Runtime> Backend for Dsv41Backend<R> {
         true
     }
 
+    fn score_rows_supported(&self) -> bool {
+        true
+    }
+
     fn score_all_rows(&mut self, on: bool) {
         self.all_rows = on;
         self.score_rows = Vec::new();
@@ -372,8 +376,15 @@ impl<R: Dsv41Runtime> Backend for Dsv41Backend<R> {
             for &seg_end in &waypoints {
                 let is_cut = active_cuts.contains(&seg_end);
                 if all_rows {
-                    let r = self.m.prefill_logits_rows(slot, cur, &prompt[cur..seg_end])?;
-                    rows_out.extend(r);
+                    // the head holds `HEAD_ROWS` full rows, and a segment is up to the chunk (512 on one node, more on
+                    // a group): read it out in pieces of the head, which the row-invariant prefill makes the same
+                    // arithmetic as one forward over the segment
+                    let mut at = cur;
+                    while at < seg_end {
+                        let end = (at + super::model::HEAD_ROWS).min(seg_end);
+                        rows_out.extend(self.m.prefill_logits_rows(slot, at, &prompt[at..end])?);
+                        at = end;
+                    }
                 } else if seg_end == n {
                     let r = self.m.prefill_logits_last_row(slot, cur, &prompt[cur..seg_end])?;
                     rows_out.push(r);

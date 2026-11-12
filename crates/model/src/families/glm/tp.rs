@@ -685,6 +685,11 @@ pub trait PrefixRuntime: LockstepRuntime<Call = GlmCall> {
     fn prefix_state_digest(&mut self, slot: usize, len: usize) -> Result<u64, ModelError>;
     /// A follower's handles ([`apply_prefix`]).
     fn snapshot_handles(&mut self) -> &mut SnapHandles;
+    /// The KV pool's physical state for a pool-page prefix cache (`GlmModel::kv_pool_room`). Every rank's pool takes the same pages in the same
+    /// order (each allocation, reference and release is forwarded), so rank 0's own stands for the group's. `None`: a runtime with no pool.
+    fn kv_pool_room(&self) -> Option<gb_engine::PoolRoom> {
+        None
+    }
 }
 
 /// The snapshot of a [`GlmCall::Snapshot`], on any rank (rank 0 runs it as the local half of the call it forwards, a follower in
@@ -745,6 +750,9 @@ pub fn apply_prefix<R: PrefixRuntime + ?Sized>(r: &mut R, seq: u64, call: GlmCal
 }
 
 impl PrefixRuntime for GlmRank {
+    fn kv_pool_room(&self) -> Option<gb_engine::PoolRoom> {
+        Some(self.m.kv_pool_room())
+    }
     fn enable_snapshots(&mut self, slots: usize) -> Result<u64, ModelError> {
         self.m.enable_prefix_cache(slots)?;
         Ok(self.m.prefix_snapshot_bytes())
@@ -814,6 +822,27 @@ impl GlmMtpRuntime for GlmRank {
     fn mtp_disable_slot(&mut self, slot: usize) {
         if slot < self.m.slots {
             self.m.mtp_disable_slot(slot);
+        }
+    }
+    fn has_dflash(&self) -> bool {
+        self.m.has_dflash()
+    }
+    fn dflash_ready(&self, slot: usize, tokens: usize) -> bool {
+        slot < self.m.slots && self.m.dflash_ready(slot, tokens)
+    }
+    fn dflash_draft(&mut self, asks: &[super::model::DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        if let Some(a) = asks.iter().find(|a| a.slot >= self.m.slots) {
+            return Err(ModelError::Request(format!("a draft ask for slot {} of a model of {} slots", a.slot, self.m.slots)));
+        }
+        // a draft call of rank 0, as the profile slices count the NextN layer's (`REXL3_GLM_PROFILE_SLICES` kind `d`)
+        let t = self.m.slices.enter(Kind::Draft, asks.len(), None);
+        let r = self.m.dflash_draft(asks);
+        self.m.slices.leave(t, r.is_ok());
+        r
+    }
+    fn set_dflash_from(&mut self, slot: usize, from: usize) {
+        if slot < self.m.slots {
+            self.m.set_dflash_from(slot, from);
         }
     }
     fn graph_counters(&self) -> Option<gb_engine::GraphCounters> {
@@ -993,6 +1022,54 @@ mod tests {
         assert!(BootGate::check(&g0, &gate("p".into(), &mo, 512, on.clone()).at(1, 2)).is_ok());
         let e = BootGate::check(&g0, &gate("p".into(), &mo, 512, cache_facts(Mib(3584), 3, 14, BYTES)).at(1, 2)).unwrap_err();
         assert!(e.contains("the prefix cache's snapshot slots: rank 0 planned 4, rank 1 can hold only 3"), "{e}");
+    }
+
+    /// `--prefix-cache pool` is its own request in the Hello (`tp_boot::cache_request_label`): a rank started with it and a rank started with
+    /// `--prefix-cache on` (or a MiB size, or off) are refused by name before any weight is read; two pool ranks agree. A process without
+    /// it sends the label it always sent, so the shipped two-node profile's Hello keeps its bytes.
+    #[test]
+    fn two_ranks_on_different_prefix_cache_modes_are_refused_by_name() {
+        use crate::serve::{PrefixCacheOption, ServeOptions};
+        const BYTES: u64 = 73_828_352;
+        let mut o = ServeOptions::new("/m".into());
+        o.prefix_cache = PrefixCacheOption::On;
+        assert_eq!(super::super::tp_boot::cache_request_label(&o), "on");
+        o.prefix_cache = PrefixCacheOption::Mib(13_440);
+        assert_eq!(super::super::tp_boot::cache_request_label(&o), "mib=13440", "the shipped 1M profile's label is unchanged");
+        o.prefix_cache = PrefixCacheOption::On;
+        o.prefix_pool = true;
+        assert_eq!(super::super::tp_boot::cache_request_label(&o), "pool");
+        let pool_budget =
+            gb_engine::CacheBudget { snapshot_slots: 8, page_blocks: 0, snapshot_bytes: BYTES, page_bytes: 1 << 20 };
+        let pool = GlmFacts::local(288, 2).with_cache("pool".into(), &pool_budget);
+        assert!(pool.cache_on_wire());
+        assert!(GlmCall::check_facts(&pool, &pool, 1).is_empty(), "two pool ranks are one group");
+        let shipped = cache_facts(PrefixCacheOption::Mib(13_440), 8, 4106, BYTES);
+        let auto_on = cache_facts(PrefixCacheOption::On, 8, 0, BYTES);
+        for other in [&shipped, &auto_on, &GlmFacts::local(288, 2)] {
+            for (a, b) in [(&pool, other), (other, &pool)] {
+                let why = GlmCall::check_facts(a, b, 1);
+                assert!(
+                    why.iter().any(|w| w.contains("the prefix cache request (--prefix-cache / --prefix-cache-mib")
+                        && (w.contains("rank 0 has pool") || w.contains("rank 1 has pool"))),
+                    "{why:?}"
+                );
+            }
+        }
+        // the wire carries the label
+        let mut e = Enc::new();
+        GlmCall::encode_facts(&pool, &mut e);
+        assert_eq!(GlmCall::decode_facts(&mut Dec::new(&e.0)).unwrap(), pool);
+        // the shipped request's Hello bytes are what they were: the same facts, the same encoding
+        let mut a = Enc::new();
+        GlmCall::encode_facts(&shipped, &mut a);
+        let again = GlmFacts::local(288, 2).with_cache(
+            "mib=13440".into(),
+            &gb_engine::CacheBudget { snapshot_slots: 8, page_blocks: 4106, snapshot_bytes: BYTES, page_bytes: 1 << 20 },
+        );
+        let mut b = Enc::new();
+        GlmCall::encode_facts(&again, &mut b);
+        assert_eq!(a.0, b.0);
     }
 
     /// A follower's handle is keyed by the sequence number of the `Snapshot` call that made it: a restore naming a call that made none (or

@@ -1,0 +1,18 @@
+# GLM-5.3-Flash 2.25 bpw, crates/model/tests/glm_perf.rs perf_digest under the prefill contract P2 (REXL3_GLM_PREFILL_CONTRACT=p2: the dense EXL3
+# linears of every prompt row on glm_p2 glm-fold128-v1, the routed experts on glm_p2_moe glm-moe-fold128-2grp-v1, the KDA recurrence of the
+# prompt rows chunked, kda=glm-kda-chunk16-v1, the MLA absorb / expand on tensor cores, mla-ae=glm-mla-ae-fold128-v1 (Lane P steps 3, (e)
+# and (d)); router, indexer, MLA attention, KDA projections / conv / norms, lm_head P1). Node 4, Lane P step (d), 2026-10-19: four
+# processes of build 70d1dad2 (chunk 2048 and 4096, each twice; the 4,096-row model with 512-row KDA pieces) gave these lines. Compare:
+# REXL3_DIGEST_EXPECT=this file with REXL3_GLM_PREFILL_CONTRACT=p2 and a model of more than 128 prefill rows (P2 refuses 128 or fewer).
+# Below, as comments, crates/model/tests/glm_p2.rs's P2DIGEST lines at a 4,096-row model (the state, NextN cache, logits and 6 decode
+# steps a prompt leaves; every chunk grid of the test gives the reference grid's value):
+# P2DIGEST prompt=1500 grid=[128] d25fab47851cd6bb
+# P2DIGEST prompt=2278 grid=[128] b137ec72b807f15f
+# P2DIGEST prompt=5000 grid=[128] 4f63b98ff8be25e0
+# P2DIGEST prompt=img_small grid=[128] 3a766d3558f1f094
+DIGEST graphs_off serial_2300 906d00113f2f128f
+DIGEST graphs_off windows_2300 0ec4073bd26e2edc
+DIGEST graphs_off boundary_2040 5f73dfd995360ff8
+DIGEST graphs_off multi 8dce3b6cb653f7a6
+DIGEST graphs_off mtp 4b609cdf129a6811
+DIGEST graphs_off state b2494ac93e05da16

@@ -1,0 +1,15 @@
+[package]
+name = "gb-cluster"
+description = "rexl3-cluster: one cluster file, a launcher (check, up, down, status), a group-aware supervisor and the operator tooling for tensor-parallel groups of any rank count"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "rexl3-cluster"
+path = "src/main.rs"

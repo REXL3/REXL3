@@ -1,0 +1,77 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "minicpmv47-35b-a3b-rexl3-sage-6.08",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "7e7d25b416ffe8b8537656bd6c5448ecc6f3d111",
+    "path": "docs/examples/cluster.minicpmv47-rexl3-sage-single.json",
+    "sha256": "b5f2994dc05317caa0716130cd59d0d98a6d622f6d5f24812a1ae8101387b205"
+  },
+  "target_repo": "r0b0tlab/MiniCPM-V-4.7-35B-A3B-EXL3-6.08bpw-REXL3-SAGE",
+  "default_profile": "minicpmv47-single-262k",
+  "profiles": {
+    "minicpmv47-single-262k": {
+      "kind": "single",
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir",
+        "binary_dir"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--draft",
+        "@DRAFT_DIR@",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--slots",
+        "4",
+        "--max-model-len",
+        "262144",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--prefix-cache-mib",
+        "32768",
+        "--served-model-name",
+        "minicpm-v-4.7-35b-a3b-exl3"
+      ],
+      "env": {},
+      "files": {},
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 600,
+      "http_port": 8889,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "minicpm-v-4.7-35b-a3b-exl3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 2048
+      }
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

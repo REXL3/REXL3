@@ -1,0 +1,3 @@
+## New features and improvements
+
+- Production verification now recognises an owner thinking exception in a sealed qualification receipt. A profile whose thinking row ran in its excepted form (`capability/thinking_excepted`, which records rather than requires a thinking-off reply without reasoning) must carry a valid, unexpired `thinking_exception` record that matches the one in that case's detail; a record without that case, or that case without a record, is refused. Every other capability case stays strict, and speculative-decoding and prefix-cache exceptions are still never accepted. PR #131.

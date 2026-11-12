@@ -1,0 +1,345 @@
+// gb-nvcc: --fmad=false
+// MoE router for the sigmoid-with-bias family (GLM-5.3-Flash: 288 routed experts, top-8, scale 2.5), in two kernels:
+//
+//   1. router_logits_kernel: logits [rows, E] fp16 = x [rows, K] . gate [E, K]^T. ONE arithmetic for every row count: the
+//      per-(row, expert) dot product is ExLlamaV3's single-row router GEMV (MIT, Copyright (c) 2025 Turboderp, `routing.cu`
+//      `routing_gemv_kernel`): lane j of a warp runs two explicit fmaf per half2 pair over pairs j, j + 32, ..., then a
+//      shfl_down tree 16 -> 1, then one rounding to fp16. The oracle uses that kernel for one row and cuBLAS hgemm for more
+//      (so its logits depend on the row count); here a warp may carry several rows (RB) but every row keeps its own identical
+//      chain, so a row's logits are the same bits at 1 row and at 128, and equal the oracle's one-row logits.
+//   2. router_select_kernel: one warp per row. key[e] = sigmoid(logit[e]) + bias[e] in fp32 (sigmoid from a 65,536-entry
+//      table indexed by the fp16 logit bits, built on the host in float64 with one rounding, so the host mirror is exact);
+//      top-K by key, ties to the LOWER expert id, in rank order; weights = half(act * scale / (tree_sum(act of the K) + 1e-20)).
+//
+// Everything is IEEE (no fast-math, no FMA contraction: this file is built with --fmad=false and every fused multiply-add
+// is an explicit fmaf), no atomics, and a row's output depends on that row alone. docs: crates/cuda/src/moe.rs has the
+// host mirror these kernels are tested against bit for bit.
+//
+// Where this differs from the oracle (routing.cu warp_topk_shared): the oracle breaks an exact key tie towards the lowest
+// LANE (id % 32) and then the lowest id within the lane; this file breaks it towards the lowest id (expert 1 beats expert 32,
+// where the oracle picks 32). Exact fp32 key ties are rare and both choices are equally good experts.
+
+#include <stdint.h>
+
+#include "common.cuh"
+#include "pdl.cuh"
+
+using gbp_pdl::pdl_trigger;
+using gbp_pdl::pdl_wait;
+using gbp_pdl::prefetch_l2;
+
+namespace {
+
+enum DType : int { F16 = 0, BF16 = 1, F32 = 2 };
+
+// Two consecutive elements of x as fp32, the element type a template parameter (no per-load branch).
+template <int DT>
+__device__ __forceinline__ float2 load_pair(const void* p, size_t i) {
+    if constexpr (DT == F32) return *reinterpret_cast<const float2*>(static_cast<const float*>(p) + i);
+    else if constexpr (DT == BF16) return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(static_cast<const __nv_bfloat16*>(p) + i));
+    else return __half22float2(*reinterpret_cast<const half2*>(static_cast<const half*>(p) + i));
+}
+
+// Block (e, r): warp w computes expert e * WARPS + w for the RB rows r * RB .. r * RB + RB - 1. Each lane's chain visits the pairs
+// j = lane, lane + 32, ... in this order whatever UN (the pairs a lane loads before it consumes them) and WARPS: UN loads are issued
+// together, the fmaf chain is consumed in pair order.
+template <int RB, int WARPS, int UN, int DT>
+__global__ void __launch_bounds__(WARPS * 32)
+    router_logits_kernel(const void* __restrict__ x, const half* __restrict__ gate, half* __restrict__ logits, int rows, int K, int E) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int e = blockIdx.x * WARPS + warp;
+    // the expert's gate row is a weight: bring it into L2 while the predecessor runs; then wait (first, early exits included)
+    if (e < E)
+        for (int off = lane * 128; off < K * 2; off += 32 * 128) prefetch_l2(reinterpret_cast<const char*>(gate + (size_t)e * K) + off);
+    pdl_wait();
+    if (e >= E) return;
+    const int row0 = blockIdx.y * RB;
+    const half2* w2 = reinterpret_cast<const half2*>(gate + (size_t)e * K);
+    const int pairs = K / 2;
+    float sum[RB];
+#pragma unroll
+    for (int r = 0; r < RB; ++r) sum[r] = 0.0f;
+    for (int t0 = 0; t0 * 32 < pairs; t0 += UN) {
+        half2 wv[UN];
+        float2 xv[RB][UN];
+#pragma unroll
+        for (int u = 0; u < UN; ++u) {
+            const int j = lane + 32 * (t0 + u);
+            if (j < pairs) {
+                wv[u] = w2[j];
+#pragma unroll
+                for (int r = 0; r < RB; ++r)
+                    if (row0 + r < rows) xv[r][u] = load_pair<DT>(x, (size_t)(row0 + r) * K + 2 * (size_t)j);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < UN; ++u) {
+            const int j = lane + 32 * (t0 + u);
+            if (j < pairs) {
+                const float2 wf = __half22float2(wv[u]);
+#pragma unroll
+                for (int r = 0; r < RB; ++r) {
+                    if (row0 + r < rows) {
+                        sum[r] = fmaf(xv[r][u].x, wf.x, sum[r]);
+                        sum[r] = fmaf(xv[r][u].y, wf.y, sum[r]);
+                    }
+                }
+            }
+        }
+    }
+    pdl_trigger();                               // x is read: the successor (the selection) may launch
+#pragma unroll
+    for (int r = 0; r < RB; ++r) {
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) sum[r] += __shfl_down_sync(0xffffffffu, sum[r], off);
+        if (lane == 0 && row0 + r < rows) logits[(size_t)(row0 + r) * E + e] = __float2half_rn(sum[r]);
+    }
+}
+
+// The prefill tiling of the same GEMV (a chunk's rows, the router and the DSA indexer's fp16 GEMVs): warp w of block (b, r) computes
+// the EB experts (b * WARPS + w) * EB .. + EB - 1 for the RB rows r * RB .. r * RB + RB - 1, so a lane's x pair feeds EB experts and its
+// gate pair RB rows (router_logits_kernel above feeds one expert per x load: at 2,048-4,096 rows it is bound on the loads, not the fmaf).
+// THE SAME ARITHMETIC PER (row, expert) as router_logits_kernel: lane j's chain visits the pairs j, j + 32, ... in this order, two
+// explicit fmaf per pair (x.x * w.x, then x.y * w.y) from 0, then the shfl_down tree 16 -> 1, one rounding to fp16. EB, RB, WARPS and UN
+// only decide which warp holds which (row, expert) accumulator and how many loads are in flight; every accumulator is its own chain.
+template <int RB, int EB, int WARPS, int UN, int DT>
+__global__ void __launch_bounds__(WARPS * 32)
+    router_logits_eb_kernel(const void* __restrict__ x, const half* __restrict__ gate, half* __restrict__ logits, int rows, int K, int E) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int e0 = (blockIdx.x * WARPS + warp) * EB;
+    if (e0 >= E) return;
+    const int row0 = blockIdx.y * RB;
+    const int pairs = K / 2;
+    const half2* w2 = reinterpret_cast<const half2*>(gate + (size_t)e0 * K);
+    float sum[RB][EB];
+#pragma unroll
+    for (int r = 0; r < RB; ++r)
+#pragma unroll
+        for (int i = 0; i < EB; ++i) sum[r][i] = 0.0f;
+    for (int t0 = 0; t0 * 32 < pairs; t0 += UN) {
+        half2 wv[UN][EB];
+        float2 xv[RB][UN];
+#pragma unroll
+        for (int u = 0; u < UN; ++u) {
+            const int j = lane + 32 * (t0 + u);
+            if (j < pairs) {
+#pragma unroll
+                for (int i = 0; i < EB; ++i)
+                    if (e0 + i < E) wv[u][i] = w2[(size_t)i * pairs + j];
+#pragma unroll
+                for (int r = 0; r < RB; ++r)
+                    if (row0 + r < rows) xv[r][u] = load_pair<DT>(x, (size_t)(row0 + r) * K + 2 * (size_t)j);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < UN; ++u) {
+            const int j = lane + 32 * (t0 + u);
+            if (j < pairs) {
+#pragma unroll
+                for (int i = 0; i < EB; ++i) {
+                    if (e0 + i < E) {
+                        const float2 wf = __half22float2(wv[u][i]);
+#pragma unroll
+                        for (int r = 0; r < RB; ++r) {
+                            if (row0 + r < rows) {
+                                sum[r][i] = fmaf(xv[r][u].x, wf.x, sum[r][i]);
+                                sum[r][i] = fmaf(xv[r][u].y, wf.y, sum[r][i]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < RB; ++r) {
+#pragma unroll
+        for (int i = 0; i < EB; ++i) {
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) sum[r][i] += __shfl_down_sync(0xffffffffu, sum[r][i], off);
+            if (lane == 0 && row0 + r < rows && e0 + i < E) logits[(size_t)(row0 + r) * E + e0 + i] = __float2half_rn(sum[r][i]);
+        }
+    }
+}
+
+constexpr int kMaxExperts = 512;
+constexpr int kMaxPerLane = kMaxExperts / 32;
+constexpr int kMaxTopK = 16;
+
+// Order-preserving map of a float key to uint32 (larger float, larger code); NaN gets the smallest code.
+__device__ __forceinline__ uint32_t key_code(float k) {
+    if (k != k) return 0u;
+    const uint32_t u = __float_as_uint(k);
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+// One warp per row.
+__global__ void __launch_bounds__(32)
+    router_select_kernel(const half* __restrict__ logits, const float* __restrict__ sig, const float* __restrict__ bias,
+                         int* __restrict__ pick, half* __restrict__ wts, float scale, int E, int K) {
+    pdl_wait();                                  // the logits are the predecessor's
+    const int row = blockIdx.x, lane = threadIdx.x;
+    const half* lg = logits + (size_t)row * E;
+    // candidate j of this lane is expert lane + 32 j; comp = key code in the high word, (~id) in the low word, so the largest
+    // comp is the largest key and, among equal keys, the lowest id. 0 marks a taken or absent candidate.
+    uint64_t comp[kMaxPerLane];
+#pragma unroll
+    for (int j = 0; j < kMaxPerLane; ++j) {
+        const int id = lane + 32 * j;
+        comp[j] = 0;
+        if (id < E) {
+            const float act = __ldg(sig + __half_as_ushort(lg[id]));
+            const float key = act + __ldg(bias + id);
+            comp[j] = ((uint64_t)key_code(key) << 32) | (uint64_t)(0xFFFFFFFFu - (uint32_t)id);
+        }
+    }
+    pdl_trigger();                               // the logits are read
+    int my_id = -1;
+    float my_act = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        uint64_t best = 0;
+#pragma unroll
+        for (int j = 0; j < kMaxPerLane; ++j) best = comp[j] > best ? comp[j] : best;
+#pragma unroll
+        for (int m = 16; m > 0; m >>= 1) {
+            const uint64_t o = ((uint64_t)__shfl_xor_sync(0xffffffffu, (uint32_t)(best >> 32), m) << 32) |
+                               (uint64_t)__shfl_xor_sync(0xffffffffu, (uint32_t)best, m);
+            best = o > best ? o : best;
+        }
+        const int id = (int)(0xFFFFFFFFu - (uint32_t)best);          // best is never 0 while K <= E
+#pragma unroll
+        for (int j = 0; j < kMaxPerLane; ++j)
+            if (comp[j] == best) comp[j] = 0;
+        if (lane == k) {
+            my_id = id;
+            my_act = __ldg(sig + __half_as_ushort(lg[id]));
+        }
+    }
+    // The oracle's reduction: lanes >= K contribute 0, a shfl_down tree 16 -> 1 (an out-of-range source returns the lane's own
+    // value, which only ever reaches lanes that lane 0 does not read), broadcast from lane 0.
+    float s = lane < K ? my_act : 0.0f;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) s += __shfl_down_sync(0xffffffffu, s, off);
+    s = __shfl_sync(0xffffffffu, s, 0);
+    s = s + 1e-20f;
+    if (lane < K) {
+        pick[(size_t)row * K + lane] = my_id;
+        wts[(size_t)row * K + lane] = __float2half_rn(__fdiv_rn(__fmul_rn(my_act, scale), s));
+    }
+}
+
+bool dtype_ok(int d) { return d >= 0 && d <= 2; }
+
+template <int RB, int WARPS, int UN, int DT>
+int launch_logits(const void* x, const half* gate, half* logits, int rows, int K, int E, cudaStream_t st) {
+    const dim3 grid((unsigned)((E + WARPS - 1) / WARPS), (unsigned)((rows + RB - 1) / RB));
+    return gbp_pdl::launch_pdl(gbp_pdl::on(gbp_pdl::kMoe), router_logits_kernel<RB, WARPS, UN, DT>, grid, dim3(WARPS * 32), 0, st, x, gate,
+                               logits, rows, K, E);
+}
+
+template <int RB, int WARPS, int UN>
+int launch_logits_dt(const void* x, int dt, const half* gate, half* logits, int rows, int K, int E, cudaStream_t st) {
+    if (dt == F32) return launch_logits<RB, WARPS, UN, F32>(x, gate, logits, rows, K, E, st);
+    if (dt == BF16) return launch_logits<RB, WARPS, UN, BF16>(x, gate, logits, rows, K, E, st);
+    return launch_logits<RB, WARPS, UN, F16>(x, gate, logits, rows, K, E, st);
+}
+
+template <int RB>
+int launch_logits_shape(const void* x, int dt, const half* gate, half* logits, int rows, int K, int E, int warps, int un, cudaStream_t st) {
+    if (warps == 4 && un == 1) return launch_logits_dt<RB, 4, 1>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 1) return launch_logits_dt<RB, 8, 1>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 4 && un == 4) return launch_logits_dt<RB, 4, 4>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 4) return launch_logits_dt<RB, 8, 4>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 4 && un == 8) return launch_logits_dt<RB, 4, 8>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 8) return launch_logits_dt<RB, 8, 8>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 2 && un == 8) return launch_logits_dt<RB, 2, 8>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 2 && un == 4) return launch_logits_dt<RB, 2, 4>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 1 && un == 8) return launch_logits_dt<RB, 1, 8>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 1 && un == 16) return launch_logits_dt<RB, 1, 16>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 2 && un == 16) return launch_logits_dt<RB, 2, 16>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 4 && un == 16) return launch_logits_dt<RB, 4, 16>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 16) return launch_logits_dt<RB, 8, 16>(x, dt, gate, logits, rows, K, E, st);
+    return (int)cudaErrorInvalidValue;
+}
+
+template <int RB, int EB, int WARPS, int UN>
+int launch_eb_dt(const void* x, int dt, const half* gate, half* logits, int rows, int K, int E, cudaStream_t st) {
+    const dim3 grid((unsigned)((E + WARPS * EB - 1) / (WARPS * EB)), (unsigned)((rows + RB - 1) / RB));
+    if (dt == F32) router_logits_eb_kernel<RB, EB, WARPS, UN, F32><<<grid, WARPS * 32, 0, st>>>(x, gate, logits, rows, K, E);
+    else if (dt == BF16) router_logits_eb_kernel<RB, EB, WARPS, UN, BF16><<<grid, WARPS * 32, 0, st>>>(x, gate, logits, rows, K, E);
+    else router_logits_eb_kernel<RB, EB, WARPS, UN, F16><<<grid, WARPS * 32, 0, st>>>(x, gate, logits, rows, K, E);
+    return GB_CHECK_LAUNCH();
+}
+
+template <int RB, int EB>
+int launch_eb_shape(const void* x, int dt, const half* gate, half* logits, int rows, int K, int E, int warps, int un, cudaStream_t st) {
+    if (warps == 4 && un == 1) return launch_eb_dt<RB, EB, 4, 1>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 1) return launch_eb_dt<RB, EB, 8, 1>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 4 && un == 2) return launch_eb_dt<RB, EB, 4, 2>(x, dt, gate, logits, rows, K, E, st);
+    if (warps == 8 && un == 2) return launch_eb_dt<RB, EB, 8, 2>(x, dt, gate, logits, rows, K, E, st);
+    return (int)cudaErrorInvalidValue;
+}
+
+}  // namespace
+
+GB_EXPORT int gb_moe_router_logits_ex(const void* x, int x_dtype, const void* gate, void* logits, int rows, int K, int E, int rb,
+                                      int warps, int un, void* stream);
+
+// The prefill tiling (router_logits_eb_kernel) with the blocking spelled out: rb rows a warp (2, 4, 8), eb experts a warp (4, 8), warps a
+// block (4, 8), loads in flight a lane (1, 2). eb == 1 is router_logits_kernel's blocking (gb_moe_router_logits_ex). Every shape gives the
+// same bits (the tests compare them with the host mirror).
+GB_EXPORT int gb_moe_router_logits_ex2(const void* x, int x_dtype, const void* gate, void* logits, int rows, int K, int E, int rb, int eb,
+                                       int warps, int un, void* stream) {
+    if (rows < 1 || K < 2 || (K & 1) || E < 1 || !dtype_ok(x_dtype) || !x || !gate || !logits) return (int)cudaErrorInvalidValue;
+    if (eb == 1) return gb_moe_router_logits_ex(x, x_dtype, gate, logits, rows, K, E, rb, warps, un, stream);
+    cudaStream_t st = gb_stream(stream);
+    const half* g = static_cast<const half*>(gate);
+    half* l = static_cast<half*>(logits);
+    if (rb == 2 && eb == 4) return launch_eb_shape<2, 4>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 2 && eb == 8) return launch_eb_shape<2, 8>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 4 && eb == 4) return launch_eb_shape<4, 4>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 4 && eb == 8) return launch_eb_shape<4, 8>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 8 && eb == 4) return launch_eb_shape<8, 4>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 8 && eb == 8) return launch_eb_shape<8, 8>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    return (int)cudaErrorInvalidValue;
+}
+
+// The same with the blocking spelled out: rb rows a warp (1, 2, 4), warps a block (2, 4, 8), loads in flight a lane (1, 4, 8). Every
+// shape gives the same bits (a test compares them); the default below is the one measured fastest.
+GB_EXPORT int gb_moe_router_logits_ex(const void* x, int x_dtype, const void* gate, void* logits, int rows, int K, int E, int rb,
+                                      int warps, int un, void* stream) {
+    if (rows < 1 || K < 2 || (K & 1) || E < 1 || !dtype_ok(x_dtype) || !x || !gate || !logits) return (int)cudaErrorInvalidValue;
+    cudaStream_t st = gb_stream(stream);
+    const half* g = static_cast<const half*>(gate);
+    half* l = static_cast<half*>(logits);
+    if (rb == 1) return launch_logits_shape<1>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 2) return launch_logits_shape<2>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    if (rb == 4) return launch_logits_shape<4>(x, x_dtype, g, l, rows, K, E, warps, un, st);
+    return (int)cudaErrorInvalidValue;
+}
+
+// logits [rows, E] fp16 from x [rows, K] (dtype x_dtype) and the fp16 gate [E, K]. K even. The blocking changes the speed, never the bits.
+GB_EXPORT int gb_moe_router_logits(const void* x, int x_dtype, const void* gate, void* logits, int rows, int K, int E,
+                                   void* stream) {
+    // Prefill chunks (32 rows and more: the router and the DSA indexer's fp16 GEMVs of a prompt chunk) take the prefill tiling, four rows and
+    // four experts a warp, four warps a block, one load in flight (router_logits_eb_kernel; the same chain per (row, expert), the tests compare
+    // the bits with the host mirror): GLM 4096 x 288 at 2,048 / 4,096 rows 767 / 1,569 us, against 1,859 / 4,488 us one expert a warp
+    // (bench_router_big, N3, L2 warm).
+    if (rows >= 32) return gb_moe_router_logits_ex2(x, x_dtype, gate, logits, rows, K, E, 4, 4, 4, 1, stream);
+    const int rb = rows >= 8 ? 2 : 1;
+    // Decode and verify windows (under 32 rows) keep four loads in flight a lane: the gate of a layer is cold (a layer's 2.4 MB is read once a step,
+    // in the middle of 3.7 GB of other weights), and one load in flight made every warp a chain of 64 round trips to DRAM (33 us for a read that
+    // takes 10 at the bandwidth); the order of the fmaf chain does not change with the number of loads in flight (the shape sweep test compares bits)
+    return gb_moe_router_logits_ex(x, x_dtype, gate, logits, rows, K, E, rb, 8, 4, stream);
+}
+
+// Top-K per row from fp16 logits: pick [rows, K] int32 expert ids in rank order, wts [rows, K] fp16. sig: the 65,536-entry fp32
+// sigmoid table, bias: fp32 [E] selection bias (added to the activation for selection only). K <= 16, E <= 512, K <= E.
+GB_EXPORT int gb_moe_router_select(const void* logits, const void* sig, const void* bias, void* pick, void* wts, float scale,
+                                   int rows, int E, int K, void* stream) {
+    if (rows < 1 || E < 1 || E > kMaxExperts || K < 1 || K > kMaxTopK || K > E || !logits || !sig || !bias || !pick || !wts)
+        return (int)cudaErrorInvalidValue;
+    return gbp_pdl::launch_pdl(gbp_pdl::on(gbp_pdl::kMoe), router_select_kernel, dim3((unsigned)rows), dim3(32), 0, gb_stream(stream),
+                               static_cast<const half*>(logits), static_cast<const float*>(sig), static_cast<const float*>(bias),
+                               static_cast<int*>(pick), static_cast<half*>(wts), scale, E, K);
+}

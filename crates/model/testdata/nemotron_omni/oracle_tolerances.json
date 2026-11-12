@@ -1,0 +1,927 @@
+{
+ "format": 1,
+ "top1_min": 0.95,
+ "limit_factor": 2.0,
+ "floor": 0.001,
+ "floor_basis": "f16 rounding of a tensor with each module's own value distribution has rel_l2 1.78e-04 to 2.17e-04 over the 91 modules (median 2.07e-04). The fork rounds to fp16 at several points per layer while the engine's activations stay f32, so an exact engine sits a few roundings from the dump; the floor is 5x the largest single-rounding noise and binds only where 2 x spread is below it (the embedding).",
+ "spread_definition": "per module, the larger of rel_l2(whole 1x1024, chunked 2x512) and rel_l2(whole, chunked 8x128), rel_l2 = ||chunked - whole|| / ||whole|| over [1024 tokens][width], fork fp16 activations widened to f32",
+ "source": {
+  "script": "tools/nemotron_omni/noise_layers_omni.py",
+  "sample": 0,
+  "tokens": 1024,
+  "whole_run_to_run": 0.0,
+  "whole_vs_dump_modules_differing": 64
+ },
+ "modules": [
+  {
+   "module": 0,
+   "key": "backbone.embeddings",
+   "spread_2x512": 0.0,
+   "spread_8x128": 0.0,
+   "spread": 0.0,
+   "quant": 0.0002055,
+   "replay_vs_dump": 0.0,
+   "limit": 0.001
+  },
+  {
+   "module": 1,
+   "key": "backbone.layers.0",
+   "spread_2x512": 0.001352,
+   "spread_8x128": 0.001357,
+   "spread": 0.001357,
+   "quant": 0.0002067,
+   "replay_vs_dump": 0.0,
+   "limit": 0.002714
+  },
+  {
+   "module": 2,
+   "key": "backbone.layers.1",
+   "spread_2x512": 0.003487,
+   "spread_8x128": 0.003819,
+   "spread": 0.003819,
+   "quant": 0.0002063,
+   "replay_vs_dump": 0.0,
+   "limit": 0.007638
+  },
+  {
+   "module": 3,
+   "key": "backbone.layers.2",
+   "spread_2x512": 0.0034,
+   "spread_8x128": 0.003655,
+   "spread": 0.003655,
+   "quant": 0.0002066,
+   "replay_vs_dump": 0.0,
+   "limit": 0.00731
+  },
+  {
+   "module": 4,
+   "key": "backbone.layers.3",
+   "spread_2x512": 0.005999,
+   "spread_8x128": 0.005871,
+   "spread": 0.005999,
+   "quant": 0.0002078,
+   "replay_vs_dump": 0.0,
+   "limit": 0.011998
+  },
+  {
+   "module": 5,
+   "key": "backbone.layers.4",
+   "spread_2x512": 0.005548,
+   "spread_8x128": 0.005428,
+   "spread": 0.005548,
+   "quant": 0.0002079,
+   "replay_vs_dump": 0.0,
+   "limit": 0.011096
+  },
+  {
+   "module": 6,
+   "key": "backbone.layers.5",
+   "spread_2x512": 0.007909,
+   "spread_8x128": 0.007837,
+   "spread": 0.007909,
+   "quant": 0.0002079,
+   "replay_vs_dump": 0.0,
+   "limit": 0.015818
+  },
+  {
+   "module": 7,
+   "key": "backbone.layers.6",
+   "spread_2x512": 0.004269,
+   "spread_8x128": 0.00422,
+   "spread": 0.004269,
+   "quant": 0.0001901,
+   "replay_vs_dump": 0.0,
+   "limit": 0.008538
+  },
+  {
+   "module": 8,
+   "key": "backbone.layers.7",
+   "spread_2x512": 0.004319,
+   "spread_8x128": 0.004262,
+   "spread": 0.004319,
+   "quant": 0.0001844,
+   "replay_vs_dump": 0.0,
+   "limit": 0.008638
+  },
+  {
+   "module": 9,
+   "key": "backbone.layers.8",
+   "spread_2x512": 0.008228,
+   "spread_8x128": 0.008176,
+   "spread": 0.008228,
+   "quant": 0.0002089,
+   "replay_vs_dump": 0.0,
+   "limit": 0.016456
+  },
+  {
+   "module": 10,
+   "key": "backbone.layers.9",
+   "spread_2x512": 0.007354,
+   "spread_8x128": 0.007271,
+   "spread": 0.007354,
+   "quant": 0.0002055,
+   "replay_vs_dump": 0.0,
+   "limit": 0.014708
+  },
+  {
+   "module": 11,
+   "key": "backbone.layers.10",
+   "spread_2x512": 0.008564,
+   "spread_8x128": 0.008245,
+   "spread": 0.008564,
+   "quant": 0.0002065,
+   "replay_vs_dump": 0.0,
+   "limit": 0.017128
+  },
+  {
+   "module": 12,
+   "key": "backbone.layers.11",
+   "spread_2x512": 0.007648,
+   "spread_8x128": 0.007367,
+   "spread": 0.007648,
+   "quant": 0.0002092,
+   "replay_vs_dump": 0.0,
+   "limit": 0.015296
+  },
+  {
+   "module": 13,
+   "key": "backbone.layers.12",
+   "spread_2x512": 0.009104,
+   "spread_8x128": 0.008694,
+   "spread": 0.009104,
+   "quant": 0.0002076,
+   "replay_vs_dump": 0.0,
+   "limit": 0.018208
+  },
+  {
+   "module": 14,
+   "key": "backbone.layers.13",
+   "spread_2x512": 0.007843,
+   "spread_8x128": 0.007486,
+   "spread": 0.007843,
+   "quant": 0.0002153,
+   "replay_vs_dump": 0.0,
+   "limit": 0.015686
+  },
+  {
+   "module": 15,
+   "key": "backbone.layers.14",
+   "spread_2x512": 0.01185,
+   "spread_8x128": 0.01096,
+   "spread": 0.01185,
+   "quant": 0.000206,
+   "replay_vs_dump": 0.0,
+   "limit": 0.0237
+  },
+  {
+   "module": 16,
+   "key": "backbone.layers.15",
+   "spread_2x512": 0.00892,
+   "spread_8x128": 0.008252,
+   "spread": 0.00892,
+   "quant": 0.0002003,
+   "replay_vs_dump": 0.0,
+   "limit": 0.01784
+  },
+  {
+   "module": 17,
+   "key": "backbone.layers.16",
+   "spread_2x512": 0.009013,
+   "spread_8x128": 0.008365,
+   "spread": 0.009013,
+   "quant": 0.0001775,
+   "replay_vs_dump": 0.0,
+   "limit": 0.018026
+  },
+  {
+   "module": 18,
+   "key": "backbone.layers.17",
+   "spread_2x512": 0.01162,
+   "spread_8x128": 0.01084,
+   "spread": 0.01162,
+   "quant": 0.0002061,
+   "replay_vs_dump": 0.0,
+   "limit": 0.02324
+  },
+  {
+   "module": 19,
+   "key": "backbone.layers.18",
+   "spread_2x512": 0.01134,
+   "spread_8x128": 0.01059,
+   "spread": 0.01134,
+   "quant": 0.0001996,
+   "replay_vs_dump": 0.0,
+   "limit": 0.02268
+  },
+  {
+   "module": 20,
+   "key": "backbone.layers.19",
+   "spread_2x512": 0.01545,
+   "spread_8x128": 0.01492,
+   "spread": 0.01545,
+   "quant": 0.0001795,
+   "replay_vs_dump": 0.0,
+   "limit": 0.0309
+  },
+  {
+   "module": 21,
+   "key": "backbone.layers.20",
+   "spread_2x512": 0.01432,
+   "spread_8x128": 0.01382,
+   "spread": 0.01432,
+   "quant": 0.0002046,
+   "replay_vs_dump": 0.0,
+   "limit": 0.02864
+  },
+  {
+   "module": 22,
+   "key": "backbone.layers.21",
+   "spread_2x512": 0.02043,
+   "spread_8x128": 0.01843,
+   "spread": 0.02043,
+   "quant": 0.0001851,
+   "replay_vs_dump": 0.0,
+   "limit": 0.04086
+  },
+  {
+   "module": 23,
+   "key": "backbone.layers.22",
+   "spread_2x512": 0.01954,
+   "spread_8x128": 0.0175,
+   "spread": 0.01954,
+   "quant": 0.0002072,
+   "replay_vs_dump": 0.0,
+   "limit": 0.03908
+  },
+  {
+   "module": 24,
+   "key": "backbone.layers.23",
+   "spread_2x512": 0.02931,
+   "spread_8x128": 0.02789,
+   "spread": 0.02931,
+   "quant": 0.0002161,
+   "replay_vs_dump": 0.0,
+   "limit": 0.05862
+  },
+  {
+   "module": 25,
+   "key": "backbone.layers.24",
+   "spread_2x512": 0.02724,
+   "spread_8x128": 0.02587,
+   "spread": 0.02724,
+   "quant": 0.0002075,
+   "replay_vs_dump": 0.0,
+   "limit": 0.05448
+  },
+  {
+   "module": 26,
+   "key": "backbone.layers.25",
+   "spread_2x512": 0.02784,
+   "spread_8x128": 0.02657,
+   "spread": 0.02784,
+   "quant": 0.0002013,
+   "replay_vs_dump": 0.0,
+   "limit": 0.05568
+  },
+  {
+   "module": 27,
+   "key": "backbone.layers.26",
+   "spread_2x512": 0.03279,
+   "spread_8x128": 0.03139,
+   "spread": 0.03279,
+   "quant": 0.0002001,
+   "replay_vs_dump": 0.0002053,
+   "limit": 0.06558
+  },
+  {
+   "module": 28,
+   "key": "backbone.layers.27",
+   "spread_2x512": 0.03163,
+   "spread_8x128": 0.03031,
+   "spread": 0.03163,
+   "quant": 0.0002104,
+   "replay_vs_dump": 0.00115,
+   "limit": 0.06326
+  },
+  {
+   "module": 29,
+   "key": "backbone.layers.28",
+   "spread_2x512": 0.03522,
+   "spread_8x128": 0.03409,
+   "spread": 0.03522,
+   "quant": 0.000203,
+   "replay_vs_dump": 0.003422,
+   "limit": 0.07044
+  },
+  {
+   "module": 30,
+   "key": "backbone.layers.29",
+   "spread_2x512": 0.03382,
+   "spread_8x128": 0.03265,
+   "spread": 0.03382,
+   "quant": 0.0002058,
+   "replay_vs_dump": 0.003434,
+   "limit": 0.06764
+  },
+  {
+   "module": 31,
+   "key": "backbone.layers.30",
+   "spread_2x512": 0.04023,
+   "spread_8x128": 0.0389,
+   "spread": 0.04023,
+   "quant": 0.0002078,
+   "replay_vs_dump": 0.007761,
+   "limit": 0.08046
+  },
+  {
+   "module": 32,
+   "key": "backbone.layers.31",
+   "spread_2x512": 0.03823,
+   "spread_8x128": 0.03667,
+   "spread": 0.03823,
+   "quant": 0.0002093,
+   "replay_vs_dump": 0.006882,
+   "limit": 0.07646
+  },
+  {
+   "module": 33,
+   "key": "backbone.layers.32",
+   "spread_2x512": 0.04814,
+   "spread_8x128": 0.04673,
+   "spread": 0.04814,
+   "quant": 0.0002048,
+   "replay_vs_dump": 0.01197,
+   "limit": 0.09628
+  },
+  {
+   "module": 34,
+   "key": "backbone.layers.33",
+   "spread_2x512": 0.05001,
+   "spread_8x128": 0.04819,
+   "spread": 0.05001,
+   "quant": 0.0002021,
+   "replay_vs_dump": 0.01144,
+   "limit": 0.10002
+  },
+  {
+   "module": 35,
+   "key": "backbone.layers.34",
+   "spread_2x512": 0.06952,
+   "spread_8x128": 0.06635,
+   "spread": 0.06952,
+   "quant": 0.0002067,
+   "replay_vs_dump": 0.01894,
+   "limit": 0.13904
+  },
+  {
+   "module": 36,
+   "key": "backbone.layers.35",
+   "spread_2x512": 0.06771,
+   "spread_8x128": 0.06461,
+   "spread": 0.06771,
+   "quant": 0.0002052,
+   "replay_vs_dump": 0.01774,
+   "limit": 0.13542
+  },
+  {
+   "module": 37,
+   "key": "backbone.layers.36",
+   "spread_2x512": 0.07632,
+   "spread_8x128": 0.07386,
+   "spread": 0.07632,
+   "quant": 0.0002081,
+   "replay_vs_dump": 0.01844,
+   "limit": 0.15264
+  },
+  {
+   "module": 38,
+   "key": "backbone.layers.37",
+   "spread_2x512": 0.09686,
+   "spread_8x128": 0.09469,
+   "spread": 0.09686,
+   "quant": 0.0002089,
+   "replay_vs_dump": 0.02694,
+   "limit": 0.19372
+  },
+  {
+   "module": 39,
+   "key": "backbone.layers.38",
+   "spread_2x512": 0.09785,
+   "spread_8x128": 0.09597,
+   "spread": 0.09785,
+   "quant": 0.0002072,
+   "replay_vs_dump": 0.02629,
+   "limit": 0.1957
+  },
+  {
+   "module": 40,
+   "key": "backbone.layers.39",
+   "spread_2x512": 0.1128,
+   "spread_8x128": 0.1118,
+   "spread": 0.1128,
+   "quant": 0.0002085,
+   "replay_vs_dump": 0.03574,
+   "limit": 0.2256
+  },
+  {
+   "module": 41,
+   "key": "backbone.layers.40",
+   "spread_2x512": 0.1133,
+   "spread_8x128": 0.1135,
+   "spread": 0.1135,
+   "quant": 0.000206,
+   "replay_vs_dump": 0.03352,
+   "limit": 0.227
+  },
+  {
+   "module": 42,
+   "key": "backbone.layers.41",
+   "spread_2x512": 0.1201,
+   "spread_8x128": 0.1212,
+   "spread": 0.1212,
+   "quant": 0.0002046,
+   "replay_vs_dump": 0.03718,
+   "limit": 0.2424
+  },
+  {
+   "module": 43,
+   "key": "backbone.layers.42",
+   "spread_2x512": 0.1218,
+   "spread_8x128": 0.1231,
+   "spread": 0.1231,
+   "quant": 0.0002085,
+   "replay_vs_dump": 0.03654,
+   "limit": 0.2462
+  },
+  {
+   "module": 44,
+   "key": "backbone.layers.43",
+   "spread_2x512": 0.1359,
+   "spread_8x128": 0.138,
+   "spread": 0.138,
+   "quant": 0.0002068,
+   "replay_vs_dump": 0.04417,
+   "limit": 0.276
+  },
+  {
+   "module": 45,
+   "key": "backbone.layers.44",
+   "spread_2x512": 0.1394,
+   "spread_8x128": 0.1421,
+   "spread": 0.1421,
+   "quant": 0.0002079,
+   "replay_vs_dump": 0.04394,
+   "limit": 0.2842
+  },
+  {
+   "module": 46,
+   "key": "backbone.layers.45",
+   "spread_2x512": 0.1538,
+   "spread_8x128": 0.1568,
+   "spread": 0.1568,
+   "quant": 0.0002062,
+   "replay_vs_dump": 0.05235,
+   "limit": 0.3136
+  },
+  {
+   "module": 47,
+   "key": "backbone.layers.46",
+   "spread_2x512": 0.1475,
+   "spread_8x128": 0.1504,
+   "spread": 0.1504,
+   "quant": 0.0002074,
+   "replay_vs_dump": 0.04842,
+   "limit": 0.3008
+  },
+  {
+   "module": 48,
+   "key": "backbone.layers.47",
+   "spread_2x512": 0.1671,
+   "spread_8x128": 0.1715,
+   "spread": 0.1715,
+   "quant": 0.0002067,
+   "replay_vs_dump": 0.05297,
+   "limit": 0.343
+  },
+  {
+   "module": 49,
+   "key": "backbone.layers.48",
+   "spread_2x512": 0.1599,
+   "spread_8x128": 0.1644,
+   "spread": 0.1644,
+   "quant": 0.0002076,
+   "replay_vs_dump": 0.05255,
+   "limit": 0.3288
+  },
+  {
+   "module": 50,
+   "key": "backbone.layers.49",
+   "spread_2x512": 0.1576,
+   "spread_8x128": 0.1622,
+   "spread": 0.1622,
+   "quant": 0.0002067,
+   "replay_vs_dump": 0.0517,
+   "limit": 0.3244
+  },
+  {
+   "module": 51,
+   "key": "backbone.layers.50",
+   "spread_2x512": 0.1508,
+   "spread_8x128": 0.1557,
+   "spread": 0.1557,
+   "quant": 0.0002061,
+   "replay_vs_dump": 0.05186,
+   "limit": 0.3114
+  },
+  {
+   "module": 52,
+   "key": "backbone.layers.51",
+   "spread_2x512": 0.1371,
+   "spread_8x128": 0.1415,
+   "spread": 0.1415,
+   "quant": 0.0002064,
+   "replay_vs_dump": 0.04683,
+   "limit": 0.283
+  },
+  {
+   "module": 53,
+   "key": "backbone.layers.52",
+   "spread_2x512": 0.1375,
+   "spread_8x128": 0.1417,
+   "spread": 0.1417,
+   "quant": 0.0002107,
+   "replay_vs_dump": 0.04802,
+   "limit": 0.2834
+  },
+  {
+   "module": 54,
+   "key": "backbone.layers.53",
+   "spread_2x512": 0.1356,
+   "spread_8x128": 0.1401,
+   "spread": 0.1401,
+   "quant": 0.0002096,
+   "replay_vs_dump": 0.04641,
+   "limit": 0.2802
+  },
+  {
+   "module": 55,
+   "key": "backbone.layers.54",
+   "spread_2x512": 0.1415,
+   "spread_8x128": 0.1468,
+   "spread": 0.1468,
+   "quant": 0.0002105,
+   "replay_vs_dump": 0.04956,
+   "limit": 0.2936
+  },
+  {
+   "module": 56,
+   "key": "backbone.layers.55",
+   "spread_2x512": 0.1365,
+   "spread_8x128": 0.1419,
+   "spread": 0.1419,
+   "quant": 0.0002048,
+   "replay_vs_dump": 0.04721,
+   "limit": 0.2838
+  },
+  {
+   "module": 57,
+   "key": "backbone.layers.56",
+   "spread_2x512": 0.1412,
+   "spread_8x128": 0.1472,
+   "spread": 0.1472,
+   "quant": 0.0002049,
+   "replay_vs_dump": 0.04951,
+   "limit": 0.2944
+  },
+  {
+   "module": 58,
+   "key": "backbone.layers.57",
+   "spread_2x512": 0.1469,
+   "spread_8x128": 0.1532,
+   "spread": 0.1532,
+   "quant": 0.0002067,
+   "replay_vs_dump": 0.05053,
+   "limit": 0.3064
+  },
+  {
+   "module": 59,
+   "key": "backbone.layers.58",
+   "spread_2x512": 0.1611,
+   "spread_8x128": 0.1677,
+   "spread": 0.1677,
+   "quant": 0.0002086,
+   "replay_vs_dump": 0.05625,
+   "limit": 0.3354
+  },
+  {
+   "module": 60,
+   "key": "backbone.layers.59",
+   "spread_2x512": 0.1613,
+   "spread_8x128": 0.1675,
+   "spread": 0.1675,
+   "quant": 0.0002068,
+   "replay_vs_dump": 0.05729,
+   "limit": 0.335
+  },
+  {
+   "module": 61,
+   "key": "backbone.layers.60",
+   "spread_2x512": 0.1493,
+   "spread_8x128": 0.1554,
+   "spread": 0.1554,
+   "quant": 0.0002027,
+   "replay_vs_dump": 0.05353,
+   "limit": 0.3108
+  },
+  {
+   "module": 62,
+   "key": "backbone.layers.61",
+   "spread_2x512": 0.1504,
+   "spread_8x128": 0.1567,
+   "spread": 0.1567,
+   "quant": 0.000207,
+   "replay_vs_dump": 0.05513,
+   "limit": 0.3134
+  },
+  {
+   "module": 63,
+   "key": "backbone.layers.62",
+   "spread_2x512": 0.1449,
+   "spread_8x128": 0.1514,
+   "spread": 0.1514,
+   "quant": 0.0002073,
+   "replay_vs_dump": 0.05304,
+   "limit": 0.3028
+  },
+  {
+   "module": 64,
+   "key": "backbone.layers.63",
+   "spread_2x512": 0.1454,
+   "spread_8x128": 0.152,
+   "spread": 0.152,
+   "quant": 0.0002075,
+   "replay_vs_dump": 0.05445,
+   "limit": 0.304
+  },
+  {
+   "module": 65,
+   "key": "backbone.layers.64",
+   "spread_2x512": 0.1428,
+   "spread_8x128": 0.1499,
+   "spread": 0.1499,
+   "quant": 0.0002019,
+   "replay_vs_dump": 0.05312,
+   "limit": 0.2998
+  },
+  {
+   "module": 66,
+   "key": "backbone.layers.65",
+   "spread_2x512": 0.1429,
+   "spread_8x128": 0.1498,
+   "spread": 0.1498,
+   "quant": 0.0002007,
+   "replay_vs_dump": 0.0534,
+   "limit": 0.2996
+  },
+  {
+   "module": 67,
+   "key": "backbone.layers.66",
+   "spread_2x512": 0.1458,
+   "spread_8x128": 0.1531,
+   "spread": 0.1531,
+   "quant": 0.000203,
+   "replay_vs_dump": 0.0555,
+   "limit": 0.3062
+  },
+  {
+   "module": 68,
+   "key": "backbone.layers.67",
+   "spread_2x512": 0.1515,
+   "spread_8x128": 0.1586,
+   "spread": 0.1586,
+   "quant": 0.0002041,
+   "replay_vs_dump": 0.05774,
+   "limit": 0.3172
+  },
+  {
+   "module": 69,
+   "key": "backbone.layers.68",
+   "spread_2x512": 0.1656,
+   "spread_8x128": 0.1731,
+   "spread": 0.1731,
+   "quant": 0.000209,
+   "replay_vs_dump": 0.06329,
+   "limit": 0.3462
+  },
+  {
+   "module": 70,
+   "key": "backbone.layers.69",
+   "spread_2x512": 0.1854,
+   "spread_8x128": 0.1923,
+   "spread": 0.1923,
+   "quant": 0.0002065,
+   "replay_vs_dump": 0.07913,
+   "limit": 0.3846
+  },
+  {
+   "module": 71,
+   "key": "backbone.layers.70",
+   "spread_2x512": 0.1872,
+   "spread_8x128": 0.1938,
+   "spread": 0.1938,
+   "quant": 0.0002048,
+   "replay_vs_dump": 0.08289,
+   "limit": 0.3876
+  },
+  {
+   "module": 72,
+   "key": "backbone.layers.71",
+   "spread_2x512": 0.1849,
+   "spread_8x128": 0.1916,
+   "spread": 0.1916,
+   "quant": 0.0002039,
+   "replay_vs_dump": 0.08161,
+   "limit": 0.3832
+  },
+  {
+   "module": 73,
+   "key": "backbone.layers.72",
+   "spread_2x512": 0.1954,
+   "spread_8x128": 0.2038,
+   "spread": 0.2038,
+   "quant": 0.0002012,
+   "replay_vs_dump": 0.08895,
+   "limit": 0.4076
+  },
+  {
+   "module": 74,
+   "key": "backbone.layers.73",
+   "spread_2x512": 0.2093,
+   "spread_8x128": 0.218,
+   "spread": 0.218,
+   "quant": 0.0002071,
+   "replay_vs_dump": 0.09381,
+   "limit": 0.436
+  },
+  {
+   "module": 75,
+   "key": "backbone.layers.74",
+   "spread_2x512": 0.2164,
+   "spread_8x128": 0.2246,
+   "spread": 0.2246,
+   "quant": 0.0002052,
+   "replay_vs_dump": 0.09683,
+   "limit": 0.4492
+  },
+  {
+   "module": 76,
+   "key": "backbone.layers.75",
+   "spread_2x512": 0.2273,
+   "spread_8x128": 0.2344,
+   "spread": 0.2344,
+   "quant": 0.0002041,
+   "replay_vs_dump": 0.09962,
+   "limit": 0.4688
+  },
+  {
+   "module": 77,
+   "key": "backbone.layers.76",
+   "spread_2x512": 0.2442,
+   "spread_8x128": 0.2527,
+   "spread": 0.2527,
+   "quant": 0.0002056,
+   "replay_vs_dump": 0.1085,
+   "limit": 0.5054
+  },
+  {
+   "module": 78,
+   "key": "backbone.layers.77",
+   "spread_2x512": 0.2393,
+   "spread_8x128": 0.2468,
+   "spread": 0.2468,
+   "quant": 0.0002069,
+   "replay_vs_dump": 0.1066,
+   "limit": 0.4936
+  },
+  {
+   "module": 79,
+   "key": "backbone.layers.78",
+   "spread_2x512": 0.2442,
+   "spread_8x128": 0.2532,
+   "spread": 0.2532,
+   "quant": 0.0002059,
+   "replay_vs_dump": 0.1082,
+   "limit": 0.5064
+  },
+  {
+   "module": 80,
+   "key": "backbone.layers.79",
+   "spread_2x512": 0.2549,
+   "spread_8x128": 0.2647,
+   "spread": 0.2647,
+   "quant": 0.0002059,
+   "replay_vs_dump": 0.1231,
+   "limit": 0.5294
+  },
+  {
+   "module": 81,
+   "key": "backbone.layers.80",
+   "spread_2x512": 0.2064,
+   "spread_8x128": 0.2144,
+   "spread": 0.2144,
+   "quant": 0.0002074,
+   "replay_vs_dump": 0.09961,
+   "limit": 0.4288
+  },
+  {
+   "module": 82,
+   "key": "backbone.layers.81",
+   "spread_2x512": 0.1966,
+   "spread_8x128": 0.2034,
+   "spread": 0.2034,
+   "quant": 0.0002097,
+   "replay_vs_dump": 0.09473,
+   "limit": 0.4068
+  },
+  {
+   "module": 83,
+   "key": "backbone.layers.82",
+   "spread_2x512": 0.1767,
+   "spread_8x128": 0.1826,
+   "spread": 0.1826,
+   "quant": 0.0002079,
+   "replay_vs_dump": 0.08521,
+   "limit": 0.3652
+  },
+  {
+   "module": 84,
+   "key": "backbone.layers.83",
+   "spread_2x512": 0.1748,
+   "spread_8x128": 0.1798,
+   "spread": 0.1798,
+   "quant": 0.0002099,
+   "replay_vs_dump": 0.08394,
+   "limit": 0.3596
+  },
+  {
+   "module": 85,
+   "key": "backbone.layers.84",
+   "spread_2x512": 0.1707,
+   "spread_8x128": 0.1733,
+   "spread": 0.1733,
+   "quant": 0.0002102,
+   "replay_vs_dump": 0.08394,
+   "limit": 0.3466
+  },
+  {
+   "module": 86,
+   "key": "backbone.layers.85",
+   "spread_2x512": 0.1753,
+   "spread_8x128": 0.1744,
+   "spread": 0.1753,
+   "quant": 0.0002104,
+   "replay_vs_dump": 0.08997,
+   "limit": 0.3506
+  },
+  {
+   "module": 87,
+   "key": "backbone.layers.86",
+   "spread_2x512": 0.1705,
+   "spread_8x128": 0.1676,
+   "spread": 0.1705,
+   "quant": 0.0002068,
+   "replay_vs_dump": 0.0919,
+   "limit": 0.341
+  },
+  {
+   "module": 88,
+   "key": "backbone.layers.87",
+   "spread_2x512": 0.1584,
+   "spread_8x128": 0.1562,
+   "spread": 0.1584,
+   "quant": 0.0002023,
+   "replay_vs_dump": 0.1029,
+   "limit": 0.3168
+  },
+  {
+   "module": 89,
+   "key": "backbone.norm_f",
+   "spread_2x512": 0.1568,
+   "spread_8x128": 0.1547,
+   "spread": 0.1568,
+   "quant": 0.0002048,
+   "replay_vs_dump": 0.09535,
+   "limit": 0.3136
+  },
+  {
+   "module": 90,
+   "key": "lm_head",
+   "spread_2x512": 0.04076,
+   "spread_8x128": 0.03886,
+   "spread": 0.04076,
+   "quant": 0.000217,
+   "replay_vs_dump": 0.02378,
+   "limit": 0.08152
+  }
+ ]
+}

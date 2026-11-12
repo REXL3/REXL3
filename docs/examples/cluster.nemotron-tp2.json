@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "nemotron-tp2",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. Nemotron 3.5 Super VL, the qualified TP=2 profile (1M window, 16 slots, vision tower on rank 0, --spec auto, prefix cache Auto, graphs on) on two GB10 nodes. Serve it with `rexl3-cluster supervise` (the restart policy), never with a bare `up` in production: a lost group stays down by design. docs/NEMOTRON_TP_OPERATIONS.md. Set expected_hostname on each node for the host check; the paths are $HOME-relative on every node.",
+  "user": "rexl3",
+  "binary": "$HOME/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {"name": "N1", "number": 1, "address": "192.0.2.1"},
+    {"name": "N4", "number": 4, "address": "192.0.2.4"}
+  ],
+  "nccl": {
+    "env_file": "$HOME/rexl3/nccl.env",
+    "lib": "$HOME/rexl3/nccl/lib/libnccl.so.2",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": ["rocep1s0f0:1", "roceP2p1s0f0:1"]
+  },
+  "pack": "$HOME/rexl3/packs/nemotron-3.5-super-vl",
+  "memory": {"_comment": "33.38 GiB of weights on the larger rank (window 7 plan) plus the 1M KV pool, 16 slots of state, the cache arena, graphs", "min_free_gib": 70},
+  "serve": {
+    "flags": ["--allow-unvalidated-pack", "--backend", "cuda", "--slots", "16", "--max-model-len", "1048576", "--max-json-nodes", "1500000",
+              "--max-rendered-prompt-mib", "8", "--spec", "auto", "--served-model-name", "m", "--request-timeout", "43200",
+              "--kv-headroom-tokens", "131072"],
+    "_comment": "E1's long-prefill profile (docs/LONG_PREFILL_POLICY.md): 131,072 tokens of KV beside one 1M context so short requests are served during a 1M prefill, size-aware prefix eviction, a snapshot every 65,536 tokens of a long prefill. Its GPU legs (a 1M prefill with a co-tenant, per-rank memory with the headroom, deep-cancel resume at TP=2) are owed.",
+    "env": {"REXL3_PREFIX_EVICTION": "size", "REXL3_PREFIX_CHECKPOINT": "65536"}
+  },
+  "tp": {"connect_timeout_s": 600, "ready_timeout_s": 900, "peer_timeout_s": 15, "shutdown_grace_s": 30},
+  "groups": [
+    {"name": "g0", "ranks": ["N1", "N4"], "tp_port": 29651, "http_port": 8951, "http_host": "0.0.0.0"}
+  ],
+  "supervisor": {"backoff_base_s": 15, "backoff_cap_s": 300, "stable_after_s": 600, "max_restarts": 5, "window_s": 1800, "settle_s": 30, "poll_s": 5}
+}

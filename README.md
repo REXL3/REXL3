@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/rexl3-logo.jpg" alt="REXL3 logo" width="240">
+</p>
+
 # REXL3
 
 REXL3 is an inference engine for **NVIDIA GB10** systems (DGX Spark class, `sm_121`) that serves
@@ -11,15 +15,19 @@ This repository is the **production** repository. It holds:
   approval and promotion tooling and never edited by hand;
 - the policy that decides which trees production accepts (`runtimes/templates/APPROVED.json` and
   `runtimes/templates/APPROVALS.json`);
-- the stdlib-Python verifier and promotion tools in `tools/`.
+- the stdlib-Python verifier and promotion tools in `tools/`;
+- the AGPL-3.0 corresponding source of the engine release (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`,
+  `Cargo.lock`, `rust-toolchain.toml`, `SOURCE_BUILD.md`, `SOURCE_IDENTITY.json`), a snapshot of the
+  development repository at the release's engine commit.
 
 Engine development, model validation and sealing happen in the development repository,
-`REXL3/REXL3-dev`. There is no engine source here. Rules for contributing are in
+`REXL3/REXL3-dev`; the engine source here is a snapshot of it, and `SOURCE_BUILD.md` says how to build it.
+Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: no pack is released yet.** The first release (v0.1.0) is being prepared; none of the
-> first-release models below is published. Everything in this README describes how the release will
-> work and how recipes are structured, not something that is already available.
+> **Status: v0.1.0 is released.** The five models below are published as assets of the
+> [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
+> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`.
 
 ## First release (v0.1.0) models
 
@@ -175,7 +183,9 @@ runtimes/
 `APPROVALS.json` keys are `<family>/<model>/v<N>`; each entry pins the approval hash, the source
 commit and tree, and the runtime id. The verifier (`verify`, section "Checks and CI" below) requires
 every tree under `runtimes/` to match a registry entry exactly — file inventory, hashes, sizes and
-modes — and refuses a template digest that is not in `APPROVED.json`.
+modes — and refuses a template digest that is not in `APPROVED.json`. `APPROVED.json` maps each
+template version to one approved digest or to a list of approved digests (trees sealed against an
+earlier digest of a version keep verifying); an unlisted version or digest is refused.
 
 ## Run your own model or recipe (advanced)
 
@@ -325,15 +335,28 @@ The workflows read code and policy from the protected base checkout only (`pull_
 head is checked out as inert data and never executed. `DEV_ASSETS_TOKEN` is the only secret, used by a
 single download step; actions are pinned by full commit SHA.
 
-## Reporting a problem
+## Reporting a problem or submitting a coded fix/feature
 
-Open an issue in this repository (Issues, New issue, **Tester report**). The form asks for the release
-tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
-line, the exact command with its exit code and error token, the request and response for a bad answer,
-the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
-expected.
-Issues are visible to the maintainers and every invited tester; never paste raw logs, prompts,
-credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
+Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`)
+and check the model's `KNOWN_ISSUES.md`; if an open issue already covers the same symptom or bottleneck, add your findings,
+diagnostics, or tested patch as a comment on that issue instead of opening a duplicate.
+Always use the structured templates in `.github/ISSUE_TEMPLATE/` (including when submitting via `gh issue create`, preserving the `[report] ` or `[finding] ` title prefix and all required headings):
+
+- **Bug or failure report (`.github/ISSUE_TEMPLATE/tester-report.yml`, `[report] `):** asks for the release
+  tag, the bundle asset name and its `bundle.sha256`, the profile, the server's `rexl3 event=start` log
+  line, the exact command with its exit code and error token, the request and response for a bad answer,
+  the output of `./launch.sh diagnostics` (an allow-list report — read it before pasting), and what you
+  expected.
+- **Finding, fix, or feature proof (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, `[finding] `):**
+  **no bare feature requests.** Because this repository ships the complete engine source tree (`crates/`,
+  `Cargo.toml`, `SOURCE_BUILD.md`), any proposed feature, drafter integration, kernel optimization, or
+  runtime improvement must include a **working `git diff` that you built, tested, and validated on your
+  own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`)**,
+  together with exactness checks (`drafted == serial`) and measured before/after numbers so the
+  maintainers can test it in `REXL3/REXL3-dev`, validate it, and promote it to `REXL3/REXL3`.
+
+Issues are public: anyone can read them, and only invited testers and the maintainers can open or
+comment on them. Testers submit code as a `git diff` in an issue and do not open pull requests. Never paste raw logs, prompts, credentials or tokens. Report a security problem via [SECURITY.md](SECURITY.md), never as an issue.
 
 ## Licence and corresponding source
 
@@ -344,5 +367,6 @@ and that repository's own licence governs the weights. Third-party notices are i
 
 Binaries in a release archive are built from the source commit recorded in the recipe's approval
 record (`approval.json` in the sealed tree, `<runtime-id>-v<N>-approval.json` on the release), in the
-dev repository. Releases attach the engine corresponding source as a release
-asset; anyone who receives a binary and needs its Corresponding Source can also ask the maintainers.
+dev repository. The same Corresponding Source is in this repository (`SOURCE_BUILD.md`,
+`SOURCE_IDENTITY.json`) and is attached to each release as an asset; anyone who receives a binary and
+needs its Corresponding Source can also ask the maintainers.

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "example-fleet",
+  "_comment": "ILLUSTRATIVE ONLY: a data-parallel fleet of two TP groups of two ranks behind rexl3-router (--endpoint http://A1:8080 --endpoint http://A3:8080). One big model per node: no node is in two groups. `rexl3-cluster up --group g0` and `--group g1` start them; the router is its own process.",
+  "user": "rexl3",
+  "binary": "/opt/rexl3/rexl3-serve",
+  "nodes": [
+    {"name": "A1", "number": 1, "address": "198.51.100.1"},
+    {"name": "A2", "number": 2, "address": "198.51.100.2"},
+    {"name": "A3", "number": 3, "address": "198.51.100.3"},
+    {"name": "A4", "number": 4, "address": "198.51.100.4"}
+  ],
+  "nccl": {"env_file": "/etc/rexl3/nccl.env", "max_nchannels": 4, "socket_ifname": "=eth1", "hca": ["mlx5_0:1", "mlx5_1:1"]},
+  "pack": "/srv/models/nemotron-super-exl3",
+  "memory": {"min_free_gib": 50},
+  "serve": {"flags": ["--allow-unvalidated-pack", "--backend", "cuda", "--no-vision", "--slots", "20", "--max-model-len", "40000", "--kv-tokens", "40000",
+                      "--prefill-chunk", "256", "--spec", "auto", "--prefix-cache", "off"]},
+  "groups": [
+    {"name": "g0", "ranks": ["A1", "A2"], "tp_port": 29600, "http_port": 8080},
+    {"name": "g1", "ranks": ["A3", "A4"], "tp_port": 29600, "http_port": 8080}
+  ]
+}

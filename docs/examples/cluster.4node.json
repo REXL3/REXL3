@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "example-4node",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. ILLUSTRATIVE ONLY: a four-rank tensor-parallel group on four hosts (documentation addresses). Nothing like it exists here: R > 2 is built for capacity and is unmeasured on a fabric. A binary from before the N-rank runtime refuses --tp-ranks 4 by name at boot.",
+  "user": "rexl3",
+  "binary": "/opt/rexl3/rexl3-serve",
+  "nodes": [
+    {"name": "A1", "number": 1, "address": "198.51.100.1", "fabric_address": "203.0.113.1"},
+    {"name": "A2", "number": 2, "address": "198.51.100.2", "fabric_address": "203.0.113.2"},
+    {"name": "A3", "number": 3, "address": "198.51.100.3", "fabric_address": "203.0.113.3"},
+    {"name": "A4", "number": 4, "address": "198.51.100.4", "fabric_address": "203.0.113.4"},
+    {"name": "A5", "number": 5, "address": "198.51.100.5", "disabled": true, "reason": "spare, in the file so that nobody adds it by mistake"}
+  ],
+  "nccl": {
+    "env_file": "/etc/rexl3/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=eth1",
+    "hca": ["mlx5_0:1", "mlx5_1:1"],
+    "env": {"NCCL_PROTO": "Simple"}
+  },
+  "pack": "/srv/models/big-moe-exl3",
+  "memory": {"min_free_gib": 60},
+  "serve": {
+    "flags": ["--allow-unvalidated-pack", "--backend", "cuda", "--no-vision", "--slots", "8", "--max-model-len", "65536", "--kv-tokens", "65536",
+              "--prefill-chunk", "256", "--spec", "auto", "--prefix-cache", "off"],
+    "env": {"REXL3_NEMO_GRAPHS": "on"}
+  },
+  "tp": {"connect_timeout_s": 600, "ready_timeout_s": 900, "peer_timeout_s": 15, "shutdown_grace_s": 30},
+  "binary_max_ranks": 4,
+  "groups": [
+    {"name": "tp4", "ranks": ["A1", "A2", "A3", "A4"], "tp_port": 29600, "http_port": 8080, "leader_flags": ["--served-model-name", "big"]}
+  ]
+}

@@ -9,9 +9,8 @@ size, which request switches it honours, its measured behaviour) is in that reci
 `profile.json`, `KNOWN_ISSUES.md` and `docs/` (inside the bundle you extract). Read this guide once,
 then keep the recipe's `KNOWN_ISSUES.md` beside you.
 
-> **Status: no model is released yet.** The first release (v0.1.0) is being prepared. The steps below
-> describe the release flow as it will work; the GitHub releases page will name the exact tag when it
-> is published.
+> **Status: v0.1.0 is released and v0.1.1 is being prepared.** The GitHub releases page names the
+> exact tags; use the tag of the release that holds your model.
 
 ## 1. How the documentation fits together
 
@@ -68,7 +67,7 @@ such as `v0.1.0`. A line starting with `#` inside a code block is a comment.
 For a single-node recipe:
 
 ```bash
-TAG=v0.1.0                        # the exact release tag from the GitHub releases page
+TAG=v0.1.1                        # the exact release tag from the GitHub releases page
 RUNTIME_ID=<runtime-id>           # the prefix of your model's asset names (section 4.2)
 
 DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
@@ -80,6 +79,14 @@ have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
 [ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"   # section 4.3
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do                # the engine binaries the approval names (section 4.4)
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
 
 ./launch.sh --yes install-deps          # system packages and a private Python environment
 ./launch.sh doctor                      # read-only checks; must exit 0
@@ -104,7 +111,7 @@ If a recipe has more than one profile, add `--profile <name>` to `setup`, `start
 ### 4.1 Choose a release tag
 
 The [README](../README.md) lists the first-release models and their status. The GitHub releases page
-has the exact tags; the first will be `v0.1.0`. Releases are immutable: a fix is a new version, never
+has the exact tags; the first was `v0.1.0`. Releases are immutable: a fix is a new version, never
 an edit. Pick the version a maintainer told you to test.
 
 ### 4.2 Download the release
@@ -151,6 +158,22 @@ so to use it, copy the two downloaded assets to those names in a fresh directory
 ```bash
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+```
+
+The bundle ships without its engine binaries (`bin/rexl3-serve`, and `bin/rexl3-cluster` for a
+two-node recipe). They are assets of the same release, named with their SHA-256 in the approval's
+`engine_binaries`. Download each one, check its hash, and install it at its path with mode 0755,
+before `install-deps` (which refuses a bundle with a missing binary):
+
+```bash
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do                # the engine binaries the approval names (section 4.4)
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
 ```
 
 Use a new directory for every version. Never extract over a bundle that is running. Keep the download
@@ -281,7 +304,13 @@ numbers are refused. A recipe can also ignore `enable_thinking` (a model that al
 
 Whether a request thinks when it names neither depends on the recipe and server build; `GET /v1/models`
 reports the reasoning controls and level names the recipe exposes, and the recipe's `KNOWN_ISSUES.md`
-states the default. Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
+states the default. On Qwen3.8-Flash-Next and Nemotron-3.5-Super-VL a request that names neither does
+**not** think, although their chat templates would; to turn thinking on, send it in
+`chat_template_kwargs` (their qualification runs sent both fields):
+
+```json
+{"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"}}
+``` Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
 
 ### 5.4 Sampling, seeds and repeatable output
 
@@ -446,10 +475,10 @@ launcher prints an error **token** in capitals; the table lists the common ones 
   the leader also listens on the site's `tp_port` for the follower, and the follower serves no HTTP.
   Any client that can reach the leader's port can use the server, so keep both nodes on a private
   network or firewall the ports.
-- In v0.1.0 the two-node profile (GLM-5.3-Flash's 1,048,576-token profile, `glm53-flash-tp2-1m`)
-  listens on the leader node's network address, not on localhost, and the server has no API key and
-  no request log. Run it only on a private, trusted network, or behind a firewall or an SSH tunnel.
-  An API key option is planned for v0.1.1.
+- The two-node profiles (`glm53-flash-tp2-1m`, `redsnow-tp2-512k` and `dsv41-tp2-1m`) listen on the
+  leader node's network address, not on localhost, and the server has no API key and no request log.
+  Run them only on a private, trusted network, or behind a firewall or an SSH tunnel. An API key
+  option is planned for the next release.
 - Prompts and answers are held in memory and written to the server log only as the log shows; do not
   paste raw logs, prompts, environment dumps or credentials into a report. `diagnostics` is an
   allow-list for this reason, but read it before you share it.

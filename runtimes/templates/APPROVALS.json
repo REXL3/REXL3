@@ -145,6 +145,20 @@
       "source_commit": "799fa750f8eb7d4c45d757d9c44beeb7182b5d51",
       "source_tree": "eac660dad193672bb6ae9861b34cd698ce1444be"
     },
+    "qwen3.8/qwen3.8-27b/v4": {
+      "approval_sha256": "d17dda427fbf9ba6e2b9b03706b4f8a366c627a894cefdbdb8efa664b629167f",
+      "binary_sha256": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5",
+      "profiles": {
+        "qwen38-single-262k": {
+          "receipt": {
+            "sha256": "85d85e8f5b84240928b1e938c299e8b62acf99228023e154eb3ba42d16ed1de8"
+          }
+        }
+      },
+      "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
+      "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+      "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
+    },
     "qwen3.8/qwen3.8-flash-next/v2": {
       "approval_sha256": "fdbd312cbf6d7345bbb61c9c803d11771933511ed332b3218e1630ac50b7ab2e",
       "binary_sha256": "40e23e7116eff881e3a4545304cd82f18f84c532ae2f7b68506af02373e48318",

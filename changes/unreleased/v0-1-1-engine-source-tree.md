@@ -1,3 +1,0 @@
-## New features and improvements
-
-- The engine source tree on `main` (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md`, `SOURCE_IDENTITY.json` and the cluster examples under `docs/examples/`) now matches the v0.1.1 engine commit `75031112ba1279b6da97d5604be5160648cc9f2c` (tree `519678470f283dd5d39281d7d90df8bbc31999e8`, dev engine release `engine-v0.1.1-75031112`), the build every v0.1.1 runtime is sealed on. It also ships `rustfmt.toml` and `tools/switch_registry.json`, so the tree passes its own `cargo fmt --check`, clippy and unit tests. The files are byte-identical to the engine-source archive the v0.1.1 approvals pin. Added by #147.

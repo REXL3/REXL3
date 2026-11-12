@@ -58,8 +58,24 @@ pub type Dsv41GroupEngine = Engine<Dsv41Backend<super::tp_runtime::TpLeader<Dsv4
 /// replaced by the first measurement on a device (`tests/dsv41_bench.rs`, which does not exist yet).
 pub(super) const STEP_MS: &[(usize, f64)] = &[(1, 1.0), (super::model::WINDOW_ROWS, 1.0)];
 
-/// Rows of one chunk as admission prices it (see [`admit_pack`]).
+/// Rows of one prefill chunk on a single node at the default `--prefill-chunk` (4096): see [`chunk_rows_for`].
 pub const ADMISSION_CHUNK_ROWS: usize = 512;
+
+/// Rows of one prefill chunk this rank's model is built at, and so the rows admission prices its scratch at: the one source
+/// of the number for the price ([`request_for`]), the group's boot gate ([`gate_for_rank`]) and the build ([`load_rank`]'s
+/// `chunk_rows`).
+///
+/// A single node at the default `--prefill-chunk` (4096) runs [`ADMISSION_CHUNK_ROWS`] (512) rows a chunk. Any other
+/// single-node chunk, and every rank of a tensor-parallel group, runs `--prefill-chunk` rows capped at the kernels'
+/// `MAX_ROWS` (2048).
+pub(super) fn chunk_rows_for(o: &ServeOptions) -> usize {
+    let is_tp = o.tp.as_ref().is_some_and(|t| t.is_group());
+    if !is_tp && o.prefill_chunk == 4096 {
+        ADMISSION_CHUNK_ROWS
+    } else {
+        o.prefill_chunk.clamp(1, gb_cuda::dsv4_attn::MAX_ROWS)
+    }
+}
 
 /// What a build may be told to assume instead of measuring: the two numbers a test drives the refusal with, and nothing else.
 #[derive(Clone, Copy, Debug, Default)]
@@ -192,8 +208,8 @@ fn inventory(cfg: &DeepseekV41Config, ck: &Checkpoint) -> Result<PackInventory, 
     PackInventory::from_rows(cfg, rows).map_err(|e| ModelError::Config(format!("the pack's inventory: {e}")))
 }
 
-/// Resolve this family's floor: `plan::DEFAULT_FLOOR_BYTES` (0.5 GiB) when `o.floor_bytes` is still the 8 GiB Qwen/GLM default,
-/// or `REXL3_DSV41_FLOOR_GIB` if set.
+/// Resolve this family's floor: 0.25 GiB (`1 << 28`) when `o.floor_bytes` is still the 8 GiB Qwen/GLM default, or
+/// `REXL3_DSV41_FLOOR_GIB` if set.
 pub fn floor_for(o: &ServeOptions) -> u64 {
     if let Ok(v) = std::env::var("REXL3_DSV41_FLOOR_GIB") {
         if let Ok(g) = v.trim().parse::<f64>() {
@@ -232,7 +248,7 @@ pub fn admit_pack(
 ) -> Result<(LoadPlan, Admission), ModelError> {
     let floor = floor_for(o);
     let device = limits.device_bytes.unwrap_or_else(|| usable_bytes(floor));
-    let req0 = request_for(w, o, device)?;
+    let req0 = request_for(load::window_bytes_for(w, plan::DEFAULT_STREAM_WINDOW_BYTES), o, device)?;
     // the slab is whatever the caller asked for, or the largest that fits at these settings — of the RANK's OWN experts
     let probe = LoadPlan::build_maybe(w, 0, shard).map_err(|e| ModelError::Config(e.to_string()))?;
     let slab = match limits.expert_slab_bytes {
@@ -248,8 +264,9 @@ pub fn admit_pack(
 }
 
 /// Admission's question, less the slab: the context, the slots, the cache format, the chunk it prices, the streaming window, and the
-/// device the answer is judged against. Everything admission reads that is not the expert budget.
-fn request_for(w: &DeepseekV41Weights, o: &ServeOptions, device: u64) -> Result<AdmissionRequest, ModelError> {
+/// device the answer is judged against. Everything admission reads that is not the expert budget. `window_bytes` is the
+/// streaming window as the layout will allocate it ([`load::window_bytes_for`]).
+fn request_for(window_bytes: u64, o: &ServeOptions, device: u64) -> Result<AdmissionRequest, ModelError> {
     if o.slots == 0 {
         return Err(ModelError::Config("--slots must be at least 1".into()));
     }
@@ -259,18 +276,20 @@ fn request_for(w: &DeepseekV41Weights, o: &ServeOptions, device: u64) -> Result<
     let mut req = AdmissionRequest::at_121_gib(o.max_model_len, 0);
     req.device_bytes = device;
     req.slots = if o.slots_auto { 1 } else { o.slots };
-    // The cache's format, resolved once here: `--kv-dtype q4` (or `REXL3_DSV41_KV`) sets it, fp16 is the default, and the
-    // price and the planes the model allocates are the same format because both read it from this request.
+    // The cache's format, resolved once here: `--kv-dtype` (or `REXL3_DSV41_KV`) sets it. A serve boot that names neither
+    // runs q4 ([`build_engine`] and [`build_engine_group`] set the variable first); fp16 is the fallback only for a direct
+    // `build_limited` call. The price and the planes the model allocates are the same format because both read it from this
+    // request.
     req.kv = super::alloc::KvQuant::from_fmt(
         gb_cuda::dsv4_kvq4::configured_fmt(gb_cuda::dsv4_kvq4::KvFmt::F16).map_err(ModelError::Config)?,
     );
-    // The chunk admission prices. It is the 512 rows the serving split was measured at; the executor runs chunks of at most
-    // `dsv4_attn::MAX_ROWS` (128) rows, so the scratch term is a conservative over-reserve of about 0.2 GB.
-    req.prefill_rows = o.prefill_chunk.clamp(1, ADMISSION_CHUNK_ROWS);
+    // The chunk admission prices: the rows this rank's model is built at ([`chunk_rows_for`]), so the scratch admission
+    // charges is the scratch the build allocates (512 rows on a single node at the default chunk, 2048 on a group's rank).
+    req.prefill_rows = chunk_rows_for(o);
     // The streaming window is device memory and is charged before the slab is sized: a plan that spent the last 4 GiB on experts would
     // leave the tail nowhere to land. It is zero when the whole bank fits, which `expert_terms` decides.
     // priced as the layout will allocate it: whole layer quotas of the largest record, not the raw budget
-    req.window_bytes = load::window_bytes_for(w, plan::DEFAULT_STREAM_WINDOW_BYTES);
+    req.window_bytes = window_bytes;
     Ok(req)
 }
 
@@ -369,7 +388,7 @@ fn gate_for_rank(o: &ServeOptions, sr: &ScannedRank) -> Result<super::tp_runtime
         sr.admission.slots,
         sr.admission.context.div_ceil(crate::kvtables::BLOCK_TOKENS),
         sr.admission.context,
-        o.prefill_chunk.clamp(1, gb_cuda::dsv4_attn::MAX_ROWS),
+        chunk_rows_for(o),
         super::tp_runtime::Dsv41Facts::of(o, sr.admission.kv.fmt()),
     );
     Ok(match o.tp.as_ref() {
@@ -820,11 +839,9 @@ fn load_rank(
         )));
     }
     // the model's own state: the DSA planes (~0.56 GiB q4) and the scratch (~0.13 GiB). Before the slab, so the measurement sees them.
-    let is_tp = o.tp.as_ref().is_some_and(|t| t.is_group());
     let chunk_rows = match pinned {
         Some(p) => p.chunk_rows,
-        None if !is_tp && o.prefill_chunk == 4096 => 512,
-        None => o.prefill_chunk.clamp(1, gb_cuda::dsv4_attn::MAX_ROWS),
+        None => chunk_rows_for(o),
     };
     let mut model = Dsv41Model::new(
         cfg.clone(),
@@ -877,9 +894,11 @@ fn load_rank(
     // ---- **the measurement**, and the slab it buys.
     //
     // Everything above is allocated, uploaded, mapped and built; what is left on the box is the honest budget for routed experts, and it
-    // is what this sizes from — not the prediction admission made before any of it existed. `margin` is two measured terms: the boot's
-    // own tail ([`DEFAULT_POST_READY_MARGIN_BYTES`], 0.15 GiB) and the first forward's lazy workspaces
-    // ([`DEFAULT_FORWARD_RESERVE_BYTES`], 0.45 GiB) — the second is what keeps the floor intact when the first request runs.
+    // is what this sizes from — not the prediction admission made before any of it existed. `margin` is two optional terms, and both
+    // are 0 by default: the boot's own tail (`REXL3_DSV41_POST_READY_MARGIN_GIB`) and the first forward's lazy workspaces
+    // (`REXL3_DSV41_FORWARD_RESERVE_GIB`) are held back only when their variable is set (to a number of GiB; any other value takes
+    // [`DEFAULT_POST_READY_MARGIN_BYTES`], 0.15 GiB, or [`DEFAULT_FORWARD_RESERVE_BYTES`], 0.45 GiB). By default what stays free after
+    // the boot, for the first request as well as the prefix snapshots and the memory monitor, is the floor and the post-ready reserve.
     let post_margin = if std::env::var_os("REXL3_DSV41_POST_READY_MARGIN_GIB").is_some() { post_ready_margin_bytes() } else { 0 };
     let fwd_reserve = if std::env::var_os("REXL3_DSV41_FORWARD_RESERVE_GIB").is_some() { forward_reserve_bytes() } else { 0 };
     let margin = post_margin.saturating_add(fwd_reserve);
@@ -1004,7 +1023,7 @@ fn load_rank(
     // already contains it (the CUDA context, the page tables and the host heap were all allocated before it was taken), so charging it
     // twice would hold ~0.7 GiB of experts out of the slab for nothing. The device figure is the one admission was given, so the terms
     // stay comparable with the prediction; the *real* headroom at ready is the `stage=ready` mark, which is what `dsv41_slab` reports.
-    let mut req = request_for(w, o, admission.device_bytes)?;
+    let mut req = request_for(win_bytes, o, admission.device_bytes)?;
     req.expert_slab_bytes = layout.slab_bytes;
     req.runtime_reserve_bytes = Some(0);
     let needed_dev = plan2.resident_bytes
@@ -1012,11 +1031,7 @@ fn load_rank(
         + layout.slab_bytes
         + layout.window_bytes
         + plan::attn_planes_bytes(cfg, req.context, req.slots, req.kv)
-        + super::model::Scratch::bytes_for(
-            cfg,
-            req.prefill_rows.clamp(super::model::WINDOW_ROWS, gb_cuda::dsv4_attn::MAX_ROWS),
-            req.context,
-        )
+        + super::model::Scratch::bytes_for(cfg, super::model::scratch_rows(req.prefill_rows), req.context)
         + plan::rope_bytes(cfg, req.context)
         + req.headroom_bytes;
     req.device_bytes = req.device_bytes.max(needed_dev);
@@ -1296,6 +1311,47 @@ mod tests {
 
     fn options() -> ServeOptions {
         ServeOptions::new(std::path::PathBuf::from("/nonexistent"))
+    }
+
+    /// Admission prices the model's scratch at the rows the rank builds it at, on a single node and on each rank of a
+    /// tensor-parallel group: the rows [`request_for`] prices ([`plan::model_rows`]) are the rows the build's `chunk_rows`
+    /// ([`chunk_rows_for`], also the group gate's, which a follower is built at) gives [`super::super::model::scratch_rows`].
+    /// A group rank used to be priced at 512 rows and built at 2048.
+    #[test]
+    fn the_scratch_is_priced_at_the_rows_the_rank_builds() {
+        let cfg = real();
+        let group = |rank| Some(crate::serve::TpOptions::new(2, rank, "127.0.0.1:1"));
+        assert_eq!(options().prefill_chunk, 4096, "the default chunk");
+        let with = |chunk: usize, tp: Option<crate::serve::TpOptions>| {
+            let mut o = options();
+            o.prefill_chunk = chunk;
+            o.tp = tp;
+            o
+        };
+        // (case, options, the rows the rank's scratch is built at)
+        let cases = [
+            ("tp1, default chunk", with(4096, None), 512),
+            ("tp1, --prefill-chunk 1024", with(1024, None), 1024),
+            ("tp1, --prefill-chunk 2048", with(2048, None), 2048),
+            ("tp1, --prefill-chunk 16", with(16, None), super::super::model::WINDOW_ROWS),
+            ("tp2 rank 0, default chunk", with(4096, group(0)), 2048),
+            ("tp2 rank 1, default chunk", with(4096, group(1)), 2048),
+            ("tp2 rank 0, --prefill-chunk 1024", with(1024, group(0)), 1024),
+            ("tp2 rank 1, --prefill-chunk 1024", with(1024, group(1)), 1024),
+        ];
+        for (case, o, built) in cases {
+            let build = super::super::model::scratch_rows(chunk_rows_for(&o));
+            assert_eq!(build, built, "{case}: the rows the rank builds");
+            let req = request_for(0, &o, 121 << 30).unwrap();
+            assert_eq!(plan::model_rows(&req), build, "{case}: admission prices the scratch at other rows than the build");
+            for ctx in [262_144usize, 1_048_576] {
+                assert_eq!(
+                    super::super::model::Scratch::bytes_for(&cfg, plan::model_rows(&req), ctx),
+                    super::super::model::Scratch::bytes_for(&cfg, build, ctx),
+                    "{case} at {ctx}"
+                );
+            }
+        }
     }
 
     /// At the target device the pack is admitted, and every term is what the plan said it was.

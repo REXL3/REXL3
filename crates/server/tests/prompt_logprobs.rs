@@ -84,3 +84,21 @@ fn appending_a_token_adds_one_entry_and_changes_none_before_it() {
     let want = log_softmax(&mock_logits(&ids[..8], vocab), ids[8]);
     assert!((b[8]["logprob"].as_f64().unwrap() - want).abs() < 1e-5);
 }
+
+/// A model family whose engine reads out only the prompt's last row answers `prompt_logprobs` (and `logprobs`, which requests
+/// it) with a 400 that names it, not a 500 after scoring the whole prompt; its plain completions are unaffected.
+#[test]
+fn a_family_without_the_full_readout_refuses_prompt_logprobs_with_a_400() {
+    let mut o = Opts::default();
+    o.mock.last_row_only = true;
+    let s = start(o);
+    for ask in [json!({"prompt_logprobs": 1}), json!({"logprobs": true}), json!({"top_logprobs": 2})] {
+        let mut body = json!({"model": "mock", "prompt": [5, 6, 7, 8], "max_tokens": 1});
+        body.as_object_mut().unwrap().extend(ask.as_object().unwrap().clone());
+        let r = post(&s, body);
+        assert_eq!(r.status, 400, "{ask}: {}", r.body);
+        assert!(r.body.contains("prompt_logprobs") && r.body.contains("not supported"), "{ask}: {}", r.body);
+    }
+    let r = post(&s, json!({"model": "mock", "prompt": [5, 6, 7, 8], "max_tokens": 2}));
+    assert_eq!(r.status, 200, "{}", r.body);
+}

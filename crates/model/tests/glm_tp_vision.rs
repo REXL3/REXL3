@@ -627,3 +627,161 @@ fn rank_zeros_published_tower_equals_the_single_node_tower_on_the_kit_images() {
     }
     eprintln!("R-G-vision (a): {} images byte-identical; MemAvailable min {:.1} GiB", images.len(), gib(guard.finish()));
 }
+
+/// A layer prefix holding `own`'s experts (`None`: every expert) in prompt chunks of `chunk` rows, under P2, long enough for `context`.
+fn load_p2(dir: &Path, layers: usize, own: Option<&ExpertOwnership>, chunk: usize, context: usize) -> GlmModel {
+    gb_cuda::rt::init_context().unwrap();
+    let pack = match own {
+        Some(o) => GlmFamily::map_pack_owned(dir, o).unwrap(),
+        None => GlmFamily::map_pack(dir).unwrap(),
+    };
+    let b = boot_mapped(dir, pack, Some(layers), &LoadOptions::from_env(20 * GIB), 0.0).unwrap();
+    let mut m = GlmModel::new_chunked(
+        b.pack.config.clone(),
+        b.device,
+        &ModelOptions { slots: SLOTS, kv_blocks: context.div_ceil(256), max_context: context, layers },
+        chunk,
+    )
+    .unwrap();
+    m.set_prefill_contract(gb_model::families::glm::contract::PrefillContract::P2).unwrap();
+    m
+}
+
+/// Under P2 at the shipped 4,096-row chunk, a prompt whose FINAL slice is 4,095 rows, 4,094 of them image rows (90 text tokens, a synthetic
+/// image of 90 x 90 = 8,100 rows, 1 text token: 8,191 tokens), does not fit one lockstep frame (4,094 x 16 KiB of features and the batch's
+/// ids, positions and slots). Rank 0's backend ends that chunk early. It must end it on the segment's 16-row grid: half of 4,095 is 2,047
+/// rows, off the grid, and the chunk after it was refused by name (`GlmModel::p2_segment_of`: "must start a whole number of 16-row KDA
+/// chunks") on the builds before this test, failing the request. Now the chunk ends at 2,032 rows (4,096 + 2,032 = 6,128) and the rest
+/// follows: three chunks on the group, two on the single node (4,096 + 4,095, no frame). P2 is chunk-invariant, so the group's answers (the prompt's last row and three
+/// greedy windows: candidates and every fp16 logit) equal the single node's byte for byte on both ranks.
+#[test]
+#[ignore]
+fn p2_a_final_image_slice_over_one_frame_ends_on_the_grid_and_equals_the_single_node() {
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    const BIG: usize = 4096;
+    const CONTEXT: usize = 12288;
+    let owns = [ExpertOwnership::range(E, 0, 2).unwrap(), ExpertOwnership::range(E, 1, 2).unwrap()];
+    let cfg = gb_model::families::glm::GlmConfig::from_dir(&dir).unwrap();
+    let image_token = cfg.vision.as_ref().unwrap().image_token_id;
+    // a synthetic image's feature rows (f32 [8100][4096], finite, small): the backends splice them as given
+    let (grid, before, after) = ((90usize, 90usize), 90usize, 1usize);
+    let tokens = grid.0 * grid.1;
+    let mut x = 0x9E37_79B9u32;
+    let rows: Vec<f32> = (0..tokens * OUT)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 8) as f32 / (1u32 << 24) as f32 * 0.2 - 0.1
+        })
+        .collect();
+    let features: Arc<dyn std::any::Any + Send + Sync> = Arc::new(GlmImageFeatures {
+        buf: gb_cuda::DevBuf::from_slice(&rows).unwrap(),
+        tokens,
+        merged: grid,
+        key: 1,
+        permit: None,
+    });
+    drop(rows);
+    let mut t: Vec<u32> = (0..before as u32).map(|i| 1000 + 7 * i).collect();
+    let span = ImageSpan { start: t.len(), tokens, merged: grid, features, key: 1 };
+    t.extend(std::iter::repeat_n(image_token, tokens));
+    t.extend((0..after as u32).map(|i| 2000 + i));
+    let p = Prompt { tokens: t, images: vec![span] };
+    let n = p.tokens.len();
+    let last = n - BIG;
+    assert!((4091..=4095).contains(&last) && n <= 2 * BIG, "the final slice is {last} rows");
+    let image_rows_last = before + tokens - BIG;
+    // the call rank 0 would send for the whole final slice, measured as `TpVision::chunk_call` measures it
+    let probe = PrefillImage {
+        batch: RowBatch::from_requests(&[RowRequest { slot: 0, tokens: p.tokens[BIG..].to_vec(), first_position: BIG as u64 }]),
+        want: Some(COUNT as u32),
+        splice: vec![tp_vision::SpliceWire { dst_row: 0, n: image_rows_last as u64, data: Vec::new() }],
+    };
+    let len = probe.encoded_len() + image_rows_last * tp_vision::ROW_BYTES;
+    assert!(len > tp_vision::MAX_IMAGE_BODY, "the final slice must not fit one frame ({len} bytes)");
+    eprintln!("prompt {n} tokens: final slice {last} rows, {image_rows_last} of them image rows");
+
+    // one model, every expert, no group (no frame: two slices), then the group (rank 0's backend over a leader, the follower on a thread)
+    let mut be = GlmBackend::new(load_p2(&dir, layers, None, BIG, CONTEXT)).with_chunk(BIG);
+    be.m.set_graphs(false);
+    let mut reference = Vec::new();
+    let ends = run_big(&mut be, &p, &mut |b: &mut GlmBackend, r: &RowOutput| {
+        let ids: Vec<i32> = r.ids.iter().map(|&x| x as i32).collect();
+        reference.push(digest(&ids, &r.values, &b.m.logits_host(0, 1).unwrap()));
+    });
+    assert!(be.take_error().is_none(), "the single node failed");
+    assert_eq!(ends, vec![BIG, n], "the single node's slices");
+    drop(be);
+    eprintln!("one model: slices end at {ends:?}; {} answering calls", reference.len());
+
+    let [mut m0, mut m1] =
+        [load_p2(&dir, layers, Some(&owns[0]), BIG, CONTEXT), load_p2(&dir, layers, Some(&owns[1]), BIG, CONTEXT)];
+    let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(600)).into_iter();
+    m0.enable_tp(Arc::new(comms.next().unwrap()), owns[0].clone()).unwrap();
+    m1.enable_tp(Arc::new(comms.next().unwrap()), owns[1].clone()).unwrap();
+    let (l0, l1): (Log, Log) = (Arc::default(), Arc::default());
+    let (a, b) = Link::<GlmCall>::pair(Duration::from_secs(600)).unwrap();
+    let f = Probe { r: GlmRank::new(m1), log: l1.clone(), perturb: false };
+    let h = std::thread::spawn(move || run_follower(f, b, FollowerConfig::new(timeouts())));
+    let leader = TpLeader::lead(Probe { r: GlmRank::new(m0), log: l0.clone(), perturb: false }, a, timeouts());
+    let mut be = GlmTpBackend::new(leader, BIG, SLOTS)
+        .with_vision(TpVision::device(Some(image_token)))
+        .with_contract(gb_model::families::glm::contract::PrefillContract::P2);
+    let ends = run_big(&mut be, &p, &mut |_, _| {});
+    let err = be.take_error();
+    let failure = be.leader.failure();
+    assert!(
+        err.is_none() && failure.is_none(),
+        "the group failed the request after slices ending at {ends:?}: {err:?} {failure:?}"
+    );
+    be.quiesce().unwrap();
+    drop(be);
+    assert!(matches!(h.join().expect("the follower thread"), Ok(FollowerExit::Shutdown(_))), "the follower ended cleanly");
+    // the final slice ended early on the grid (half of 4,093 rows rounded down to 16), then the rest
+    assert_eq!(ends, vec![BIG, BIG + 2032, n], "the group's slices");
+    assert!(ends.iter().take(ends.len() - 1).all(|e| e % 16 == 0), "{ends:?}");
+    let (d0, d1) = (l0.lock().unwrap().clone(), l1.lock().unwrap().clone());
+    assert_eq!(d0, d1, "the two ranks' answers differ");
+    assert_eq!(d0, reference, "P2: the group's three chunks differ from the single node's two");
+    eprintln!(
+        "BYTE-IDENTICAL: the group's slices {ends:?} (the final image slice ended on the 16-row grid) == the single node's [{BIG}, {n}]: {} answering calls",
+        d0.len()
+    );
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// The prompt `p` in slot 0 and three greedy windows on `be`; `answer` sees every answering call's row. Returns where each slice ended
+/// (stops at a slice that made no progress: the backend failed the request).
+fn run_big<B: Backend>(be: &mut B, p: &Prompt, answer: &mut dyn FnMut(&mut B, &RowOutput)) -> Vec<usize> {
+    let n = p.tokens.len();
+    let mut ends = Vec::new();
+    let mut done = 0;
+    let first = loop {
+        let s = be.prefill_slice(0, &p.tokens, &p.images, done, COUNT);
+        if s.done <= done {
+            break None;
+        }
+        done = s.done;
+        ends.push(done);
+        if let Some(r) = s.row {
+            break Some(r);
+        }
+    };
+    let Some(first) = first else { return ends };
+    answer(be, &first);
+    let (mut pos, mut tok) = (n, first.ids[0]);
+    for _ in 0..3 {
+        let out = be.step(&[RowRequest { slot: 0, tokens: vec![tok], first_position: pos as u64 }], COUNT);
+        answer(be, &out[0][0]);
+        be.commit(0, 1);
+        pos += 1;
+        tok = out[0][0].ids[0];
+    }
+    be.release(0);
+    ends
+}

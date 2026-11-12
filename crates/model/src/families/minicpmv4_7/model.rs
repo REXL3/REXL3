@@ -1411,6 +1411,7 @@ impl MiniCpmModel {
             fmoe::prefill(
                 &self.h,
                 &self.router_logits,
+                fmoe::LogitsDtype::Bf16,
                 &self.sh_gate_scalar,
                 &tables,
                 &mut self.moe_out,
@@ -1425,6 +1426,7 @@ impl MiniCpmModel {
             fmoe::forward(
                 &self.h,
                 &self.router_logits,
+                fmoe::LogitsDtype::Bf16,
                 &self.sh_gate_scalar,
                 &tables,
                 &mut self.moe_out,

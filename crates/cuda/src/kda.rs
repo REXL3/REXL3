@@ -956,6 +956,35 @@ pub fn prep(
     prep_raw(st, d, w, qkv.ptr(), qkv_dtype == Dtype::F32, pool, &sel, core::ptr::null(), true, false, rec.qkv.ptr(), ws)
 }
 
+/// The window: conv + silu + l2norm of `rows` prefill rows whose qkv projection output is already bf16 `[rows, conv_dim]`
+/// (`self.s.qkv`), skipping the all-rows raw copy into the record (`rec.qkv`): a whole-chunk prefill only replays through
+/// [`window_chunked`] (which reads the workspace q/k/v and never `rec.qkv`), and the only reader of the raw rows afterwards is
+/// the commit tail's last-3-row conv shift, which [`commit_from`] runs straight off the bf16 projection buffer. That saves
+/// `rows * conv_dim * 2` bytes of writes per layer (48 MiB at 4096 rows for Ling-3.1, 3.02 GiB over 63 layers).
+#[allow(clippy::too_many_arguments)]
+pub fn prep_prefill_bf16(
+    st: &Stream,
+    d: Dims,
+    w: &Weights,
+    qkv: &DevBuf,
+    pool: &Pool,
+    batch: &Batch<'_>,
+    rec: &Record,
+    ws: &mut Workspace,
+) -> Result<(), CudaError> {
+    d.check();
+    assert!(
+        batch.rows <= rec.rows && batch.rows <= ws.rows,
+        "kda::prep_prefill_bf16: {} rows exceed the record/workspace",
+        batch.rows
+    );
+    need(qkv, batch.rows * d.conv_dim() * 2, "qkv");
+    need(w.conv_w, d.conv_dim() * CONV_TAPS * 2, "conv_w");
+    need(&pool.conv, pool.n_slots * d.conv_slot_elems() * 2, "conv pool");
+    let sel = Sel::of(batch);
+    prep_raw(st, d, w, qkv.ptr(), false, pool, &sel, core::ptr::null(), true, false, core::ptr::null_mut(), ws)
+}
+
 /// The window: steps each sequence's rows from `S[cur]` (read-only) and writes the core output `ws.y()` (bf16
 /// `[rows, heads * 128]`). With `write_final` the state after each sequence's last row goes to `S[1-cur]` (so that a full accept
 /// is a flip); without it, [`commit`] must be told (`window_wrote_final = false`) and replays even a full accept.
@@ -1110,7 +1139,35 @@ pub fn commit(
     keep: Option<&DevBuf>,
     window_wrote_final: bool,
 ) -> Result<(), CudaError> {
+    commit_from(st, d, w, p, pool, batch, rec, rec.qkv.ptr(), ws, keep, window_wrote_final)
+}
+
+/// [`commit`] with the raw bf16 rows for the conv shift read from `raw_override` instead of `rec.qkv`. Used by whole-chunk
+/// prefill with [`prep_prefill_bf16`]: the projection buffer `self.s.qkv` already holds the bf16-rounded rows, so the commit
+/// tail can shift the conv state from it directly and the all-rows copy into the record is skipped entirely. Only valid when
+/// the replay path is not taken (prefill: `keep.is_none() && window_wrote_final`).
+// `raw_override` is a device address that crosses straight into the extern kernel (the host only compares it), as in
+// `dsv4_kvq4::attn_raw_dev`
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[allow(clippy::too_many_arguments)]
+pub fn commit_from(
+    st: &Stream,
+    d: Dims,
+    w: &Weights,
+    p: &Params,
+    pool: &mut Pool,
+    batch: &Batch<'_>,
+    rec: &Record,
+    raw_override: *const core::ffi::c_void,
+    ws: &mut Workspace,
+    keep: Option<&DevBuf>,
+    window_wrote_final: bool,
+) -> Result<(), CudaError> {
     d.check();
+    assert!(
+        raw_override == rec.qkv.ptr() || (keep.is_none() && window_wrote_final),
+        "commit_from with raw_override requires keep.is_none() && window_wrote_final"
+    );
     assert!(batch.rows <= rec.rows && batch.rows <= ws.rows);
     let sel = Sel::of(batch);
     let keep_ptr = keep.map_or(core::ptr::null(), |k| {
@@ -1143,7 +1200,7 @@ pub fn commit(
     }
     let rc = unsafe {
         ffi::gb_kda_commit_tail(
-            rec.qkv.ptr(),
+            raw_override,
             pool.conv.ptr(),
             pool.parity.ptr() as *mut i32,
             sel.seq_start,

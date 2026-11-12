@@ -138,6 +138,34 @@ fn glm_decode_keeps_the_reasoning_and_tool_call_markers_and_drops_the_role_token
     }
 }
 
+/// The GLM-family reply stop set the server builds on the real pack: generation_config's eos
+/// (`<|endoftext|>`, `<|user|>`, `<|observation|>`) plus the family's generated role-open tokens (`<|assistant|>`,
+/// `<|system|>`). Pinned for the shipped GLM-5.3-Flash 2.25 bpw pack (REXL3_GLM_DIR) and, when present, the RED-SNOW 4.91 bpw
+/// pack (REXL3_RED_SNOW_DIR), which is the same family with the same ids. Fails on main (`reply_role_stops` adds nothing).
+#[test]
+fn glm_family_reply_stop_set_adds_the_role_open_tokens() {
+    use gb_server::chat_format::{ChatFormat, FormatRegistry};
+    use gb_server::http::reply_stop_set;
+    // `(<|endoftext|>, <|user|>, <|observation|>)` eos, then `<|assistant|>`, `<|system|>` — the ids are the same in both packs.
+    let want = vec![154820u32, 154827, 154829, 154828, 154826];
+    let mut checked = 0;
+    for env in ["REXL3_GLM_DIR", "REXL3_RED_SNOW_DIR"] {
+        let Some(d) = std::env::var(env).ok().map(PathBuf::from).filter(|p| p.join("tokenizer.json").exists()) else {
+            continue;
+        };
+        let tok = Tok::from_dir(&d).unwrap();
+        let format: Box<dyn ChatFormat> = FormatRegistry::builtin().open(&d, None).unwrap();
+        assert_eq!(format.id(), "glm5_next", "{env}");
+        assert_eq!(tok.eos, vec![154820, 154827, 154829], "{env} eos");
+        assert_eq!(format.reply_role_stops(&tok), vec![154828, 154826], "{env}: <|assistant|>, <|system|>");
+        assert_eq!(reply_stop_set(&tok, &*format), want, "{env} reply stop set");
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("neither REXL3_GLM_DIR nor REXL3_RED_SNOW_DIR set: skipping");
+    }
+}
+
 #[test]
 fn glm_streaming_decode_equals_a_full_decode_for_any_chunking() {
     let Some(d) = glm_dir() else { return eprintln!("REXL3_GLM_DIR not set: skipping") };

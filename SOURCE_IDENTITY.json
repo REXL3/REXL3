@@ -14,23 +14,23 @@
       "git_blob": null,
       "git_mode": null,
       "origin": "generated",
-      "sha256": "8863b9436a8dfe2023960201d4f515e7724198c2918b9613d681b3606dc7eac9"
+      "sha256": "9f081bb6f8fa9e1023d831d340c3cc9e0782f8bfbd8d11a643ac9afa5c5772f9"
     },
     "Cargo.lock": {
       "archive_mode": "0644",
-      "bytes": 56692,
-      "git_blob": "cc77f8d97d2af152ae1aa3e54e8a4fa72e2d86ec",
+      "bytes": 56818,
+      "git_blob": "120089f4f4eca3cf375f50b90b30aaf4da8dd2fb",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "28b24068ce75fefe48d4a24f818c4f537b2343f790b136118ccbaadbfe8e6963"
+      "sha256": "37504dc5f8cfbed8c0f61124d81aa2373bd2bd0697056ade3f75859c7d6718f0"
     },
     "Cargo.toml": {
       "archive_mode": "0644",
-      "bytes": 667,
-      "git_blob": "db5ba95c56d6be729ae007f12672671211adef9a",
+      "bytes": 683,
+      "git_blob": "eeb33622f14559e99328a538af3162840c619be6",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "cfa80110d2b6d9906f617cf9e4b7ace6473002a1161d75e3ee2d106de5375e1d"
+      "sha256": "20d1cf92a04b319df2a27aa707996ce0ea777e6ceb54904bf7ceb5ec6760cd3e"
     },
     "LICENSE": {
       "archive_mode": "0644",
@@ -54,7 +54,7 @@
       "git_blob": null,
       "git_mode": null,
       "origin": "generated",
-      "sha256": "4a28016510dcf09341be6f971fa064cada6d310904664876c47c5203adeda740",
+      "sha256": "ab97c9ec149068066c504bfef3fbf7060f0b33c60d855a33e9e8d2f0a3bbb705",
       "template_git_blob": "aedeacee120c3d4a1f7857b28c725eff4e2616f4"
     },
     "THIRD_PARTY_NOTICES.md": {
@@ -99,11 +99,11 @@
     },
     "crates/cluster/src/main.rs": {
       "archive_mode": "0644",
-      "bytes": 19703,
-      "git_blob": "e49bf2eb4098ee08d27da5e7d8641090ac108927",
+      "bytes": 20015,
+      "git_blob": "7263b4e914cb5b2bf938d4fb7e7baa4bdf875cff",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "4790fe53eea2e3c9f2073c69987c527038e54573cda3289601677588b970de30"
+      "sha256": "a9fc900a765b88f2580aa121d3ec1403fec938efe9ede1599b898922af893f48"
     },
     "crates/cluster/src/ops.rs": {
       "archive_mode": "0644",
@@ -115,11 +115,11 @@
     },
     "crates/cluster/src/schema.rs": {
       "archive_mode": "0644",
-      "bytes": 58950,
-      "git_blob": "76d15190967e1ce9199b8adf708c790888b4b571",
+      "bytes": 61283,
+      "git_blob": "6121d1c9c3b38099c0dd22c8995c4efff6947d40",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "38450038db55b957c2c29e3196371fc27395e4e6cc0cf9d52fb4023d2fb63215"
+      "sha256": "bb89d547a00fec1a8175b4245c4eb6a12eaa67e5ec79ac153c923f9bcab987b2"
     },
     "crates/cluster/src/script.rs": {
       "archive_mode": "0644",
@@ -155,11 +155,11 @@
     },
     "crates/cluster/tests/cli.rs": {
       "archive_mode": "0644",
-      "bytes": 5004,
-      "git_blob": "10240964ace8bac3b5b8e330abc57bf1ea07e0c8",
+      "bytes": 6382,
+      "git_blob": "b9a9c422c804c8f9f1c8f39a2d84c2226d634678",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "f6bc9ac4b9a527054862f691e8b685af60098c0687c9e7da6549f7ba2a26f21e"
+      "sha256": "55d42bb348d5d1a14b833f248da028282ab9bd6e8f7431e2c914a5c6f95b901b"
     },
     "crates/cluster/tests/dry_run.rs": {
       "archive_mode": "0644",
@@ -211,11 +211,11 @@
     },
     "crates/cuda/build.rs": {
       "archive_mode": "0644",
-      "bytes": 7014,
-      "git_blob": "08891d4feb6ffd88cf28fb7d8092c83ed2d3fda0",
+      "bytes": 10155,
+      "git_blob": "39248149d72f3454af65348f15a18817403283e8",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6a16c5f9e5d3f284250295c7a16f79cec0728c9b2cbe65e542eb047957ec5a78"
+      "sha256": "ec35532beb45fb222a4bb9d4844528166d7e773843e3e3b07418b9469eaed013"
     },
     "crates/cuda/csrc/attention.cu": {
       "archive_mode": "0644",
@@ -275,11 +275,11 @@
     },
     "crates/cuda/csrc/dflash2.cu": {
       "archive_mode": "0644",
-      "bytes": 39149,
-      "git_blob": "66e83f6fd4adad09bdbae65710beb11941411e35",
+      "bytes": 40284,
+      "git_blob": "da55cc59018fa5ed0c235e35b2ca343a71d8552e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "cf5c4ab6bd9e433cf99250a85a225ad5682d6deb0790a51ec16a421d94b4b508"
+      "sha256": "bfda515d6cbcf78872f6d1051d5565e1153589a7fb11500d6600d1544463ff14"
     },
     "crates/cuda/csrc/dsa.cuh": {
       "archive_mode": "0644",
@@ -323,11 +323,11 @@
     },
     "crates/cuda/csrc/dsv4_attn.cu": {
       "archive_mode": "0644",
-      "bytes": 116888,
-      "git_blob": "c4238a7293d76e2ed08974277a23516c74aaabfa",
+      "bytes": 116039,
+      "git_blob": "503c128063a521cd544ab3a3cababeac1d820854",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "1dccb2de4634ad7b86268db2bcd715332e852c385deef4c80bc46765e338a83d"
+      "sha256": "dbaaa1be45f60ec283148cbafb8ea292ec21c4bb03273040a8df79d0cb761f27"
     },
     "crates/cuda/csrc/dsv4_bf16.cu": {
       "archive_mode": "0644",
@@ -347,11 +347,11 @@
     },
     "crates/cuda/csrc/dsv4_moe.cu": {
       "archive_mode": "0644",
-      "bytes": 50043,
-      "git_blob": "8a2d65157ca6df6fe88ab57e6c1abaa0b2e0782e",
+      "bytes": 50701,
+      "git_blob": "a57151eaf864eee8f8931a9b7cf4acbef9ecf78c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "61f572d187520b32744b37c299247739f2e7f15c507507cee50b4b8177fcb921"
+      "sha256": "b0aba62abedf02af21f1b088d10479bc78ca7f269d138c6a51d4950fa99d029b"
     },
     "crates/cuda/csrc/dsv4_moe_group.cu": {
       "archive_mode": "0644",
@@ -451,27 +451,27 @@
     },
     "crates/cuda/csrc/exl3_grouped.cuh": {
       "archive_mode": "0644",
-      "bytes": 10949,
-      "git_blob": "be90df2756acf2621354773181e1b9cf55b0c9c7",
+      "bytes": 11146,
+      "git_blob": "2fc496d8b52949b689b594c7d080f1835392ddb5",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "90f80c1cdda71df3bdbe3777baa25f0de38df835086ca3de581d892534dff454"
+      "sha256": "6c60d85430f20a39c6f0d7f4477eaf02150a345277c0512acb5fede5f83e78b8"
     },
     "crates/cuda/csrc/exl3_linear.cu": {
       "archive_mode": "0644",
-      "bytes": 56746,
-      "git_blob": "7ee0574dcd85844ecf407ee74f351426758372d2",
+      "bytes": 57030,
+      "git_blob": "c9fbe87a553131ab7aa1b06c386c6ff86ac128e7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9e96a0ae58e7646f05c13e0b2766ae3c8146c8557c836a7a67faecdbc25786b6"
+      "sha256": "fb01a07508e751984a8040d2966d82e535bbba063c31e3f1fd5fa35f0f91e0b2"
     },
     "crates/cuda/csrc/exl3_linear_decode.cuh": {
       "archive_mode": "0644",
-      "bytes": 7160,
-      "git_blob": "79c843428bf4d0e5a6307caa2af6e6a19f37dba9",
+      "bytes": 8409,
+      "git_blob": "1c8bf03387db19d6f79c6f0f123cea12a20062c3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c35f480cfe0fd3b9283218e8188ed09744038c4fa1bc1a2e8f864f8998526811"
+      "sha256": "9730898192d09ab3464bd149678837578f96da551c0bb41ecd7803639e500ab6"
     },
     "crates/cuda/csrc/exl3_mma.cuh": {
       "archive_mode": "0644",
@@ -483,19 +483,19 @@
     },
     "crates/cuda/csrc/fmoe.cu": {
       "archive_mode": "0644",
-      "bytes": 80260,
-      "git_blob": "a3a1baaac7d487d0d1e0ba382205c2ea3d02ca01",
+      "bytes": 96942,
+      "git_blob": "430fbf8e6ae6b5b0dc528fbfbc09ba47afd0f717",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "2af36badec9cea05d960eb9d1bc86fa90e47562e33db3862fc0ac2b68373ba3a"
+      "sha256": "523ce7894cbd7c7224463e3e452b7a108b33c17ca39dbd86b6a626356d967c09"
     },
     "crates/cuda/csrc/fn_mhc.cu": {
       "archive_mode": "0644",
-      "bytes": 11826,
-      "git_blob": "7b948fbb969d822aba67dd463319dc027a7d67bb",
+      "bytes": 13335,
+      "git_blob": "b1494b4c78dd796c400173f6f3811bf32c8d132e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "363cecce2d68ab1be95810590e5def93e28577cc3cd04c22a53606f418fc35d2"
+      "sha256": "5a9cbf14777d08467ae2b3596d9f0244d5ebb032ba65e42994bac8969a91388c"
     },
     "crates/cuda/csrc/fp4_linear.cu": {
       "archive_mode": "0644",
@@ -547,27 +547,27 @@
     },
     "crates/cuda/csrc/glm_mtp.cu": {
       "archive_mode": "0644",
-      "bytes": 17681,
-      "git_blob": "9aadcf13d97ba626fc67cd86e5933c1ba505f4f9",
+      "bytes": 18845,
+      "git_blob": "b11c0bf583f846cf907668c37aedcb0f876d383d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "38b0f1686daeef87bb9fe367a79cd3314442e00cc55820d05124d0cdaf1cba7b"
+      "sha256": "441026cc10ab507eea1a716facfedb5c41217bec42d2163b173156345d3b96dc"
     },
     "crates/cuda/csrc/glm_p2_dense.cu": {
       "archive_mode": "0644",
-      "bytes": 20565,
-      "git_blob": "ed6ff1fe64f0908cf1876629b3740775f83a79a0",
+      "bytes": 25271,
+      "git_blob": "6d7ee8890afbd76eb14d52a1e2fa8ea37e507c74",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "d955d9bba6208fe93ca89309f34a5132d1d02409868ee6e5e330bec74fbc0c30"
+      "sha256": "b6c885f0f96afe861cb9cc3fd22bf8e8f7139963e623fd2e7d1477575c5c1cae"
     },
     "crates/cuda/csrc/glm_p2_kda.cu": {
       "archive_mode": "0644",
-      "bytes": 18743,
-      "git_blob": "b8f6103ae2d7ca38972c39fb1f80f4e075dfbd4a",
+      "bytes": 18783,
+      "git_blob": "073d1030fdee8166cfd8439aa3517ec312e44f0e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "1f2c65ed4d1ea6d176826a53c570c6e30c88dea80b6c678da7b8b704797604bc"
+      "sha256": "4caa2ee43d6bbdc3adf56c48fcd55b838e7f2a0407af0ca3fd81337d3e77b203"
     },
     "crates/cuda/csrc/glm_p2_mla.cu": {
       "archive_mode": "0644",
@@ -579,11 +579,11 @@
     },
     "crates/cuda/csrc/glm_p2_moe.cu": {
       "archive_mode": "0644",
-      "bytes": 38948,
-      "git_blob": "652f383d26d2c6eb42212a716014ee5686b82772",
+      "bytes": 42826,
+      "git_blob": "b6cdf2f2b0bba9f274e0c956f7877d1b77434239",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c6bb1eda7dde7ed6b40c625988d89fc5f0015da8bc710718e5a169bb7b17c7c9"
+      "sha256": "fec5bfa053d6465528adf055ea4909541939e551d5ae73f0cc02c27d168419a7"
     },
     "crates/cuda/csrc/glm_perf.cu": {
       "archive_mode": "0644",
@@ -603,11 +603,11 @@
     },
     "crates/cuda/csrc/glue.cu": {
       "archive_mode": "0644",
-      "bytes": 51376,
-      "git_blob": "6935d9db40882c67b8bd7a9a0dbd6652843962a1",
+      "bytes": 59861,
+      "git_blob": "6a99f139c090a89174c060faa394f3f47277e2a2",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "d3cef3390a51f86458d4572b6a3f83f1fc9efc58e6aabab6be9c54565b144e43"
+      "sha256": "884ba6289aec8b7f7725d9a86f296145ae265a1f1e684984759cb5c3b43f7c22"
     },
     "crates/cuda/csrc/hcg.cu": {
       "archive_mode": "0644",
@@ -619,19 +619,19 @@
     },
     "crates/cuda/csrc/hcx.cu": {
       "archive_mode": "0644",
-      "bytes": 19977,
-      "git_blob": "0e1318702b2db1840c53bb631b9e873828f9f62a",
+      "bytes": 34788,
+      "git_blob": "2f6e6745c881d037fc66625e8c7cc268345b2358",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b00e47b480d25a9d8285e3495ce5dd3ee24b063ed41883f69b09fd768e0b4e5d"
+      "sha256": "4f1335a77902a24f5cab4e10210ca2ec170252389232fb3a5e8aa4a743d79676"
     },
     "crates/cuda/csrc/kda.cu": {
       "archive_mode": "0644",
-      "bytes": 46713,
-      "git_blob": "a77bd9c14c00f0e0055889e32331716fac9cf739",
+      "bytes": 49540,
+      "git_blob": "98ef497cc9998b7192ca38028418776234c0c8f6",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "47831f525a3e80d65154c68dbfc1135092774be82ec25048c8cfcaab3541cd20"
+      "sha256": "7c655d68886655f476021cdd24a82032aadcbf0338bbabdf0d094f7c274fe70b"
     },
     "crates/cuda/csrc/keyed.cuh": {
       "archive_mode": "0644",
@@ -640,6 +640,38 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "26b2f303f41cb05eb0b178a8e1e6f69b98c1e4e61d664f096da9f5c44adc1291"
+    },
+    "crates/cuda/csrc/ling_fmoe.cu": {
+      "archive_mode": "0644",
+      "bytes": 116158,
+      "git_blob": "aea710a2987eeb18cabd5a82493caf6e4b444194",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "4d4c469e0a219705a0766bf95175277218c6f302061b9d76c56620abbeef1a99"
+    },
+    "crates/cuda/csrc/ling_kda_fused.cu": {
+      "archive_mode": "0644",
+      "bytes": 88381,
+      "git_blob": "64c730216f3fed876bbd626236794393804bcd9d",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "5701cec929b19853ab3ef8bd4858cf5a38091492caae04e7bd90b49147fe77ac"
+    },
+    "crates/cuda/csrc/ling_kda_proj_fused.cu": {
+      "archive_mode": "0644",
+      "bytes": 149792,
+      "git_blob": "21006ba1c957474a8065e0a5127db7b03c40956b",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "32e1dc9f79b781844efd82791476b893d45e83159cae255254bc26ac1afc5891"
+    },
+    "crates/cuda/csrc/ling_mla_attn.cu": {
+      "archive_mode": "0644",
+      "bytes": 102041,
+      "git_blob": "2f9f590c95c97b23b0e4b27c516798ad23b7f305",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "6ea1657b8a6d7af489977788b85f1d3f614e9713c750539a560354f51248b2f1"
     },
     "crates/cuda/csrc/mcv_vision.cu": {
       "archive_mode": "0644",
@@ -651,11 +683,11 @@
     },
     "crates/cuda/csrc/mhc.cu": {
       "archive_mode": "0644",
-      "bytes": 32686,
-      "git_blob": "5dee38187aab1b67f236e52a0630b948d74f30cc",
+      "bytes": 34167,
+      "git_blob": "44eee77e06c353cfd8067f152d967ebf0c1660f0",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5d75bf653a7b52d7c06ef1c6c52792ffc240966e24413ca1a01778a14ab31264"
+      "sha256": "aadbec3941375a34500c41f9efc0dd31183d99c613240350715d977d79522070"
     },
     "crates/cuda/csrc/mla.cu": {
       "archive_mode": "0644",
@@ -667,11 +699,11 @@
     },
     "crates/cuda/csrc/mla_gated.cu": {
       "archive_mode": "0644",
-      "bytes": 32766,
-      "git_blob": "b64f24635a4287943ff293bc043f3914bc402201",
+      "bytes": 42521,
+      "git_blob": "91f5a7182e093a321ab4ad02f5dae9dd462e072a",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6aaa46b35dcbcd58da9ac22aa9e9932912fcf14306f049043c38132102aba2b4"
+      "sha256": "33437c918885518559d1be2822a58891a7a4ad62c2a6f6b8a821fd81ba58c850"
     },
     "crates/cuda/csrc/mla_prefill.cu": {
       "archive_mode": "0644",
@@ -715,11 +747,11 @@
     },
     "crates/cuda/csrc/moe_router.cu": {
       "archive_mode": "0644",
-      "bytes": 20375,
-      "git_blob": "644a99cd56a4b6f7a60d6f03cd862e19b51e20da",
+      "bytes": 20246,
+      "git_blob": "a8892bc21f25f7c153dd6fb79af3f945b1552d34",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6b7affb7bf55cbbf35e649e98b61393d313c4e1689063b58c59220ffb2dcb1f8"
+      "sha256": "76a45eb10295d41c97e38ffeca7d03e47e0ddfc91073242cb8ab8a59169f1a20"
     },
     "crates/cuda/csrc/mtp.cu": {
       "archive_mode": "0644",
@@ -851,11 +883,11 @@
     },
     "crates/cuda/csrc/qsa.cu": {
       "archive_mode": "0644",
-      "bytes": 23262,
-      "git_blob": "6e75f2edf755a82d2887933d187f85ab2218a9a3",
+      "bytes": 25274,
+      "git_blob": "a4e5e37c3f81d3c7e063624e3b942e9113377060",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9c4b72ead2d9aab3dddba584899e0bab30e8f3cfb46ad8ec1d3c8da5ffea45c5"
+      "sha256": "e73dca19b6f49b15a16ee8f8855ae100cdd0a5228b030ec77ccd53d5e4763ba7"
     },
     "crates/cuda/csrc/roce_abi.h": {
       "archive_mode": "0644",
@@ -955,11 +987,11 @@
     },
     "crates/cuda/src/dflash2.rs": {
       "archive_mode": "0644",
-      "bytes": 116913,
-      "git_blob": "a9ae4d4e07bb88678749e6b8eaf86bd2f591a9b1",
+      "bytes": 120949,
+      "git_blob": "e213270a4d6637818e70c710e3f2651826b5eb57",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "8620619f2a4be23e8b206f3e774f9d910044bbd724ee9a2e283dfadd1109860f"
+      "sha256": "8a54547809c30ac0e8bd476d70944df668bc603dee4314df580a5790d224629c"
     },
     "crates/cuda/src/dsa.rs": {
       "archive_mode": "0644",
@@ -979,11 +1011,11 @@
     },
     "crates/cuda/src/dsv4_attn.rs": {
       "archive_mode": "0644",
-      "bytes": 204997,
-      "git_blob": "6e7107ab6ea12b4f1d9330ec31aca96b99e590d1",
+      "bytes": 211370,
+      "git_blob": "ac3cb538c0a5b3733f3090aeb7d3079bf2b13710",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "32e3525f2d25007075feaabf883b1cc0037aec6fc7036e9257e18944c810e8c0"
+      "sha256": "6f5fd16a610b0730ed021ee6e0becca7f8379934c10e6dbb5aee050ed065e917"
     },
     "crates/cuda/src/dsv4_kvq4.rs": {
       "archive_mode": "0644",
@@ -995,11 +1027,11 @@
     },
     "crates/cuda/src/dsv4_moe.rs": {
       "archive_mode": "0644",
-      "bytes": 86034,
-      "git_blob": "897be6f1c23a4166f7f2b5a54c504f1f58f5c62d",
+      "bytes": 87096,
+      "git_blob": "69e2223e452199cd6c33d8d34f3f8cf2e11dc670",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5f5006b0cef8c4ff5634e35f930061a343aee37d1088394f2ee534fef1cad64a"
+      "sha256": "f6107df3acd4230aa0eb39fdc4504b692733c4746ced53771e31eaf8408ff0c0"
     },
     "crates/cuda/src/dsv4_mtp.rs": {
       "archive_mode": "0644",
@@ -1043,11 +1075,11 @@
     },
     "crates/cuda/src/exl3_linear.rs": {
       "archive_mode": "0644",
-      "bytes": 125468,
-      "git_blob": "3879d54c136922d112a229d7afe0a9c06a3debab",
+      "bytes": 126976,
+      "git_blob": "26c48ed6b666e217685010f7b77c00a7b4111c1a",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "261bb7695c9bc4bf7ed4ef851649baba3599ec2b23397a683149172e80c848c0"
+      "sha256": "553178d8b82354f86f93babe468c1045a4605fb84e237ee4080270ac5d283f0e"
     },
     "crates/cuda/src/exl3_split.rs": {
       "archive_mode": "0644",
@@ -1067,11 +1099,11 @@
     },
     "crates/cuda/src/fmoe.rs": {
       "archive_mode": "0644",
-      "bytes": 15378,
-      "git_blob": "9cf772d7de5c80e24bf278743b4244e022e89a3a",
+      "bytes": 16714,
+      "git_blob": "28a706b2dfea0b634aa8e69e07453bf12af4da8d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b7c4e736cd2eeb9b348c6207278e1ef7affe414b2185578d861c24c7b3a74510"
+      "sha256": "c4421e3e162603a03c2f052b23a46a9824faccbda638bb5f8a81b456aa444d7f"
     },
     "crates/cuda/src/fn_glue.rs": {
       "archive_mode": "0644",
@@ -1083,11 +1115,11 @@
     },
     "crates/cuda/src/fn_mhc.rs": {
       "archive_mode": "0644",
-      "bytes": 7828,
-      "git_blob": "336dcdc1f1f47764285b4ec0355c1f48b1003528",
+      "bytes": 9092,
+      "git_blob": "93a2098bd5b4ab9b81ed8312b54283c09e7149d7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a5531458590ba139e231b4274718fa5c4ec5960b3b878798ab8d4d369cb6739a"
+      "sha256": "caec9559c969de80359d5bf2e00b447b48b7bac262440997f045fd49f9f4f8ae"
     },
     "crates/cuda/src/fn_moe.rs": {
       "archive_mode": "0644",
@@ -1139,11 +1171,11 @@
     },
     "crates/cuda/src/glm_p2.rs": {
       "archive_mode": "0644",
-      "bytes": 14173,
-      "git_blob": "9e08999d6c0f502fb3fe984778f47f134fc924dc",
+      "bytes": 18760,
+      "git_blob": "903db50db4b049dbc378b6583f3f7f6a7fd72175",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "d6fc7cc57c587a4e511344050fbcee0f646a924fdfe4707ef9011f8bf4ab47a7"
+      "sha256": "961a0410b7ca340cfa4df0b835a0e0d38e392861c5faced094ce1be566965340"
     },
     "crates/cuda/src/glm_p2_mla.rs": {
       "archive_mode": "0644",
@@ -1155,11 +1187,11 @@
     },
     "crates/cuda/src/glm_p2_moe.rs": {
       "archive_mode": "0644",
-      "bytes": 23817,
-      "git_blob": "a0fe409ebf4545f440948403e3eca6e044a112e4",
+      "bytes": 25361,
+      "git_blob": "009997e9bd5bdae302177d8f838b935ac9bc09ea",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b27cc0a6741e1c173bc79bc6e561a6e0fc0be659e0b103e1da73a90c6241105b"
+      "sha256": "43405748cf882153ec0b8f0ca57e6ee7eb71fcd8cd70ec4625e0732f27b21109"
     },
     "crates/cuda/src/glm_perf.rs": {
       "archive_mode": "0644",
@@ -1179,11 +1211,11 @@
     },
     "crates/cuda/src/glue.rs": {
       "archive_mode": "0644",
-      "bytes": 20265,
-      "git_blob": "afd684b27d61212616c7bd5145a693b3f3cabff3",
+      "bytes": 21264,
+      "git_blob": "63a0453c49e20e9e77b219a7e1208d2baaf81bef",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "46a24b5c48002235db27ab82c188bed59c0b41b4372fcd8cb177dffd915a248d"
+      "sha256": "482df74496ae4605e456fdfb6749a757a0071a7b81284fa804ddf5df258d10b3"
     },
     "crates/cuda/src/graph.rs": {
       "archive_mode": "0644",
@@ -1195,27 +1227,59 @@
     },
     "crates/cuda/src/hcx.rs": {
       "archive_mode": "0644",
-      "bytes": 9690,
-      "git_blob": "9d59873ddcd5dd83501b7c67ab4a812fff15f440",
+      "bytes": 9993,
+      "git_blob": "d977ddb1f401d871713a12ddaa518008deb7c198",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9479dddc5da8589c7bae8072a5c81cddfcdb3cec61bae54436b6601a88daadd4"
+      "sha256": "d35d50624ed96c20b860e753fac7f35002f419e8c8176a0c5f39f3290720483d"
     },
     "crates/cuda/src/kda.rs": {
       "archive_mode": "0644",
-      "bytes": 60152,
-      "git_blob": "5cbda10249fe58e7651cdd3ff32073b82b399d7c",
+      "bytes": 62784,
+      "git_blob": "0ee856954b2ba753bc7ff1b02dfec54b4bfd79d7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3e97a8fbb10d02c4e622dcbf1d6babc5d14a51a9e703a40204cd48e238c7006b"
+      "sha256": "9f152c33136e551c81d7ec1f5cefa508ad2dd710339a49e2f1ae28a91f0f885f"
     },
     "crates/cuda/src/lib.rs": {
       "archive_mode": "0644",
-      "bytes": 4613,
-      "git_blob": "c121d9d052a3a93e91f03d984cac4556b96d3753",
+      "bytes": 4708,
+      "git_blob": "e9e41f6c650dc2cda632c5000c38ca7b0e06ff8b",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9b104af51d868d3b2e39944262939cf01c98cdb8846066a5b88227f77f6a8d47"
+      "sha256": "8f14b38c4520d4c9931a2c63c6c8995efdb2e7c040ccefaf1731064243151880"
+    },
+    "crates/cuda/src/ling_fmoe.rs": {
+      "archive_mode": "0644",
+      "bytes": 18709,
+      "git_blob": "6bdada5c1f94a84213f87eb2fe0c011db5be2b1a",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "043b0b9e6e81a7286cfcd58b2f20f5a47ee32f06ce449211a7ebe19fcdcbed6e"
+    },
+    "crates/cuda/src/ling_kda_fused.rs": {
+      "archive_mode": "0644",
+      "bytes": 20267,
+      "git_blob": "b467cd43a9f808ba2a4943c36a5b0ba071b9f1b3",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a9040d0f94f2adf76f524c1ccabf04cfcd7dd033a45b9cfb804c47b0d808f744"
+    },
+    "crates/cuda/src/ling_kda_proj_fused.rs": {
+      "archive_mode": "0644",
+      "bytes": 50303,
+      "git_blob": "9f3fcccbc94c0341c036c335326dd39013c625cc",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "720dc255bc3b24852c9f4dd251839b54e4349dfbecf362eb99a9be973a5b85dd"
+    },
+    "crates/cuda/src/ling_mla_attn.rs": {
+      "archive_mode": "0644",
+      "bytes": 31987,
+      "git_blob": "d56714952a026331d86912fa40d8be0b5f2692b6",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "4f0f7876025ae6165535a2efff6374fa395dff960636d1bdde0ee42e36afd819"
     },
     "crates/cuda/src/loader.rs": {
       "archive_mode": "0644",
@@ -1251,11 +1315,11 @@
     },
     "crates/cuda/src/mla_gated.rs": {
       "archive_mode": "0644",
-      "bytes": 21662,
-      "git_blob": "7bca3c2909b6d550ffd5c49186df4a5707f536b2",
+      "bytes": 28620,
+      "git_blob": "13ed1c51835cdd108560f25530e5fc509ba89cca",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9e919e601e2eabe626b8c184bd58ce92e7f88a070ee144cf02b3e3376a0a0d10"
+      "sha256": "dd26d8c921df090626ecd70103dffe92a39786c09823579a35730c7e3f6a8f87"
     },
     "crates/cuda/src/mla_prefill.rs": {
       "archive_mode": "0644",
@@ -1291,11 +1355,11 @@
     },
     "crates/cuda/src/moe_subbanks.rs": {
       "archive_mode": "0644",
-      "bytes": 39915,
-      "git_blob": "a947c952608dfdda192c94ab79c6a4ffded93f05",
+      "bytes": 40112,
+      "git_blob": "239997d4f181f68957074d008afe595746e8dac1",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5cdb839ba49a74e771dafdcbbfbb6950c96f9f0d224ce3812c5b3bf2eebbf3bb"
+      "sha256": "6db4c8182ca2253202d70792fe451207c4b7280898dccf8a5d811d8f0aa47ff4"
     },
     "crates/cuda/src/mtpk.rs": {
       "archive_mode": "0644",
@@ -1513,6 +1577,14 @@
       "origin": "git_blob",
       "sha256": "d35196944a9f5a029f52b9a5b02408cde023b336df880729d0cb74b5a7f32fb8"
     },
+    "crates/cuda/tests/build_script.rs": {
+      "archive_mode": "0644",
+      "bytes": 3545,
+      "git_blob": "bb6235ce9d57851e2c3b437eb48df075229802c7",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "7de89384370539c8ac79177a5540277350de0ac53aa43db9ba83ff7a286d4e5a"
+    },
     "crates/cuda/tests/common/exl3_synth.rs": {
       "archive_mode": "0644",
       "bytes": 1284,
@@ -1563,11 +1635,11 @@
     },
     "crates/cuda/tests/dsv4_attn.rs": {
       "archive_mode": "0644",
-      "bytes": 103121,
-      "git_blob": "929a2102501a74304fc188627a0e1e9f0e8f5aba",
+      "bytes": 114640,
+      "git_blob": "192b19e1e43797111011f33ef5a7c5457d4bb15f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "1ebffc9cde9ee6ffdcc144d4b408be4688cd6f01b66ee5c7da2afed2bfc9a57f"
+      "sha256": "d85d0fecda552832f6d02c424c688b225241ac97743edf166257ee8b8effaa77"
     },
     "crates/cuda/tests/dsv4_kvq4.rs": {
       "archive_mode": "0644",
@@ -1659,11 +1731,11 @@
     },
     "crates/cuda/tests/exl3_split.rs": {
       "archive_mode": "0644",
-      "bytes": 18108,
-      "git_blob": "55dc9bc7ccb58c3c78275b8dd18ba7662a6ad9af",
+      "bytes": 19460,
+      "git_blob": "a03bd154c1ace1336fb382dd0f335e9d9f26046c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "aab9e20c50d4ab3bc3940ac0c91e63ecd5f61c5ea241b7906036d4147fe719bc"
+      "sha256": "1c12bb5079c1678b6173d5a172b0303b0196ba29aab4ec1b7d0a29c2e4747049"
     },
     "crates/cuda/tests/expert_cache.rs": {
       "archive_mode": "0644",
@@ -1673,13 +1745,21 @@
       "origin": "git_blob",
       "sha256": "25f2d7a5042249ad38ad4bc4289b5c47f60a5059d94188d4a2ed52657b486a4c"
     },
-    "crates/cuda/tests/fn_mhc.rs": {
+    "crates/cuda/tests/fmoe_smem_ab.rs": {
       "archive_mode": "0644",
-      "bytes": 18775,
-      "git_blob": "06e17bea02774ba044695ca428f4e134ede27828",
+      "bytes": 5951,
+      "git_blob": "2bf21ea762b213e2e28393084b85fc3d61928544",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "88bcb0638164cbaa26974eb85335125898733fb05ad6dadaa7541b17fb5a69eb"
+      "sha256": "fcb342f01f6e5a2b6ba51afa291430e6a85237d24a5cae07e6ba05815b6e0948"
+    },
+    "crates/cuda/tests/fn_mhc.rs": {
+      "archive_mode": "0644",
+      "bytes": 20278,
+      "git_blob": "17972eaadd31af9015a55be82cd0c8c057f19e4d",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "71596f113591b33a74c86decfd6d800b71b8622b6f58573ffb2d8a283274b48f"
     },
     "crates/cuda/tests/fn_moe.rs": {
       "archive_mode": "0644",
@@ -1691,11 +1771,11 @@
     },
     "crates/cuda/tests/fn_moe/cases.rs": {
       "archive_mode": "0644",
-      "bytes": 12393,
-      "git_blob": "4ce8879d2c5de504672afc2a49e29464a1ef92af",
+      "bytes": 12468,
+      "git_blob": "f59737888d2b318b7827d719a116a665643e1ae5",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6205ba7dfa5571b2007cd13f6d39b67d588c0262ca48595e660f9556a575a5d6"
+      "sha256": "867248a1480dc156201d284b2a4650585861ddb9a0f739461c020fb4d0f39cf1"
     },
     "crates/cuda/tests/fp8_linear.rs": {
       "archive_mode": "0644",
@@ -1787,11 +1867,11 @@
     },
     "crates/cuda/tests/glm_p2_moe.rs": {
       "archive_mode": "0644",
-      "bytes": 39284,
-      "git_blob": "3e6c71192be8640c8d48365cde260d6f559ed5e9",
+      "bytes": 51202,
+      "git_blob": "7e25494447306b4dad32bb15f09aeecd9e861c58",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0466daf5c2138a270f8802bb5950d2573b21825537b598d9ad60e66f18a07a6c"
+      "sha256": "ec72635da3a387d3705639583c993ef171fa608410534fb996346cf180bac831"
     },
     "crates/cuda/tests/glm_vision.rs": {
       "archive_mode": "0644",
@@ -1803,19 +1883,19 @@
     },
     "crates/cuda/tests/glue.rs": {
       "archive_mode": "0644",
-      "bytes": 67618,
-      "git_blob": "34dc8287654e45a26f2dd50cc32aea9db371adca",
+      "bytes": 75708,
+      "git_blob": "872be1dff1383616a5438cf7b6b82b954c7d6c09",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a0e62a4d457914c8f4b99cafaf606f6e41073aabf05e27099d5634363be2f4f6"
+      "sha256": "e44975e4c86d6b896374e1b575a5fabfea2b6b23a933961d4f553b474e813e58"
     },
     "crates/cuda/tests/hcx_perf.rs": {
       "archive_mode": "0644",
-      "bytes": 15792,
-      "git_blob": "df04011800c31b93841742da1b449896e5b00cd4",
+      "bytes": 18306,
+      "git_blob": "af91c32ecbeb4d90f10c8e791cd8df88716dfe0e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "916c0883e62542645ee7974683e33406a35ba6712ca857320f89097795e9f6e7"
+      "sha256": "e09d2e1d513f9a4ff90895a2823bf581287807bf38210a2c85d41e387f627b2b"
     },
     "crates/cuda/tests/host_stage_order.rs": {
       "archive_mode": "0644",
@@ -1841,21 +1921,61 @@
       "origin": "git_blob",
       "sha256": "a1f7ce65ae5e9792fff8b097de0dfc3316231eb4670d1733c8b4a3aa6197eabb"
     },
-    "crates/cuda/tests/ling31_kda.rs": {
+    "crates/cuda/tests/ling31_dense_direct.rs": {
       "archive_mode": "0644",
-      "bytes": 5414,
-      "git_blob": "4bd2b646809ef861cf5bbe521d849362d22564a5",
+      "bytes": 26785,
+      "git_blob": "38ce5a8385f53b1f96d84f7f459645005835e7bf",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "35f78706127ab6d02dbcae548e695a7d16ae6a949abf54a3d63efb6594a85905"
+      "sha256": "e1e4960467dc758e78234b33e8b4b99075f99701378fe7f575bdb3a8a45b97d5"
+    },
+    "crates/cuda/tests/ling31_kda.rs": {
+      "archive_mode": "0644",
+      "bytes": 5439,
+      "git_blob": "b68706a132f59ba1794e710e2a65f5d8a8cb2618",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "51254041369ea409e5753cff18ab3d8bfbbb79b72e2edd58e25eb33c547a5c94"
     },
     "crates/cuda/tests/ling31_moe.rs": {
       "archive_mode": "0644",
-      "bytes": 19606,
-      "git_blob": "cf8152afecf1d2ec74b3f2aedab40d7b9b0ef900",
+      "bytes": 22535,
+      "git_blob": "f9d45dbb373b71210a42b37df2bf2ea873e81476",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c9ee9dedab41b6fd2232ff47d6c473e3f812ab1b00dcbe9c5f50dfe47572747a"
+      "sha256": "add76163aa6212e1b1513a9051bda80ee84eb3e3daa6f36cbd64f7da14a0d264"
+    },
+    "crates/cuda/tests/ling_kda_fused_ab.rs": {
+      "archive_mode": "0644",
+      "bytes": 14014,
+      "git_blob": "f6f1b7d91eacdadc24852f73b2940806e19016c2",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "23ede8191de51598c330889072bad1270c07afea6c25a3c85f1b1fdc8a274045"
+    },
+    "crates/cuda/tests/ling_kda_proj_fused_ab.rs": {
+      "archive_mode": "0644",
+      "bytes": 183481,
+      "git_blob": "77febe7b7a7707bf8030e426dd124938df638fc8",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "f70374135875272952904e31642f334551148d53daa1fa25cc53d9a04e1015c2"
+    },
+    "crates/cuda/tests/ling_mla_attn.rs": {
+      "archive_mode": "0644",
+      "bytes": 39879,
+      "git_blob": "d68b875f4aa0de76463eda9b4a2145a88b788e09",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "2d67bdbae6738172387f08b8ae201f40aa4aaf75adc7e4ba36234c196b15f9a8"
+    },
+    "crates/cuda/tests/ling_mla_split.rs": {
+      "archive_mode": "0644",
+      "bytes": 20653,
+      "git_blob": "337b387c693d70b6c5741f714ad369d84e2d90b7",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "eb5ec6e5ff2beb5a017c4ce21b0c4e8c4d04b82d00ef96390514ddcf12c3c9af"
     },
     "crates/cuda/tests/mcv_pos.rs": {
       "archive_mode": "0644",
@@ -1891,19 +2011,19 @@
     },
     "crates/cuda/tests/minicpm_moe.rs": {
       "archive_mode": "0644",
-      "bytes": 9528,
-      "git_blob": "a63733d286c7e197b4f4bb562b991dec16af845d",
+      "bytes": 9809,
+      "git_blob": "35b4a169e809f76b30bda86f1363a392795e9c18",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "fed95baee6f37e7e69e44182bdace76ab3430d9f4bff1bc927cf6f138d1f8830"
+      "sha256": "a007aadba078451326441684b5c72dc2d38ec789a0c9a2baf1a2d33cc365fa57"
     },
     "crates/cuda/tests/minicpm_moe_prefill.rs": {
       "archive_mode": "0644",
-      "bytes": 18210,
-      "git_blob": "b5ccdab81048d5bf09e3603bae0c42a0ae990ea3",
+      "bytes": 19105,
+      "git_blob": "d11ef66dbf2ea0385116ba0e14be47be5da5613a",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "721a5d682b077c167dcd3827724e1570d8d5d1bfe278f385f07442a6785ab25f"
+      "sha256": "6895757f14fe89abab7157942782b74d917b1adfa6812c285993298468ca387a"
     },
     "crates/cuda/tests/mla.rs": {
       "archive_mode": "0644",
@@ -2251,35 +2371,35 @@
     },
     "crates/engine/src/lib.rs": {
       "archive_mode": "0644",
-      "bytes": 130089,
-      "git_blob": "5bb6447bac139ead54561ebf1cacc87a5b10909e",
+      "bytes": 135340,
+      "git_blob": "52cab0f06686e5ae8d1de643f0898f1df75b1bde",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "ef14e81f8eacc77d9e10736cceda595d8a09917a9728ccf42b5ccb71a5be6c3d"
+      "sha256": "ff6f3f593be7dd10847e72ba07296aa8e7170ad77678fac93ea724945dea9508"
     },
     "crates/engine/src/mock.rs": {
       "archive_mode": "0644",
-      "bytes": 53836,
-      "git_blob": "8ae63bbff7f4a46d8741717459cf7b38fa1ad6b8",
+      "bytes": 56464,
+      "git_blob": "144055a2c694f8c7b210a8fc509b91f4a2c27e71",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c5468f866d4c3d36258f3e48f77ad803b55c40d8d85861dd2a7489b45e0fb5ce"
+      "sha256": "03aae960f38441bd18f1c34885f707dd541b4f60b493cb594ad252d3d70dcd20"
     },
     "crates/engine/src/prefix.rs": {
       "archive_mode": "0644",
-      "bytes": 8041,
-      "git_blob": "ef9ef522824638f0c9b8ef4838b12c2a16dea805",
+      "bytes": 9388,
+      "git_blob": "1edc9ffe850f69b3b83cdd35c9152fdda42ba3c7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "cceb1b6aacfc209ddc25ed77a94d1a363337e7e9e59574cfdb75b3ef4c777940"
+      "sha256": "2010119fc71c89ded3849b3cbe2485a0cf53e44bde0f711f410e4cb279bad46c"
     },
     "crates/engine/src/score.rs": {
       "archive_mode": "0644",
-      "bytes": 3626,
-      "git_blob": "3aa2c3b539157d24c027148913c8c257c884eefc",
+      "bytes": 4163,
+      "git_blob": "43bf7ef4d4d1f5a64cb6204b979d82a2934c84a3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b6fedcd71edb203c8dc2270c0b25142a8b97215c9e05a052405a1b0c623c36a2"
+      "sha256": "848d703de84c4bf338d0e823e31a8edb01e05b97024566a1e793c80479b4cdd4"
     },
     "crates/engine/tests/admission_pool.rs": {
       "archive_mode": "0644",
@@ -2377,6 +2497,14 @@
       "origin": "git_blob",
       "sha256": "1dc1b9ad71016dfe1f53c3c77c4a933f2a58a0c6a3cf6c19cd7ed6446130b854"
     },
+    "crates/engine/tests/prefix_cache_pool.rs": {
+      "archive_mode": "0644",
+      "bytes": 10049,
+      "git_blob": "03fa42d3823dd32ff695629fb0168e0740fd2c64",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "7c416b53e57e9879165095a0dfb7577b38a352fbac90aab5fac1cc3123ee603e"
+    },
     "crates/engine/tests/qfn_interior_restore.rs": {
       "archive_mode": "0644",
       "bytes": 17485,
@@ -2395,11 +2523,11 @@
     },
     "crates/engine/tests/score.rs": {
       "archive_mode": "0644",
-      "bytes": 12214,
-      "git_blob": "0bfe252190aa76eb5bf82b554a28b5530c98bc26",
+      "bytes": 13782,
+      "git_blob": "95a3a88715cad209a239f3ea2bd2b3b06983dffd",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "1c348e614a258a8a0e0b220255d2a82ae2c4b1e2d35cf1f24883f974e8c34772"
+      "sha256": "5ce434decf41296bf588c53dc124c51fe0548f5100f848cdc9b57334c9b7226a"
     },
     "crates/engine/tests/telemetry.rs": {
       "archive_mode": "0644",
@@ -2627,11 +2755,11 @@
     },
     "crates/model/src/draft.rs": {
       "archive_mode": "0644",
-      "bytes": 48546,
-      "git_blob": "31bfa0e3715e161b31f8cc118b8a8f1dda69be26",
+      "bytes": 80048,
+      "git_blob": "25a124b3911901cd788c867726d17454aa56a031",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "105888f0a88993fde944d34c57cbb28bb76795eeb775b89eede0e2ce4390a270"
+      "sha256": "3cd21918d96b0e1da7566f7b1fe3bd6f31bb9f4e6c5a970c547e5e7f3faf64fc"
     },
     "crates/model/src/error.rs": {
       "archive_mode": "0644",
@@ -2651,19 +2779,19 @@
     },
     "crates/model/src/families/bailing_moe_v3/alloc.rs": {
       "archive_mode": "0644",
-      "bytes": 17724,
-      "git_blob": "eece72aa6ce8a94d6f1687d86cbb70c8cfe02675",
+      "bytes": 20391,
+      "git_blob": "30a98b93b6a46a05490a11566c5c119e75445996",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "223b175adfe04919c0e5b4807762804030fa43e32004d15957197c678e2fbb10"
+      "sha256": "8afec63ba0dcb02a7d5b8b111866751cfcbec9f4eef36d41ac6ad4ce55f80f9e"
     },
     "crates/model/src/families/bailing_moe_v3/backend.rs": {
       "archive_mode": "0644",
-      "bytes": 14633,
-      "git_blob": "f839970fdf640882765120783c033104d5279d9c",
+      "bytes": 19366,
+      "git_blob": "94a7c0722dd7de99d34e45c18e88bac6d84bc3a8",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "bf192c9f144d1d5b9db055f52f5fd0607bc6286a9fc1bbfb05159cc76ac2b4c1"
+      "sha256": "c7f33cf008fa51312bdeb0f3716a1f41d9f675328542d737c79c2efbb78ee56b"
     },
     "crates/model/src/families/bailing_moe_v3/bind.rs": {
       "archive_mode": "0644",
@@ -2681,21 +2809,37 @@
       "origin": "git_blob",
       "sha256": "e6bf58ecd2dc955ee6e96bfdc0d727b02bab5debddb35c0d7c7663dae857ea2f"
     },
-    "crates/model/src/families/bailing_moe_v3/device.rs": {
+    "crates/model/src/families/bailing_moe_v3/contract.rs": {
       "archive_mode": "0644",
-      "bytes": 13828,
-      "git_blob": "a2888c57190d55938154e8c4ec2b147a50a8b680",
+      "bytes": 14442,
+      "git_blob": "0ac663d31d3f1b5a39c3324285eb0bf99818f0a3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5b4a650a6c86c2e6fc945cd26def25fe174ac51944212912727ddcfebe3a8421"
+      "sha256": "59809cd0e620566b0a5553163053b5a249c41de599d6f62d7486566006e3e6f0"
+    },
+    "crates/model/src/families/bailing_moe_v3/counters.rs": {
+      "archive_mode": "0644",
+      "bytes": 4926,
+      "git_blob": "0fae608b1eca1afbd187e499459f2f3fd97ee052",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "930a80fef897c5784cefe7b3b402a774ae954fa4b3f8f887cd4a015b5865f683"
+    },
+    "crates/model/src/families/bailing_moe_v3/device.rs": {
+      "archive_mode": "0644",
+      "bytes": 14786,
+      "git_blob": "e1b73c9b3fbdbe0f407e9b85e822d6c44fd16b50",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "b1b6b090f450868fb85e7a77f92904c819705712aa3d6b0a8d19e0948590944e"
     },
     "crates/model/src/families/bailing_moe_v3/engine.rs": {
       "archive_mode": "0644",
-      "bytes": 14078,
-      "git_blob": "f0c769ef1f5541766469a2eb6e797f5ecb50b9b7",
+      "bytes": 53359,
+      "git_blob": "b2d177b434b450233d664933deb62dcbd5149d0f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "ab4fa74b6b7779419567d99344f2f6aa6d31698aa64d0954173f5f4e0e46817b"
+      "sha256": "da87acf9de976fa894aee8c12a905e559b0a09873b78dc10ae7f1ecfdc8098a7"
     },
     "crates/model/src/families/bailing_moe_v3/inventory.rs": {
       "archive_mode": "0644",
@@ -2707,35 +2851,35 @@
     },
     "crates/model/src/families/bailing_moe_v3/load.rs": {
       "archive_mode": "0644",
-      "bytes": 14405,
-      "git_blob": "ae7e3fbe12ea3bcfc42072d756f6d80be2c7cab5",
+      "bytes": 22729,
+      "git_blob": "47a72736f9dabcb9cfc460911b22d679eff7516e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "96f60097a0f21c502ccc0cb09a84bdea4583fe5b3bffd4a62479f02287f073aa"
+      "sha256": "c9a09d1eb39db918945fe39b521321d1e332b7199bcef7425d5ba914a2d159d6"
     },
     "crates/model/src/families/bailing_moe_v3/memory.rs": {
       "archive_mode": "0644",
-      "bytes": 7510,
-      "git_blob": "8c427b9ab8e21f98b67314db643cb09155a269d0",
+      "bytes": 11647,
+      "git_blob": "4a11da41cf13901986f4c141e2b70c5de0468ac3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9615eacf41d51c9ba0c309d71a0bf0814b5a1d052814888004e06dc92c1224a1"
+      "sha256": "e59000ffd7d95de3c047ed6f215dcfcbbf0d1fa0d717d7a6c474f9a9a121cc93"
     },
     "crates/model/src/families/bailing_moe_v3/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 18942,
-      "git_blob": "75b7726c5b7fe10e532a544f760a7af394ab1db1",
+      "bytes": 18993,
+      "git_blob": "3802f67d41c5e5c783c45c0e45b0ad9732fe429d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "4c0038eb0b34db0d5a1631f905bdbf5077bffdd831caf44da25cffe5253f6ab4"
+      "sha256": "4923ceaa90d8f1d2fa8dc9c52de15a0fe602b02eda9cf6c6cf55b1511863ad61"
     },
     "crates/model/src/families/bailing_moe_v3/model.rs": {
       "archive_mode": "0644",
-      "bytes": 100281,
-      "git_blob": "46912873d6abc26bb7522dfa1866889e8d84d308",
+      "bytes": 251214,
+      "git_blob": "bdf79267a3a3225ef6549226aa24b3ed9d6ea9c9",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "ee88444508beaa64776ba50173f4a707a655387a9b86834d9c51bc2607ec1d9d"
+      "sha256": "0ef353bbf878440fcd5b2c86549c3708c78a86dfe88c042a498b5c65b07a0ac0"
     },
     "crates/model/src/families/bailing_moe_v3/plan.rs": {
       "archive_mode": "0644",
@@ -2744,6 +2888,14 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "b0471532c29c077c635da8bbf431520a5bf476a776696eb11d2e754f20138bcb"
+    },
+    "crates/model/src/families/bailing_moe_v3/spill.rs": {
+      "archive_mode": "0644",
+      "bytes": 33265,
+      "git_blob": "f8e35b7b74bbb305c5dd54477fb69a553e80b294",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "d46d733ba27b483e5c9a77f1bab28ad2ed8fc2f9ca2c94a396f9829373688865"
     },
     "crates/model/src/families/bailing_moe_v3/weights.rs": {
       "archive_mode": "0644",
@@ -2763,11 +2915,11 @@
     },
     "crates/model/src/families/deepseek_v41/backend.rs": {
       "archive_mode": "0644",
-      "bytes": 29215,
-      "git_blob": "20a844ab8fca15f05e12c392a24a681094b9bd5c",
+      "bytes": 29762,
+      "git_blob": "e73d9b0c8213e973cc45b08efdbe7e73a00075b8",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "72a610f0d88716384774363304e7cad3b81260ea19d593d0d2c00928a7bb87df"
+      "sha256": "3339489cd55df16895b1709abd7e2d498d0fe3966ed64f588e1cb3df2bd9312c"
     },
     "crates/model/src/families/deepseek_v41/bind.rs": {
       "archive_mode": "0644",
@@ -2787,27 +2939,27 @@
     },
     "crates/model/src/families/deepseek_v41/device.rs": {
       "archive_mode": "0644",
-      "bytes": 53213,
-      "git_blob": "3a83c4fc3ec1993742252794d8f2d61d142aaa49",
+      "bytes": 53385,
+      "git_blob": "08f1d18e67870bdbd4af25e5b1e130cb81ff71cc",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "87be0ba3d0459339cf57c165da24c2757f01219afe90fe26ecba59ae52e0ef00"
+      "sha256": "3ef6661deb22d0fdb22c1bae8c03c3a54ffde47b32e4f57f15a91b71821c6205"
     },
     "crates/model/src/families/deepseek_v41/engine.rs": {
       "archive_mode": "0644",
-      "bytes": 89609,
-      "git_blob": "9ad7e768fefc6718e8bdd66a0266d4e7f5592436",
+      "bytes": 93013,
+      "git_blob": "f7c14c043e077617c628de0d65466f64afcc77ea",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "f96d571c22c985fbd505069f254e1d59896a0b8eef66a26b5729585bef5fe52a"
+      "sha256": "4547ea26edac31ab0c9817ac91d3c31b58186643663665ae81db10a514527cf2"
     },
     "crates/model/src/families/deepseek_v41/engram.rs": {
       "archive_mode": "0644",
-      "bytes": 112957,
-      "git_blob": "4f030cdf0a6eb458186191a91e48a126da7a565c",
+      "bytes": 114923,
+      "git_blob": "225b51c45dd6e07136f184c1e679b8130337731b",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "415d7222cbbb961b92e5fe7b1aed0c96b100649f5f7bfbdb88c9c941edd0c084"
+      "sha256": "23c7eb5d4620bd330f41367d4ec1a7afbc15ff0c05998f24f3171170a5600b67"
     },
     "crates/model/src/families/deepseek_v41/inventory.rs": {
       "archive_mode": "0644",
@@ -2843,11 +2995,11 @@
     },
     "crates/model/src/families/deepseek_v41/model.rs": {
       "archive_mode": "0644",
-      "bytes": 186922,
-      "git_blob": "0f876739bdbd3d1c7a84df69901636a3763d7e4d",
+      "bytes": 194093,
+      "git_blob": "6e65646b8e974fbdee009c7e54118c2832a9e2ab",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "86f2a438b1bff06917bc405fedd7c8735339e7b03f59498754863a87e2f02fe4"
+      "sha256": "fa9e961daf85bce5b6c00d5d1af522ebf700e23d87bfcc54907078af545b9752"
     },
     "crates/model/src/families/deepseek_v41/ops.rs": {
       "archive_mode": "0644",
@@ -2859,11 +3011,11 @@
     },
     "crates/model/src/families/deepseek_v41/plan.rs": {
       "archive_mode": "0644",
-      "bytes": 86985,
-      "git_blob": "53df08d54c5dbdfcc0d80154aac08117b17c86be",
+      "bytes": 86986,
+      "git_blob": "6ea56e1b96960057d5f69e7323658ad8a4cd880e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "7c1d488c77953e9d0e5fe7acb0c17b85ab4dae2a73dcda979d66641fc127cb99"
+      "sha256": "bf92a61763b8a9d4b08e85e59d7392e56c3169fbcf04a598762d9568088f5f93"
     },
     "crates/model/src/families/deepseek_v41/spec.rs": {
       "archive_mode": "0644",
@@ -2875,11 +3027,11 @@
     },
     "crates/model/src/families/deepseek_v41/tp.rs": {
       "archive_mode": "0644",
-      "bytes": 13848,
-      "git_blob": "357e5996ccccc58247e70649009afa6e1331fbdc",
+      "bytes": 13896,
+      "git_blob": "a168387c66a89bf048f99fac7e62c6a9193d7716",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9e165598f403737fa5b60d2d710c387a56752804ddd62d2afff4f4a7ba39a02b"
+      "sha256": "f80ba602991f70d9765157c08bb09f9a151018be8c08e26fd7824a72b7b7039d"
     },
     "crates/model/src/families/deepseek_v41/tp_arm.rs": {
       "archive_mode": "0644",
@@ -2899,11 +3051,11 @@
     },
     "crates/model/src/families/deepseek_v41/tp_runtime.rs": {
       "archive_mode": "0644",
-      "bytes": 62358,
-      "git_blob": "e4866ecf8b07a098a66825bbc3fb7276ab8d7b2d",
+      "bytes": 62378,
+      "git_blob": "44e83dabc235eeb221701f8b3b881fd204fa5281",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b78ac913f2f52387260b54ef390bd207fc2183fc9f877d2e4fa38443739b8466"
+      "sha256": "bf94c43dd145748c45af92d7cb533f3c954af5c523f2ac1b3033ad59759cb13d"
     },
     "crates/model/src/families/deepseek_v41/tree.rs": {
       "archive_mode": "0644",
@@ -2939,27 +3091,27 @@
     },
     "crates/model/src/families/glm/alloc.rs": {
       "archive_mode": "0644",
-      "bytes": 35819,
-      "git_blob": "a547fc3e5319702bf7b96a91c59ffd825bf69f2b",
+      "bytes": 36136,
+      "git_blob": "74b2b7ab8c46773803c0d8374ed8cc998cfc32c3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "ade1959c8f359b270fb24fad1ec5bc027e55df506e0d83e222598d73755bc674"
+      "sha256": "893da72d70cdf70adad25ae6357747e7db7c31973aecd45dca2bcb9ba94115b0"
     },
     "crates/model/src/families/glm/backend.rs": {
       "archive_mode": "0644",
-      "bytes": 27863,
-      "git_blob": "8fb53a18586a258b118cf0bc3e611e0027b7808e",
+      "bytes": 29608,
+      "git_blob": "cad46723f7b7b47d0c49dcca1734ac6b3f447a0c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c8098265067772dfba1434bcce362e8c751e153357579ce166c08534900043f4"
+      "sha256": "324a8646368672592f98e652333ce046588ea33a31fb4d3b2e5cc8e72a654ac9"
     },
     "crates/model/src/families/glm/bind.rs": {
       "archive_mode": "0644",
-      "bytes": 47020,
-      "git_blob": "c2c51456589d3a9765c53aed0f5e769673c9fabc",
+      "bytes": 48269,
+      "git_blob": "33231fa62739b1c3485f326faeedc0008cbc9323",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "1bcdc5ddae4ec3b5aba5e9aabe52aba1f76c4a00cc38ff967abe25726e3b15d8"
+      "sha256": "a7435fa4eaa15883103333251787371efeffed4e260b71212363298506f11313"
     },
     "crates/model/src/families/glm/config.rs": {
       "archive_mode": "0644",
@@ -2985,6 +3137,14 @@
       "origin": "git_blob",
       "sha256": "8af782af72c8baacd9f15aaa8f68ce99abbd2ac20991a1d9e524236447c6b5cf"
     },
+    "crates/model/src/families/glm/dflash.rs": {
+      "archive_mode": "0644",
+      "bytes": 14385,
+      "git_blob": "63331844f99bd8cba12896f8bf6175952a55ee33",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "ad535a2cc7b12ad3d9dbd1c3f3e71a0aa76909e68bf6c5a4916295df5f8a5326"
+    },
     "crates/model/src/families/glm/digest_log.rs": {
       "archive_mode": "0644",
       "bytes": 2907,
@@ -3003,11 +3163,11 @@
     },
     "crates/model/src/families/glm/engine.rs": {
       "archive_mode": "0644",
-      "bytes": 41024,
-      "git_blob": "371a89fea31b3220c908ee8a09b6476f7573e79e",
+      "bytes": 56997,
+      "git_blob": "1cebafaa9d251931dbf35cb520ea896069eb8cd5",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3730e4b8a2af93f1f57e7cc04e88628188a646031319cfc1136db47d9f1d4664"
+      "sha256": "ccc3584b0877706ff919e3bebfab07448c5628ddedea212c015da30a95c04470"
     },
     "crates/model/src/families/glm/inventory.rs": {
       "archive_mode": "0644",
@@ -3027,35 +3187,43 @@
     },
     "crates/model/src/families/glm/load.rs": {
       "archive_mode": "0644",
-      "bytes": 21530,
-      "git_blob": "629d1103d2e558958f7fecacff6f225a2008a516",
+      "bytes": 25733,
+      "git_blob": "85a2a61fb0ecf189f2bfbbb5d01fe95244337c46",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "587c5d4388e5b359d68ebd5867af96a6d96342fdbae8c70fd2ec784d51928536"
+      "sha256": "535cf80628f44bf4655a28ea5503c5aa9a9923f8849071f28584ae0d9e84d887"
     },
     "crates/model/src/families/glm/memory.rs": {
       "archive_mode": "0644",
-      "bytes": 22573,
-      "git_blob": "2e3b0b7b4ed27a7093d71ae7199bf91c99838555",
+      "bytes": 28736,
+      "git_blob": "e26365d28de5ed9d1d59df5cd285d77b9abc6f2f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9a07f76267cfddb91e4dde1a41dbd5c342404543f729af76bb764959dcc6eeb2"
+      "sha256": "8c6749fddd0d24b31fd418d7e52a16139b053e567d344cb26a52beb21a68a0de"
     },
     "crates/model/src/families/glm/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 31015,
-      "git_blob": "8201cbd37ad5ff792f5711fdfb39de099156bc09",
+      "bytes": 31942,
+      "git_blob": "020337a9f1a4d3beb7f6f42650d27dc3e8c4fc01",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "c8e203e7c4d6af2003f39f9c2e745841bd2155abb7e342e06385a2ce75ea75c9"
+      "sha256": "5a7a159d51f4fd3c86af6ea7eccd75dfe0a7d4da26392d202c27c352f9031c45"
     },
     "crates/model/src/families/glm/model.rs": {
       "archive_mode": "0644",
-      "bytes": 131120,
-      "git_blob": "ac5561402253cbccd446457717c1f21a419e12fe",
+      "bytes": 134198,
+      "git_blob": "96f6c02272755118470b2aaebd4cc4736446bf47",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5d11b9c2da27cb2f8fd997853b10bbd5168ed24609bd2ea9011247f20dd501a8"
+      "sha256": "6ee42cc813758278214b776db99b2e92952d17723c1f527b40377c86e7699b18"
+    },
+    "crates/model/src/families/glm/model/dflash.rs": {
+      "archive_mode": "0644",
+      "bytes": 13275,
+      "git_blob": "9f8bb40cce134fa6f16006254a4056c08974dbf0",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "413bbe9e0de0cea7a8c9d90d88d8d564dad7b1c4492a33a6a21dfc3c6e886ea5"
     },
     "crates/model/src/families/glm/model/graphs.rs": {
       "archive_mode": "0644",
@@ -3075,35 +3243,35 @@
     },
     "crates/model/src/families/glm/model/mtp.rs": {
       "archive_mode": "0644",
-      "bytes": 86822,
-      "git_blob": "7592e568d73c906e7ee884b067c12e40198b1efa",
+      "bytes": 89960,
+      "git_blob": "011c9f0bba46f01ef04bbfa14005fc3ce3c4b029",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "93238035f58bbf63afe56c363280aa45f7231baf5e03d1e44d350f8c9fa7de8c"
+      "sha256": "4fb1a91c5f6f3673f460bd3176f7f7e53f686ba1074f17ecb68e68458bfad2f8"
     },
     "crates/model/src/families/glm/model/snapshot.rs": {
       "archive_mode": "0644",
-      "bytes": 36207,
-      "git_blob": "6bfddeaf1eb376de8d65dad54cd8b2de71acb29a",
+      "bytes": 40488,
+      "git_blob": "14671eb96aa5dce27ffb6c6ee9ede01e95d3150d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "d9ef816b4bb01e7ffef4c3f9acdfa36437a78a1b86037e41c2612ff53a9e919b"
+      "sha256": "7247f77e6efd5582d1f1f861d3784b7215ce453f7027e1067e75d42ec460e2be"
     },
     "crates/model/src/families/glm/model/tp.rs": {
       "archive_mode": "0644",
-      "bytes": 48771,
-      "git_blob": "b90889a60e92c4b50729e3b517fc879aadc26f79",
+      "bytes": 48826,
+      "git_blob": "4a89b08ecdd9157142623bc37667b1c1d934cfe4",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "4208a1c9a779d1c5dbbb590752b5e86fe18c6f25b9394dd3e83b3d570c3489a5"
+      "sha256": "cb50251bd99215b32a46750fce9f4ead1b1a6644f68ad38ec625781416df10e0"
     },
     "crates/model/src/families/glm/model/tp/p2.rs": {
       "archive_mode": "0644",
-      "bytes": 11864,
-      "git_blob": "2bca1f4a555bcd458b86c27f3e21d5c31dae125e",
+      "bytes": 14829,
+      "git_blob": "6a7c2b5400e3844be5579285b6c8d993c7d4d8b6",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "25a8ef027c16135e3bd82e951b0ba5bb34a374717dcd161b0d58057a7d65eeae"
+      "sha256": "2e44cacac182e4c788ca31cfc3086cbef4186854eec1fb2c97488dbb93d22ee9"
     },
     "crates/model/src/families/glm/model/tp/p2_split.rs": {
       "archive_mode": "0644",
@@ -3123,27 +3291,27 @@
     },
     "crates/model/src/families/glm/ops.rs": {
       "archive_mode": "0644",
-      "bytes": 17865,
-      "git_blob": "7cb55f8786865732d22b91e53e98204ee5dc0dd6",
+      "bytes": 23183,
+      "git_blob": "8b080878d363800acb4be4822e0ebabdbafb1dff",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6f82e6bc454cc639c0109cf297ecd3ba7d694b8e8160e42cfe64b019d5f11edc"
+      "sha256": "5ca1be9996a681510a4858779f9cb1acd9475655193264645458802060768211"
     },
     "crates/model/src/families/glm/plan.rs": {
       "archive_mode": "0644",
-      "bytes": 19912,
-      "git_blob": "6f2f23fbf51c02b1fcb96e0327ba5aa6d1b5d22c",
+      "bytes": 20372,
+      "git_blob": "6b24feac0134afa7153954aa987eb9439536d650",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "45758abebcb1a5acd54fb7f7743650552afa67b17d6027cb76a7f6821d6ea336"
+      "sha256": "c2aa2df00e98b317f9a7711139a18d9495acda4fd31df0442b2e7c3725f89b6c"
     },
     "crates/model/src/families/glm/prefix.rs": {
       "archive_mode": "0644",
-      "bytes": 20717,
-      "git_blob": "b806656b0d1590faa51a757a87e0fc48473f8290",
+      "bytes": 22382,
+      "git_blob": "5a09060ca6a641ec34430b0fb9d529acd9c017d7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3145f588459912cf777767f670359e066803ab277db1d55a8648de44318d0bd3"
+      "sha256": "b15ec10d294bb83c9f72bf1c1a92c995604eac8f466b279b72cf4f18c6325087"
     },
     "crates/model/src/families/glm/profile_slices.rs": {
       "archive_mode": "0644",
@@ -3155,51 +3323,51 @@
     },
     "crates/model/src/families/glm/spec.rs": {
       "archive_mode": "0644",
-      "bytes": 43117,
-      "git_blob": "d00afc6f306f6f66da659efcb0ec9792379b075e",
+      "bytes": 51156,
+      "git_blob": "f44f19afdeb094a0d7efb942e241760cabb3b8aa",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9e68bcceb1ad75b3ad11a97b5f89589952225f6902375b099be2131c2a8e5359"
+      "sha256": "0fe87570bde521d8a30c7a93ac9aebd8e156770bc0aeca6d1cd019052a6e3b3b"
     },
     "crates/model/src/families/glm/tp.rs": {
       "archive_mode": "0644",
-      "bytes": 56775,
-      "git_blob": "ba839b541825c58d8fa2c0d2ba573633e50ca796",
+      "bytes": 61018,
+      "git_blob": "687934b9103ec051206a0da41f2e8013cf1deade",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3c59bca434ac5a7761508bd3fc3b0e925d15d95560bd78500dbc2a5fd47d494c"
+      "sha256": "72a5a13cda62b5d6a859228dda313af8d03e0b21206b628c12ad2bd89053b82d"
     },
     "crates/model/src/families/glm/tp_backend.rs": {
       "archive_mode": "0644",
-      "bytes": 121975,
-      "git_blob": "b90d26358dc8a3dda2cbb066a68542072a48d95d",
+      "bytes": 123636,
+      "git_blob": "b6b89eb2c5262357d7592142a3899ff523bbfed0",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a74e148dd5a78a21e5b8741f2735fac7311fa47dd4e773ed3b9a56878440bc8f"
+      "sha256": "4b8801e7b0765b843c06548149584dd03d5058e23fc39c2de1a009f3a102a6f8"
     },
     "crates/model/src/families/glm/tp_boot.rs": {
       "archive_mode": "0644",
-      "bytes": 105742,
-      "git_blob": "d1784395874df46ea020312a78210bf619832839",
+      "bytes": 116807,
+      "git_blob": "779646e9888e863bf30f52ea1299bcfdad740959",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a9bb1ebe673c643341dba28c0de11f31d7f3b07e426d19c838fad31f3d04b083"
+      "sha256": "ba64fe5543fb4b554bf20069b9b64973bd5eaa3366949424964c993c49d112ba"
     },
     "crates/model/src/families/glm/tp_mtp.rs": {
       "archive_mode": "0644",
-      "bytes": 37144,
-      "git_blob": "d2eefa703881b85973b337030ae30e83ab01ad95",
+      "bytes": 39453,
+      "git_blob": "ad7917a1ab419e286fc15b0b98e5a42b249af817",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b20d083a0f5d5ba3ec74c6cc6d8b627acaa44ec020a872677aadfad633543ee1"
+      "sha256": "d97d50bc109dfbcd73cba5d458c6c215c56495688890a4d63f68d0e9b9f1e34e"
     },
     "crates/model/src/families/glm/tp_vision.rs": {
       "archive_mode": "0644",
-      "bytes": 29151,
-      "git_blob": "c330cdce8cef70ac24fab4f799c5e4fedaca12ee",
+      "bytes": 31734,
+      "git_blob": "c17e8992a15f79ff981c0981210e298c47b1a26b",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6450c3a954bdbef22de90ac9fdaf4403506f034084c7288a2d7e36f97b282409"
+      "sha256": "f671929afbca603f5801c673babd96ea2d38d561aba95e1290ab61757747e5f0"
     },
     "crates/model/src/families/glm/vision.rs": {
       "archive_mode": "0644",
@@ -3275,11 +3443,11 @@
     },
     "crates/model/src/families/minicpmv4_7/backend_tests.rs": {
       "archive_mode": "0644",
-      "bytes": 57385,
-      "git_blob": "94a09c5a73a059d376b12d86690e8e0da4891c1d",
+      "bytes": 64063,
+      "git_blob": "54135469c08059f0f6104cbb477d03d93560c9a3",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9bf32761b67b0448d562278269b93c62a0b17513828e28aff4e3242e20772525"
+      "sha256": "96f52ad7377eeb47bff12af6a781a3546cfc2484b8ab6c81a72cbc479e501362"
     },
     "crates/model/src/families/minicpmv4_7/boot.rs": {
       "archive_mode": "0644",
@@ -3315,11 +3483,11 @@
     },
     "crates/model/src/families/minicpmv4_7/engine.rs": {
       "archive_mode": "0644",
-      "bytes": 20118,
-      "git_blob": "ca16265a14ba710786b23f932de9b017e1a8ccc6",
+      "bytes": 22077,
+      "git_blob": "f444240028dc11ccf4a88dd44595a4a6761448cb",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "4493c5a5282130f6f0f5fbcd5cbcd59d410ed00f094f104000266b81525e6863"
+      "sha256": "cd098e0022dc32e933d10b7dd8d01b64079c17972619edab15a75ef97e213892"
     },
     "crates/model/src/families/minicpmv4_7/inventory.rs": {
       "archive_mode": "0644",
@@ -3347,11 +3515,11 @@
     },
     "crates/model/src/families/minicpmv4_7/model.rs": {
       "archive_mode": "0644",
-      "bytes": 77532,
-      "git_blob": "280027e81233da5ec7ff2300a9870e34d9ea8514",
+      "bytes": 77614,
+      "git_blob": "8977dcb0d2430f930b4eacfd35666b92fdbe93e4",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "96d8c662810eeff6ff0e48d1a2ede9ec5a867c858f167588dc09b6d38ebd1d53"
+      "sha256": "8a893658ecaea83f171a1d576e79ff271f2371d75987b53092f35b902ff4acec"
     },
     "crates/model/src/families/minicpmv4_7/prefix.rs": {
       "archive_mode": "0644",
@@ -3707,19 +3875,19 @@
     },
     "crates/model/src/families/qwen_flash_next/backend.rs": {
       "archive_mode": "0644",
-      "bytes": 20330,
-      "git_blob": "6dfae19397e002aa99e3a240d5d89d178ed0b6a0",
+      "bytes": 26397,
+      "git_blob": "e378b645b144e0bfb111caad984fffe8d747957e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3ab5beca13c8bbbc504600bfd271b119d586ee5a22ca74a6959c912ca9d81f14"
+      "sha256": "2e2fb147195b4555113e2abb50261eed926b7738afc8578aee5137ea130e621b"
     },
     "crates/model/src/families/qwen_flash_next/backend_tests.rs": {
       "archive_mode": "0644",
-      "bytes": 18091,
-      "git_blob": "f67f1fa379725245eaaff0aee26d73400a3f440c",
+      "bytes": 23306,
+      "git_blob": "da4017ddded0aeed1a6a18101aac3f2c2ddd532f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9dda1ebb95598399b4290e8cd2a8ac0406d55c498c5d24f291e966a6c55a747e"
+      "sha256": "5905598c534527cb0b768c977f93385dfe164dfba5014febdfa8e07c31c63068"
     },
     "crates/model/src/families/qwen_flash_next/config.rs": {
       "archive_mode": "0644",
@@ -3731,27 +3899,35 @@
     },
     "crates/model/src/families/qwen_flash_next/device.rs": {
       "archive_mode": "0644",
-      "bytes": 33481,
-      "git_blob": "e8a03590e0458981da790aee0ccf9986ae74a007",
+      "bytes": 33965,
+      "git_blob": "7d76088c0f7a31bae6f7331dc2f0fbad5051122d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0d7c18b2f22bc2cae5d857c6b6246f64b8238408f15970941a7baa64023a0b0b"
+      "sha256": "e91c132da137fec571a3ee7d75838359db8a20b920232623866f1ae3dba5fb93"
+    },
+    "crates/model/src/families/qwen_flash_next/dflash.rs": {
+      "archive_mode": "0644",
+      "bytes": 4636,
+      "git_blob": "1e3ac66df5b34bc75194dcf29f0594134e7d0a6a",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "982e8d70b27d0275bc8a518bf8bdcb3927d2abeb280d4bff0ae6bd6b842a2c64"
     },
     "crates/model/src/families/qwen_flash_next/engine.rs": {
       "archive_mode": "0644",
-      "bytes": 18254,
-      "git_blob": "cf4ecc44a9e001abeb4191036ada605940576197",
+      "bytes": 24044,
+      "git_blob": "8d8ba5ab39fca3df7d604a308583e7f05165e784",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "904a5a0a125ab3a15056468e59ac4bfbe7a4054e9cfb1bab7e728479c1d584bd"
+      "sha256": "fae348248b11a508eee05d43f7c0467beaf72924000994654a210cc0322fb81c"
     },
     "crates/model/src/families/qwen_flash_next/engine_tests.rs": {
       "archive_mode": "0644",
-      "bytes": 34192,
-      "git_blob": "13d94a94ce8b29c9f40e74a3207f490d9e8425f2",
+      "bytes": 36771,
+      "git_blob": "09b04fd3ab27be4a128fe6c517d9f60da9971508",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "67315b2f13d99cc17d89eda3c404f331acfd29f192533ab6f598018e973c2390"
+      "sha256": "f32bce0fc3affc0c574f71a78a135e530bba1277473a644c47fb1e2a2831fcf4"
     },
     "crates/model/src/families/qwen_flash_next/inventory.rs": {
       "archive_mode": "0644",
@@ -3771,19 +3947,27 @@
     },
     "crates/model/src/families/qwen_flash_next/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 7858,
-      "git_blob": "04bde20b594a4fc2758a2a2a5eaf7dd08dd26ec1",
+      "bytes": 7888,
+      "git_blob": "40f7d89379c4a23142e03709895fedd4892ec8b0",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0e60e183a6fe7f17450b307a5013083e741c4aaab773ddfa53a92f9636826838"
+      "sha256": "c8364da886c008ed0054b38b089e7b11b243265f0e6f969cca18f0975f7c44e5"
     },
     "crates/model/src/families/qwen_flash_next/model.rs": {
       "archive_mode": "0644",
-      "bytes": 135872,
-      "git_blob": "fe47da792e368e0ec7af6f50fbc547b01e49e974",
+      "bytes": 158662,
+      "git_blob": "d03cce841ffd30284c7ae2bdbb548cfdcf36886f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "406c82c0ee22ae73254712ae184068c2a725f2001915ea8016ba30f24310815e"
+      "sha256": "65ab279f59e839ce061e1b1c286b29077824285a550ae2632cd2d53a09255018"
+    },
+    "crates/model/src/families/qwen_flash_next/model_dflash.rs": {
+      "archive_mode": "0644",
+      "bytes": 14216,
+      "git_blob": "6e5e21503e16aea1807608ea4677461b02855d3c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "8275183ab019bf1f87b8ca20fa5c54d7bbacb2c8d039f41182eb402d2e421fd7"
     },
     "crates/model/src/families/qwen_flash_next/ngram.rs": {
       "archive_mode": "0644",
@@ -3803,11 +3987,19 @@
     },
     "crates/model/src/families/qwen_flash_next/prefix.rs": {
       "archive_mode": "0644",
-      "bytes": 46659,
-      "git_blob": "bd3c3fd393d013813e510e9840b96e170cb9404e",
+      "bytes": 48801,
+      "git_blob": "10ae3aeb4ef3fd971a18ff2a00fdf2012dad5d02",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "799d762367d78471215df39bad3d845fb32f73d0b1555ad4b2a045d6c6465a9b"
+      "sha256": "cb7829654c58af59b7458e49d68342c54f8efbb43c8628d7942fa9e3cabedbcf"
+    },
+    "crates/model/src/families/qwen_flash_next/spec.rs": {
+      "archive_mode": "0644",
+      "bytes": 9849,
+      "git_blob": "9b7a160760de60b33b85716b66d272f916179530",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "c27f0ab3d982b3243062624b77b7d262bb56795cb406544eba92b8a6ae9add46"
     },
     "crates/model/src/families/qwen_flash_next/weights.rs": {
       "archive_mode": "0644",
@@ -3819,11 +4011,11 @@
     },
     "crates/model/src/family.rs": {
       "archive_mode": "0644",
-      "bytes": 85841,
-      "git_blob": "2deaf85f56e36695021bc20e8b7520e494d4b787",
+      "bytes": 86307,
+      "git_blob": "04b4d34f18d033f07fee3ff1cfb0f20670bec892",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "70e30dc9a8e03e9da25789f7027cb232d11458199d81e9cbc5f5ae7d824616d4"
+      "sha256": "b5923cb9a7d45757bb0f99b56d31c42755255a6b6a1cb561cf79ebea7b1cc13e"
     },
     "crates/model/src/feature_budget.rs": {
       "archive_mode": "0644",
@@ -3835,11 +4027,11 @@
     },
     "crates/model/src/fingerprint.rs": {
       "archive_mode": "0644",
-      "bytes": 52564,
-      "git_blob": "b7072053742df44a2545ad67b0a8d77592e17758",
+      "bytes": 68109,
+      "git_blob": "cfcbb39dbc4a7b6fb122ecaa224a72c0d0f50b6e",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0e5b8bbcd9e58feea6d4c0777cc65e177817a296766d16bcfb51f0ccb97ac5d7"
+      "sha256": "2e02cf4643302c9a0067cfd8157716d951b702232e0091668e73a971747bb217"
     },
     "crates/model/src/forward.rs": {
       "archive_mode": "0644",
@@ -3875,11 +4067,11 @@
     },
     "crates/model/src/kvtables.rs": {
       "archive_mode": "0644",
-      "bytes": 9537,
-      "git_blob": "345e638e19837d8dda5ce2ac71d0966281772a61",
+      "bytes": 9857,
+      "git_blob": "3cf5123c2fa9b1b0c9423ec0c1cefa2754ab5279",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "2d3dd0688e0a31423c461300a65888b0ee5f9d95bb91e988e4011ae490daf1a9"
+      "sha256": "49b687db9a06788f7c1ebecb86f8616b39b67b1b9f6c64932fc51b1dc986bc37"
     },
     "crates/model/src/lib.rs": {
       "archive_mode": "0644",
@@ -3891,11 +4083,11 @@
     },
     "crates/model/src/loadctx.rs": {
       "archive_mode": "0644",
-      "bytes": 12124,
-      "git_blob": "2281cad6bf38010be304616510622a1c929489fb",
+      "bytes": 12506,
+      "git_blob": "2b0648493c505578ac12bcaf91b1c0d23874d465",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9ab34ebd15c0b2543f249cd7102a268fb2f48aa93bfbaf2cec80fba366527b39"
+      "sha256": "cc6208a6cbc19aeef10ffea7759934fe63e21a722ded47ca7f0e5f538621eead"
     },
     "crates/model/src/lockstep.rs": {
       "archive_mode": "0644",
@@ -3939,11 +4131,11 @@
     },
     "crates/model/src/plan.rs": {
       "archive_mode": "0644",
-      "bytes": 106271,
-      "git_blob": "c15cf9956e8f88961e8a4328dec5da5b3dafe922",
+      "bytes": 112095,
+      "git_blob": "d76d1e368a871ec1d4424abf264ce540bcff5d6d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a441533ad809e40a073e5fdf75012e73046f553b8ee262529d430b3edb5e2183"
+      "sha256": "5b11e91c096a8902343d3b8c742362af5e90f2c58cddd11481c68833c2a70bfe"
     },
     "crates/model/src/prefill_p2.rs": {
       "archive_mode": "0644",
@@ -3971,11 +4163,11 @@
     },
     "crates/model/src/serve.rs": {
       "archive_mode": "0644",
-      "bytes": 95274,
-      "git_blob": "882cc9232947a983daccd413a5b4b29e86e1d8e0",
+      "bytes": 104527,
+      "git_blob": "372b020dc3914353d21c6b111397ff1851a619ce",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "7f246d29989e65f5bc219b8035777095ce08db346c63905995a5e75a714f419c"
+      "sha256": "e86bae13d872fc3779b49c76e1b45e054f82f2025721d86d812416bcd1b9f407"
     },
     "crates/model/src/shapes.rs": {
       "archive_mode": "0644",
@@ -4107,11 +4299,19 @@
     },
     "crates/model/tests/dsv41_prefix_digest.rs": {
       "archive_mode": "0644",
-      "bytes": 8453,
-      "git_blob": "838948abf69559c2e6dd9722543969d51132492e",
+      "bytes": 10969,
+      "git_blob": "7c5553f6ed905f84b8489c4a5e7f2657f11465b1",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "478f69d4e7bdd79a779d30151bbec81beb69b1951903ce17a9fa57bde18d2b1e"
+      "sha256": "9175f3b2e3959d0514fcdf0ddff6340779183b704f0a2a4860cf7b27072543fc"
+    },
+    "crates/model/tests/dsv41_score_rows.rs": {
+      "archive_mode": "0644",
+      "bytes": 4837,
+      "git_blob": "664222f980767fbb75c2b942f4bd766cbf21d5b3",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "6e5b14a947c687aab1a51c77746fec2c5a4ca53f8fceda40e97972eaa4ec67e3"
     },
     "crates/model/tests/dsv41_tp.rs": {
       "archive_mode": "0644",
@@ -4137,13 +4337,21 @@
       "origin": "git_blob",
       "sha256": "90566a9963d8a043d0d8bb1de13d996637009a3037529ebce5057558712ba26b"
     },
-    "crates/model/tests/flash_next_forward.rs": {
+    "crates/model/tests/flash_next_dflash2.rs": {
       "archive_mode": "0644",
-      "bytes": 48473,
-      "git_blob": "1c9b0921554be7eba5ae83b86e57245911977c38",
+      "bytes": 14572,
+      "git_blob": "0661c9fb7f91939e4a9e3c60e7df5b6e1db06f86",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5d517711bc47b0aa67f0900d9584c983be9e8f1aa3547153b6ef5c6c6897c845"
+      "sha256": "7629ec9cc906bb116f74b7bdc74a0d587ea49f25d8d019ffd8c6a8c6d02be61c"
+    },
+    "crates/model/tests/flash_next_forward.rs": {
+      "archive_mode": "0644",
+      "bytes": 53492,
+      "git_blob": "c75605029b5d1e2b716e9893e519648c471d6e28",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "00e697c40d7197896f0267c76e87f1c4ef4d6f3bac21818b5ffa671e9f059664"
     },
     "crates/model/tests/flash_next_pack.rs": {
       "archive_mode": "0644",
@@ -4216,6 +4424,14 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "a160e8c21acff37a951510532f12f82dcf7e268a6b3ce537365621621105cd76"
+    },
+    "crates/model/tests/glm_dflash2.rs": {
+      "archive_mode": "0644",
+      "bytes": 19627,
+      "git_blob": "42a17c2f963f1c3ef77749656a1f3c19324996a1",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "6e71d787e269a68f8efeab8e6a0ef6680cad6326ce2d7822baae63f2bf5c91aa"
     },
     "crates/model/tests/glm_forward.rs": {
       "archive_mode": "0644",
@@ -4331,19 +4547,19 @@
     },
     "crates/model/tests/glm_redsnow.rs": {
       "archive_mode": "0644",
-      "bytes": 12505,
-      "git_blob": "84bc27868c1ab25d55d4114d6690738136b5407d",
+      "bytes": 18856,
+      "git_blob": "b794e8f6b9ae4127f80834ef02f1022af36c7d68",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "76a61b09ad6ef6e0badcf792cf4f97db46a648e49351524192115384db14796b"
+      "sha256": "bbab4b408aa4199180cfdf35cc8230e4e54c9051c6cee3d99e0214c8b264a00e"
     },
     "crates/model/tests/glm_redsnow_tp.rs": {
       "archive_mode": "0644",
-      "bytes": 21712,
-      "git_blob": "6c0fbf5f188d8a9f4c62618d21e02c1e7d30b53f",
+      "bytes": 23938,
+      "git_blob": "f11d07a9bb0559f90a4d6358a94b152fff321dbf",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "30bdd06442432bea32aba53586591b294adabdc6119f93e4ca9cc14718f3b5a9"
+      "sha256": "d4e488e9ddfd2b4c653e45ce34439db76dea783e6fdf59321b4d0e80378af78d"
     },
     "crates/model/tests/glm_spec.rs": {
       "archive_mode": "0644",
@@ -4403,11 +4619,11 @@
     },
     "crates/model/tests/glm_tp_vision.rs": {
       "archive_mode": "0644",
-      "bytes": 29159,
-      "git_blob": "2a1e5bed58d38a149e633ff0cac7b2b46fd5e077",
+      "bytes": 37653,
+      "git_blob": "6f2d90384a129a8c01a43b6b783a5fe49f961b19",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "509b0e2dce06591c833409a92e47825a23dc10f6737c993b772c3380b63199bd"
+      "sha256": "ed40013b7dcc865a83233f760e82f77a77548c596eca5c52d2c97a33288e2f5f"
     },
     "crates/model/tests/glm_tp_vision_mtp.rs": {
       "archive_mode": "0644",
@@ -4475,35 +4691,43 @@
     },
     "crates/model/tests/ling31_alloc.rs": {
       "archive_mode": "0644",
-      "bytes": 2454,
-      "git_blob": "d0a2a80f0832e96c86ca3f57db8221a428c3d0a4",
+      "bytes": 17554,
+      "git_blob": "15bf452c2d6bf9f8d7240622eb13f6776e6bd508",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "b44a24c60f4e7492cf493550bf17485d0e309b1d84c4891aaedf4be1af2fcf5e"
+      "sha256": "2da0f80bd36bf76652227bdfc6664fb232b0af0054bb583f9c835f41d1664168"
     },
     "crates/model/tests/ling31_prefill.rs": {
       "archive_mode": "0644",
-      "bytes": 3142,
-      "git_blob": "8bccdfc9311fdb6940fac6eb83b78d3427103df4",
+      "bytes": 9507,
+      "git_blob": "f220a324d118bc4d24ca64a5e4b8b82f2ea58119",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "d7b57c8eb0f972651a46b0930537aa260fcf9f0e250912aa0cf5d2607cd2ced2"
+      "sha256": "d362f25f40b64e1138affdf20262338fbdb6efa245300ea8eb6e2ec5de42dbab"
+    },
+    "crates/model/tests/ling31_prefix_bits.rs": {
+      "archive_mode": "0644",
+      "bytes": 10578,
+      "git_blob": "b09636dc4cb99aa8762f2e1ec3364ba48e13b965",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "0ff1fada43dc62ef400ba33661ddca2e90c1d5aa0655317e754ee1be0b459994"
     },
     "crates/model/tests/ling31_prefix_plan.rs": {
       "archive_mode": "0644",
-      "bytes": 8909,
-      "git_blob": "e3283990952622d98dc371d1c397aefd73fc3a10",
+      "bytes": 17472,
+      "git_blob": "724757a07af780b9d98dcae01c0d2f14f3eb12e9",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "099b2cb02fa600a4533d5715960133057d84d3b9b6e180b32c61aaa5b2017804"
+      "sha256": "17f7523ebad5cd286e6b332a47b465e0251bd068b561e8446bfe3e903aacd968"
     },
     "crates/model/tests/ling31_support/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 10402,
-      "git_blob": "10389340a0048a45aa7ddf4889ec6c3a02cdf4c4",
+      "bytes": 36607,
+      "git_blob": "a3b65bb606619fe3c49ee103081c82a1ff2dd7f7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "bf97ab952782caa9f257cd01b22ab02c566d650308fd981ad1d4cd3d67ab102c"
+      "sha256": "adf177420c58dd4334c91906968fafe15dc64fc7a4267ddca25c4ad5fe8f04c8"
     },
     "crates/model/tests/load_pipeline.rs": {
       "archive_mode": "0644",
@@ -4555,11 +4779,11 @@
     },
     "crates/model/tests/minicpmv4_7_prefix.rs": {
       "archive_mode": "0644",
-      "bytes": 35229,
-      "git_blob": "b9b23da65e822e780a2e3100e1d9b35bfbf4d060",
+      "bytes": 40139,
+      "git_blob": "67deeffc43ebcc7e2e702d5b18bba1e13bbc9d70",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "e2f245b1d89422b4b8e44cdd94444f3f054468c539a4b7af05c9bf5e44c0f38d"
+      "sha256": "f4bc87204d63a7d92e4a1cab9be3ace246bc0f72f058324c6cd186f0c3d718f4"
     },
     "crates/model/tests/minicpmv4_7_spec.rs": {
       "archive_mode": "0644",
@@ -4571,11 +4795,11 @@
     },
     "crates/model/tests/minicpmv4_7_support/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 6807,
-      "git_blob": "afece151146b223a22c741a36fdfefb14c568988",
+      "bytes": 7457,
+      "git_blob": "aed0fbaa357a8232f1e50fe292bc786d51eae141",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "bd30caceaee9b4bedd01e22ce05292b7073a6bd8e1e4b9d978235104a907fc81"
+      "sha256": "ced8d03c55bd30897ecc0fcd145e7dcf395eff9c8669100dec6f72bf49841130"
     },
     "crates/model/tests/minicpmv4_7_validated.rs": {
       "archive_mode": "0644",
@@ -4865,6 +5089,14 @@
       "origin": "git_blob",
       "sha256": "67cbe47c9ba6d690e507254a86324c60d6547b2a056ab8c5b95fc48566692fbb"
     },
+    "crates/model/tests/pack_gate.rs": {
+      "archive_mode": "0644",
+      "bytes": 7022,
+      "git_blob": "93e4a682f0c37278cd0dba069e05fcf52d0156d0",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "9f622a05ad240c9b06034f5341820ef7ae234c949c7d9bb4627d4bdbac38d46d"
+    },
     "crates/model/tests/perf_graphs/mod.rs": {
       "archive_mode": "0644",
       "bytes": 1836,
@@ -5000,6 +5232,350 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "0e8b8b889dd6ccc59f71b778b9840e2695c9a904f87f0f14e7025931c41a73f8"
+    },
+    "crates/quant/Cargo.toml": {
+      "archive_mode": "0644",
+      "bytes": 551,
+      "git_blob": "50362fdf9ade62240ecbacc29d73c15463cf64e1",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "ae807239f729a0e09c8a91067cc6d25a86a63f722af7e01639028631e3042143"
+    },
+    "crates/quant/build.rs": {
+      "archive_mode": "0644",
+      "bytes": 4291,
+      "git_blob": "7b1f7f54662718e1cc00ddadaf15df41a7388c55",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "dc665f47c0fe23f475efbe5a22e67e22cd0076bf5ef25e91cce83a40d62d80c6"
+    },
+    "crates/quant/csrc/common.cuh": {
+      "archive_mode": "0644",
+      "bytes": 525,
+      "git_blob": "026a0d4c7c10f146b478c7736de2b6c70b17928a",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "9fa9dec72fcbc8e4ba251bf72ba9972212fe9ae00dd705853ab6bbf546b41d0a"
+    },
+    "crates/quant/csrc/exl3_trellis.cu": {
+      "archive_mode": "0644",
+      "bytes": 27148,
+      "git_blob": "b49a324e1fc89a55f1e9d1093f24668475ab1815",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "27a89165ecce0f62534975d2f228d1a8a69d850b40ce3c310b45675c23e01e9e"
+    },
+    "crates/quant/csrc/quant_core.cu": {
+      "archive_mode": "0644",
+      "bytes": 17718,
+      "git_blob": "0e1b087df7d7dcb106effc838cb6b9d6ce07a4fc",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "feaa19803e8647914f741e824b718db4a6f713d60b42d248c9c41f583e5c7e1b"
+    },
+    "crates/quant/csrc/teacher.cu": {
+      "archive_mode": "0644",
+      "bytes": 24167,
+      "git_blob": "2b5545238a7eead383cf531437778e79b08af3ad",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "465406d091e45d1eabce02189b14c11eec68549dea68578c49c51018f16596ae"
+    },
+    "crates/quant/src/alloc.rs": {
+      "archive_mode": "0644",
+      "bytes": 96,
+      "git_blob": "8fcd39e1742a8677582218dd21f94b5ba95d1ae3",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a5e8080664024e94c5bf03139ddd6441405c5e3fd917443340b189cce8801b08"
+    },
+    "crates/quant/src/auto.rs": {
+      "archive_mode": "0644",
+      "bytes": 101,
+      "git_blob": "6ee40d96a0d1c6c494a85ff7af8b035f1ad50e67",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a299e66ff8add97b62a90322d109ca29e70d73747e0f43057ff63874613c1951"
+    },
+    "crates/quant/src/bank.rs": {
+      "archive_mode": "0644",
+      "bytes": 22933,
+      "git_blob": "ec590bd9451db3f0a86e40ebfa6c0a852cbd9733",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "5e050db74368f57c6aad73fa273992865d6411d3237052c7b9df5c3a36d8bd16"
+    },
+    "crates/quant/src/bench.rs": {
+      "archive_mode": "0644",
+      "bytes": 14617,
+      "git_blob": "a08039f78a7d802cc252d7fc27e2b66b43333a8c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "e79c9a8075dcb8043d845560c94d8e7dd0b74544aed236481bdf04c7e5283fa2"
+    },
+    "crates/quant/src/calib.rs": {
+      "archive_mode": "0644",
+      "bytes": 91,
+      "git_blob": "ae33a0e1ef49ae35421bb98f0742e5b87d47aa0e",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a54021ac59c81bb4a2d2e3aa4fa38dfaebaee1c186b17d6882f8ca69fe5b6c38"
+    },
+    "crates/quant/src/capture.rs": {
+      "archive_mode": "0644",
+      "bytes": 12788,
+      "git_blob": "e9e254fe939085b83d56928316fba8db56953b86",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "fb67bb96d113cea176fb724eddfdac2608fd8cf66bf12dc4341d2212e9f5e717"
+    },
+    "crates/quant/src/core/dev.rs": {
+      "archive_mode": "0644",
+      "bytes": 15414,
+      "git_blob": "937655b541fac785a06a8283f6766d3fe403eac5",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "76891134b5945b3cefbd1f9d381bb9e9b7365e55133181215ebbbabfaa4fb45f"
+    },
+    "crates/quant/src/core/fixture.rs": {
+      "archive_mode": "0644",
+      "bytes": 4583,
+      "git_blob": "253ecc3cc2a035e36a9be97ce268deec78935cf1",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "e0a4f06841dc8f5b8d9057405a207694e2ba27914aa6eeb5972f56cfd792d4f0"
+    },
+    "crates/quant/src/core/gscale.rs": {
+      "archive_mode": "0644",
+      "bytes": 6903,
+      "git_blob": "760da2d5afc9dac6791f6e072515115f5b3607df",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "bcf5477b94b4791956a72dc9eee3a4297869d95e9ddc8e89396aae4f9e6bf084"
+    },
+    "crates/quant/src/core/hadamard.rs": {
+      "archive_mode": "0644",
+      "bytes": 4693,
+      "git_blob": "b1ed20c4bb2408701fd982cc48f75145e96f347a",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "ca8796513edcef024ce381c1fc682b174589f2535cf9fcf35cbba06696a0dabd"
+    },
+    "crates/quant/src/core/ldl.rs": {
+      "archive_mode": "0644",
+      "bytes": 3953,
+      "git_blob": "785cdf9fc215eb45ac459ba9939408ef265ff86c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "e96f21098f9a103f6eb6ab89f1e14e959329ab8c6d43beb668d1077a20bfa085"
+    },
+    "crates/quant/src/core/ldlq.rs": {
+      "archive_mode": "0644",
+      "bytes": 6612,
+      "git_blob": "689db32c707526bbdaee503a1b9f8857ce0adf09",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "c72edf53263e0431883cdbb011af423b1f5b5895537fe676b6145cf1163a1932"
+    },
+    "crates/quant/src/core/mod.rs": {
+      "archive_mode": "0644",
+      "bytes": 12600,
+      "git_blob": "8e20fa357d00af7b79fb590f9f74d220e0fd87af",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "ccf2b4e71fa4246f1e3dc128573749fdf8de4ede65a4c09c6996b45ea133d380"
+    },
+    "crates/quant/src/core/prep.rs": {
+      "archive_mode": "0644",
+      "bytes": 2878,
+      "git_blob": "66b4eec0d548dd1e57fc1240200183c6b9d42efc",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "25491a6aa9cf63f2fec47b67b062192d965fc9925ba57aa6d183dd2a68ccfc08"
+    },
+    "crates/quant/src/core/refit.rs": {
+      "archive_mode": "0644",
+      "bytes": 7578,
+      "git_blob": "668da25007e1b63cae43f15e84ddf8268f3428ad",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "bdaf6e49ca2d5872e14cf2a6ddb13424a5477ab398732b88e97591b5df0a461d"
+    },
+    "crates/quant/src/core/regularize.rs": {
+      "archive_mode": "0644",
+      "bytes": 5537,
+      "git_blob": "bea8e5c59e9bf63f8f8f833ec1213250e279fce5",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "1c7384d5adaf8ba19ef013402b7a5fd6e6bf88b17526737eb9532c8254a203b3"
+    },
+    "crates/quant/src/encode.rs": {
+      "archive_mode": "0644",
+      "bytes": 967,
+      "git_blob": "e951c98c1b1ce827c036cc6aa67f9c89861ddaca",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "31d4e5844657d7304f0b5d2fa947aed76e9b9119e5c062dfb928b70be19a5ec0"
+    },
+    "crates/quant/src/eval.rs": {
+      "archive_mode": "0644",
+      "bytes": 86,
+      "git_blob": "108364093233fc2aa6fd8994cb45d26e1f1267d4",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "e93f8c0d575808705d5bb93df1aec2baccdc5d71213cb0b2c23fd646f126091c"
+    },
+    "crates/quant/src/exl3_trellis.rs": {
+      "archive_mode": "0644",
+      "bytes": 25522,
+      "git_blob": "9adc27792b590ac00338da96ccf46343b966c89e",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "3c3461787d336c404941732f272df2718069865acdb379af4233afc7f9351d45"
+    },
+    "crates/quant/src/gpu/cublas.rs": {
+      "archive_mode": "0644",
+      "bytes": 7659,
+      "git_blob": "71cbff6fe5cd781ced590d4fef25cd6c81c58b46",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "97df70cb4701cbef92768058f1f95f3918af572dd356210ebf05ea366a88a293"
+    },
+    "crates/quant/src/gpu/cusolver.rs": {
+      "archive_mode": "0644",
+      "bytes": 6074,
+      "git_blob": "68bce67188a998f2baadac307b33aba1ee3d5d40",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "2bd1d2deaad8ded590223c31a3f81bd6ca68668fb5bb30d741dee7574ea29c31"
+    },
+    "crates/quant/src/gpu/mod.rs": {
+      "archive_mode": "0644",
+      "bytes": 2661,
+      "git_blob": "0ea77623d7ec05a454ee20d10be6cd35d6d5b34d",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "074a8f599eecd602539db668361400f0b2ceff8e6451864a52e7dfd319e55d4c"
+    },
+    "crates/quant/src/lib.rs": {
+      "archive_mode": "0644",
+      "bytes": 1041,
+      "git_blob": "0fde2e3e0117c43ab2f54808ec168502cc387f49",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "70a5c630de3525467bed60e411a30820ed617536155c5dc6ff93c72c1d10f3cb"
+    },
+    "crates/quant/src/main.rs": {
+      "archive_mode": "0644",
+      "bytes": 14901,
+      "git_blob": "f46dfc5977a3101b28c71afef2f099d13fdccd23",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a9217af14ae93c80db10753f57042030db2af88edb4861f6f31bdff6b101f74f"
+    },
+    "crates/quant/src/pack.rs": {
+      "archive_mode": "0644",
+      "bytes": 1842,
+      "git_blob": "c5091efa774e1e2e65b1473295f9252b25760eb6",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "da79c8192d2150c02c48029df2610dea9076bcbf73371db7b56e34ab8b0afe7c"
+    },
+    "crates/quant/src/polish.rs": {
+      "archive_mode": "0644",
+      "bytes": 71,
+      "git_blob": "0d9bff38b72947bf5c0e64e50502ac8938f9505f",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "0b4d7dd97679ef79b757777cc94db5998eecdad0502e8e42eb1080db356f9044"
+    },
+    "crates/quant/src/predict.rs": {
+      "archive_mode": "0644",
+      "bytes": 53,
+      "git_blob": "f734223f25b2edb6094a2a52762f23168ed4e27c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "a914071dfdbb9438fade0815a10d4043198eb3699c40c88986d658938512900e"
+    },
+    "crates/quant/src/sense.rs": {
+      "archive_mode": "0644",
+      "bytes": 40,
+      "git_blob": "5f542d31eff3a051baacc63af5729a5ae4c0577a",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "0e47f6ef7694d515c587914a0b989ae3a91f5d54e437c8cc3dfdedafbd32fcce"
+    },
+    "crates/quant/src/source.rs": {
+      "archive_mode": "0644",
+      "bytes": 10095,
+      "git_blob": "fa27c2b3b986aad4251572adbdfb169552750382",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "2507f3bb9d45f11c737a62b321f95ab8a699a26cf3bf53901e43cef19791fb71"
+    },
+    "crates/quant/src/teacher/config.rs": {
+      "archive_mode": "0644",
+      "bytes": 11293,
+      "git_blob": "1968cb98f21a4578d57185354f365e79ebabd391",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "0ea79ea53b4cff4c7aa394bda13de11e7ccbe1b015d854cfa3e4c42125e09e40"
+    },
+    "crates/quant/src/teacher/mod.rs": {
+      "archive_mode": "0644",
+      "bytes": 26283,
+      "git_blob": "3520026e7d5523fd7a5d447ca0060509adeb3fe6",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "faf631cf2ebce8b52f920ffd7413c29ee8c78b00de06a55b5974fa93266f3a6a"
+    },
+    "crates/quant/src/teacher/ops.rs": {
+      "archive_mode": "0644",
+      "bytes": 10394,
+      "git_blob": "5eb728b89a0a5267acd2fbaf92858aed682b0589",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "f56fd94c19fa3d67ed799543d227ff743e8c46b53119258751aab52e60e7bc8a"
+    },
+    "crates/quant/src/teacher/prefix.rs": {
+      "archive_mode": "0644",
+      "bytes": 5214,
+      "git_blob": "4400b502ce59fba7ee1145d89b2f0af2630811fb",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "29d9f0d5d99a33ed4dda6b2058bdfbc44d4987aaca1775420d14e67c940e7d14"
+    },
+    "crates/quant/src/teacher/run.rs": {
+      "archive_mode": "0644",
+      "bytes": 6893,
+      "git_blob": "07ee38e759c01a3f94bcc3c67de7d2c2c41f69a4",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "0052d8c2032c13f1b479593601614a2b4741fab5793bd07b238c1e7caa37215f"
+    },
+    "crates/quant/tests/cli.rs": {
+      "archive_mode": "0644",
+      "bytes": 1321,
+      "git_blob": "ebd89ef415c3029b25ca7d5fd027cb80744dedc2",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "6a476c166d2bebaa0b0e29b13f1bdd3a12807cfc6cd9b10ef9f2d2b625eff42e"
+    },
+    "crates/quant/tests/exl3_trellis.rs": {
+      "archive_mode": "0644",
+      "bytes": 15633,
+      "git_blob": "4e9a57b2408bd7da573001167b6c4403f2a53287",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "9d9a385c18a5716ace1eb66ed5da59b0c8c0b9d6f6a1df1c2025ef1a432dcab0"
+    },
+    "crates/quant/tests/quant_trellis_roundtrip.rs": {
+      "archive_mode": "0644",
+      "bytes": 8521,
+      "git_blob": "c6caeb9b2ec4911b8287b3ea105fe5ed781d8c92",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "f0aeceb8fb951af9da6107c672f817c9aca41d3baf159ce95b6bd56ff18f0b9b"
     },
     "crates/router/Cargo.toml": {
       "archive_mode": "0644",
@@ -5139,11 +5715,11 @@
     },
     "crates/sched/src/lib.rs": {
       "archive_mode": "0644",
-      "bytes": 96701,
-      "git_blob": "9ef439fd93917470fdadb4ce0640562f011344c3",
+      "bytes": 98871,
+      "git_blob": "b0752e61a4e4f44c43b261c13c4cfe5cbb62dc0c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "8e574776d2f7cfda7a03411479932751f181ab82fb772224056840889e675251"
+      "sha256": "1650ff20e5f225ada6e0a1196d59a43757f089eca9bd047f53b1cfa2cc0ba732"
     },
     "crates/sched/src/memory.rs": {
       "archive_mode": "0644",
@@ -5155,11 +5731,11 @@
     },
     "crates/sched/src/prefix.rs": {
       "archive_mode": "0644",
-      "bytes": 88876,
-      "git_blob": "9ed2f257d961ee4e6926ca52d85f96f6f61cb10c",
+      "bytes": 89689,
+      "git_blob": "f8a31740700b60f74e5b2f096ec99391f7116857",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5cd039cce2cfb2bb9f6bda8f2a2460b7c6eb1b43aa651fc79fb335e7b54a0888"
+      "sha256": "78211235a6e0c504531a035fbbeef54db5c2f7f0f2899a38a91b976f38ed5588"
     },
     "crates/server/Cargo.toml": {
       "archive_mode": "0644",
@@ -5171,11 +5747,11 @@
     },
     "crates/server/build.rs": {
       "archive_mode": "0644",
-      "bytes": 8046,
-      "git_blob": "19747369bc5de0bde5395f4b90a552b63f02e6f6",
+      "bytes": 12472,
+      "git_blob": "5d05b2f4b61808c486f67099d42b532be7ebb5a6",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a0b966ef905b35b75ee315338c456f9ab56f8dfbac5d6b8f14279f7f95656176"
+      "sha256": "f89425976a5c918b00412d66be380c353dca3e730b94356ed0d380fd66e23f55"
     },
     "crates/server/csrc/toks/LICENSE": {
       "archive_mode": "0644",
@@ -5907,19 +6483,19 @@
     },
     "crates/server/src/build_info.rs": {
       "archive_mode": "0644",
-      "bytes": 7254,
-      "git_blob": "c422bcc4462715448904b8a2c5f97843d4383be4",
+      "bytes": 7411,
+      "git_blob": "10c019dec532803863fc1bf35ba695d8b5fb0fd7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "627800c8ebffbdba87982abd8755f2083cedf818c98628fcf34d2dd326a4442b"
+      "sha256": "15b810397f175b4b3900634eddbd8119ae6b00858920b8d1785832df5b2724a0"
     },
     "crates/server/src/chat_format.rs": {
       "archive_mode": "0644",
-      "bytes": 15085,
-      "git_blob": "19d0d85c9a7363591a6c213891f18d68cef6c0cc",
+      "bytes": 15759,
+      "git_blob": "ede9d67eab23116ad56fcb74a3826924e95c0a42",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "a6a76557af92be6e100534e7f8a82e5a4ae8c533179623f5c5fdb7ed137eac5c"
+      "sha256": "8f7c088a06bcbab183fe083e477aa29a2e57f13d476303a7171a205957096f78"
     },
     "crates/server/src/decision_casefold.rs": {
       "archive_mode": "0644",
@@ -5931,11 +6507,11 @@
     },
     "crates/server/src/decisions.rs": {
       "archive_mode": "0644",
-      "bytes": 30730,
-      "git_blob": "07a01474c6e9a991adff6e121b2107f3580c17cc",
+      "bytes": 33005,
+      "git_blob": "340ce7889cdd93d3a46293ed318ceebe0917729b",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "5a60b477a9314e3f563ba1c7dfdc74dcedeba35659ecf404a96c1b9b4fa6cdb1"
+      "sha256": "8cdfa3c1ed323360fa824693d5c255e5a8c97ebd788e42cac7ee6fe80f3c0d53"
     },
     "crates/server/src/field_policy.rs": {
       "archive_mode": "0644",
@@ -5971,11 +6547,11 @@
     },
     "crates/server/src/formats/glm/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 7819,
-      "git_blob": "f8f5be133a1029926c5153152aaf1f61c73a6bc4",
+      "bytes": 8601,
+      "git_blob": "2c81a5a3839d608be2ac705cdabd37079e2a43b7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "cb6d88a720a4ca57d13821ec223e48a918a82beeed00dd33971fc9e86bb73ae6"
+      "sha256": "2e9cd75835dd5981b842f79dc543319b140a5bf9439d6876f9c226658e804f3d"
     },
     "crates/server/src/formats/glm/tools.rs": {
       "archive_mode": "0644",
@@ -6059,11 +6635,11 @@
     },
     "crates/server/src/http.rs": {
       "archive_mode": "0644",
-      "bytes": 105359,
-      "git_blob": "a9c2b6f10960ddaac48ef35511285d7f080eef91",
+      "bytes": 106481,
+      "git_blob": "28faf1a07cec611233b85a03c81dcbe87673aff1",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "2d908aeddc868c6afe5b6b636d9530b787f5a2830e35dec3dd423d04d24ee5c6"
+      "sha256": "f5554b1f43dff76624b5f5364c6c392206a01a111e2508d1b5cb429ece8e63f6"
     },
     "crates/server/src/latency.rs": {
       "archive_mode": "0644",
@@ -6091,11 +6667,11 @@
     },
     "crates/server/src/main.rs": {
       "archive_mode": "0644",
-      "bytes": 71667,
-      "git_blob": "f3a28fde71fc5b497dddf13d2f0438989be1fc0e",
+      "bytes": 74039,
+      "git_blob": "6a5a11b0a2dc2aaab309e199c6b416d61d751cad",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "44fb67b8ad5f63c41be8a81fd6e1ce4630a7989b70669359788639483d8c22e1"
+      "sha256": "82d27decd989db220daeea62f0f17691a73d9c47f1f9987239662f24e9aec043"
     },
     "crates/server/src/observability.rs": {
       "archive_mode": "0644",
@@ -6107,11 +6683,11 @@
     },
     "crates/server/src/prefix_metrics.rs": {
       "archive_mode": "0644",
-      "bytes": 7009,
-      "git_blob": "b26d11ef04642775223aa7d173dced459e175379",
+      "bytes": 13685,
+      "git_blob": "adde049094df70a0e7f0c7e3da40b64efe04afd7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "f5792e848f4588d9f351ad0cb7521f7b6009f90703f4d89ac036e7361225ec16"
+      "sha256": "6b1fe49e91dd779a14b9603fb03d27b6b41b35997d453cd8f7f32dbbb7550934"
     },
     "crates/server/src/preparation.rs": {
       "archive_mode": "0644",
@@ -6147,11 +6723,11 @@
     },
     "crates/server/src/runtime.rs": {
       "archive_mode": "0644",
-      "bytes": 56169,
-      "git_blob": "1f2dacbbdf267f0296c03de2c89fed35c2c261b6",
+      "bytes": 57624,
+      "git_blob": "70baca0ca0a6752fe2713c306442ef97b68b427d",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "ab0e8e878ffd1a4f1dc4c1386940f42eccbfa481091f6576b393f8c782a016a1"
+      "sha256": "01fac707c942c9bdd6e3c530e17ed1f841ca5b5edab6b5b14bae2aa3d3d5dbd3"
     },
     "crates/server/src/spec_metrics.rs": {
       "archive_mode": "0644",
@@ -6225,6 +6801,14 @@
       "origin": "git_blob",
       "sha256": "c2e2f7a823de36673b1e5b7cc0241ebc59357a2c77c07a05b3c85458d386c47d"
     },
+    "crates/server/tests/build_commit.rs": {
+      "archive_mode": "0644",
+      "bytes": 5562,
+      "git_blob": "af7c8069e082e1fe6820315f9051cc726dbac31c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "3fbb1ac9ec4e4acbbdb53ba03a451b80f6e86e59038aa3e44dcf30fc04608d5c"
+    },
     "crates/server/tests/chat_format.rs": {
       "archive_mode": "0644",
       "bytes": 53667,
@@ -6235,11 +6819,11 @@
     },
     "crates/server/tests/common/mod.rs": {
       "archive_mode": "0644",
-      "bytes": 19184,
-      "git_blob": "e1b5fe54229701d7245d369527587012b4a8f251",
+      "bytes": 19274,
+      "git_blob": "f65e13c60fc7028855bead8f8e4ddac939a0365c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0d730f6afb63bf7c09144738641e9582cb5ecdcd5479d9d332d156aa7c6c2b88"
+      "sha256": "550915d9b7fa941ea28545b8965711dd9e73b2d5c60d09ded08caf58eec88804"
     },
     "crates/server/tests/decision_mixed_fairness.rs": {
       "archive_mode": "0644",
@@ -6283,11 +6867,11 @@
     },
     "crates/server/tests/dyn_path.rs": {
       "archive_mode": "0644",
-      "bytes": 17212,
-      "git_blob": "0c20f93820e7283d0cbd40fd9a2780c5db4958d0",
+      "bytes": 22943,
+      "git_blob": "80ab9688e5bd90b79d4fd384adfa4d6e635ee5fc",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "36352cb5041110ac504fd4cb7c2f427487ef476a00160af32bd0de6f7aa3b97c"
+      "sha256": "0684d9708e7222ee61bd573d948ca1d3fb13f7a9d2e1c511f54c66e9ce6ea228"
     },
     "crates/server/tests/e2e.rs": {
       "archive_mode": "0644",
@@ -6449,6 +7033,14 @@
       "origin": "git_blob",
       "sha256": "981a1eb240947833216994bc6a193cf07fa72210d24908b7e694a2531c01defb"
     },
+    "crates/server/tests/link_set.rs": {
+      "archive_mode": "0644",
+      "bytes": 1742,
+      "git_blob": "e033cf691e4a0689f17e9463445c33ca27a9c916",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "086c2b2cd36f67624857c938c6175031069e2eed8eab45d082352910192734ee"
+    },
     "crates/server/tests/long_prefill_cotenancy.rs": {
       "archive_mode": "0644",
       "bytes": 7046,
@@ -6571,11 +7163,11 @@
     },
     "crates/server/tests/prompt_logprobs.rs": {
       "archive_mode": "0644",
-      "bytes": 4192,
-      "git_blob": "e909d7a208a173054801f94152ecb9cc5261ff43",
+      "bytes": 5220,
+      "git_blob": "eb5b591bc668635f268d24b89bb3a0e663bf467a",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "6bad921ef50befb0601b62742bdff6e919eada028d34113c1fce0f089849a79f"
+      "sha256": "711f6d66204e898b3ef4ca1da2a247750f485ef3269454610c611c84e6edf683"
     },
     "crates/server/tests/q200_request_compatibility.rs": {
       "archive_mode": "0644",
@@ -6595,11 +7187,11 @@
     },
     "crates/server/tests/reliability.rs": {
       "archive_mode": "0644",
-      "bytes": 19034,
-      "git_blob": "f8527d338bc22c2651a5f70733055c4d224e6877",
+      "bytes": 19082,
+      "git_blob": "16228336ccf5e50dc1342d1dae2967e3ca794fd1",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "9cf7e5942202d7802ef113e80fb589b9cb29b093a95aec8bfc23d50192264b88"
+      "sha256": "e6756872cad2116bab2dfcc59508aa703e894fd0a53181cf0a26f7016176f86b"
     },
     "crates/server/tests/request_budget.rs": {
       "archive_mode": "0644",
@@ -6616,6 +7208,14 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "b9cf4a923d7661a7f168be36b4641a28b536de60dac596c3e104a0a418c0e3c7"
+    },
+    "crates/server/tests/role_stop.rs": {
+      "archive_mode": "0644",
+      "bytes": 12541,
+      "git_blob": "989c65a37603170b9a5e8bd0bce83120e3f0374c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "5a6daecc85be4486e456b7f9d12089442cdc0099043e94723eda88f6f4746cdf"
     },
     "crates/server/tests/template.rs": {
       "archive_mode": "0644",
@@ -6635,11 +7235,11 @@
     },
     "crates/server/tests/tokenizer.rs": {
       "archive_mode": "0644",
-      "bytes": 11375,
-      "git_blob": "4e25ca4aaeb0844d5c6de26a7a0368001f683ad5",
+      "bytes": 13032,
+      "git_blob": "093188ff68ff9df920f8bd6e836107dd6d7b68fc",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "0c940a16d6bc231e712816bd712ece82a632b23b83e4192005b311da15879329"
+      "sha256": "61513ad89b5204715cee3d53551538d2ab2d74d7c10497fb0c310653cc2aab22"
     },
     "crates/server/tests/usage_details.rs": {
       "archive_mode": "0644",
@@ -6675,11 +7275,11 @@
     },
     "crates/spec/src/arbiter.rs": {
       "archive_mode": "0644",
-      "bytes": 47937,
-      "git_blob": "e803b82adea64399b56a7ec1c69b19ff1ea7ecd6",
+      "bytes": 49872,
+      "git_blob": "a59ec659143660fc09ea7b5a28122c89d38dd67c",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "770ebb08aa3b1e9b490850f375677fbd2e7160c26810789114812bd682fc7c0e"
+      "sha256": "386675b968d028fea94d40f2fe2f61ca492d6a36b9b1bd6d1152f4228832a03b"
     },
     "crates/spec/src/draft_pick.rs": {
       "archive_mode": "0644",
@@ -6939,11 +7539,11 @@
     },
     "crates/vision/tests/robustness.rs": {
       "archive_mode": "0644",
-      "bytes": 24142,
-      "git_blob": "fd4be3c2e3d05e1b7c84f1a9f4ed1dd747eaab3e",
+      "bytes": 24603,
+      "git_blob": "2263df5bebd21d1ff9949ccfc16c977d5798cf07",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "30b7fcf9628581ce5473eb0bb27cddf15ecedbdcf630fc8c3f01bbbbdf036363"
+      "sha256": "eb79e3a249aad35a924b793f3152dbb2209c3e075c2ef2bad83eaa884f5be3f4"
     },
     "crates/vision/tests/webp.rs": {
       "archive_mode": "0644",
@@ -7113,6 +7713,14 @@
       "origin": "git_blob",
       "sha256": "dd3db55e8b43b8e58981a71718537ba5fc99e31f1486f4cf9e88720148cd8dfc"
     },
+    "rustfmt.toml": {
+      "archive_mode": "0644",
+      "bytes": 45,
+      "git_blob": "1b83b82fdd88b52226643e0a17726b1337b5ff1c",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "f133dad6decf3caf59e34afb41853d2d9b7a10f508d846ee2057f68356ee38fd"
+    },
     "testdata/deepseek_v41/chat_template.jinja": {
       "archive_mode": "0644",
       "bytes": 4088,
@@ -7192,6 +7800,22 @@
       "git_mode": "100644",
       "origin": "git_blob",
       "sha256": "92a3693b690c0898ce09a93b66340137e871012f281e2536c9571b3af9aa637d"
+    },
+    "testdata/fixtures/exl3_trellis_encode.txt": {
+      "archive_mode": "0644",
+      "bytes": 111978,
+      "git_blob": "678803c4499b8578856b340fb65fe5d531a682a2",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "d5b8022fb3b4413880b92c1aa59ca4cdfa565d3d4bd64dfbeebd99a0434dff04"
+    },
+    "testdata/fixtures/quant_trellis_roundtrip.json": {
+      "archive_mode": "0644",
+      "bytes": 165957,
+      "git_blob": "77c1507f3c982e2c64025c825a7c3945b8ce5d36",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "9f18cd35d251d0b759a76df598ee5becf54230a496a8b1c5a511356fa1f226e1"
     },
     "testdata/fixtures/real_pack.json": {
       "archive_mode": "0644",
@@ -7435,11 +8059,11 @@
     },
     "testdata/gpu/golden_glm_p2_moe.txt": {
       "archive_mode": "0644",
-      "bytes": 2158,
-      "git_blob": "8e72294c8f0bf2382c8a6fb129138c37964a865d",
+      "bytes": 3790,
+      "git_blob": "cb8343b2d0eecae8fa4760e16c392ef4b5ba4dd7",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "e9d75c10b0d635a6813102854d69283c2dec3ff804d1446fcc40d4efa653d1d9"
+      "sha256": "6d39d8374507de8260352db5af0736e42fea8c1c3dbc280868e245a4a6857827"
     },
     "testdata/gpu/golden_kda.txt": {
       "archive_mode": "0644",
@@ -8755,19 +9379,19 @@
     },
     "tools/build_corresponding_source.py": {
       "archive_mode": "0644",
-      "bytes": 51316,
-      "git_blob": "894b5031a2a22354e6771dd7d6bbfa2958ec9059",
+      "bytes": 51676,
+      "git_blob": "621b71a79f4b54d864bca7ede95296ad0a6ac18a",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "78f9e7dabf513d9487c596dfaafe438f883f6d474e9ea3e5cc03c10197d8e28c"
+      "sha256": "51d495587a3774fc18c5f0ecdf8a55b28757fa08cdcc22d72888ab10ef589869"
     },
     "tools/corresponding_source_inputs.json": {
       "archive_mode": "0644",
-      "bytes": 14984,
-      "git_blob": "6ff2fdcea103b48c97ee20c78facdbb483834080",
+      "bytes": 16954,
+      "git_blob": "9c2a4de5cbd17fba59c35fda6874472ce527a67f",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "f152924d37219d2348c29eeac647a4c447d32159d9a87df0d526fb3abfbc79b1"
+      "sha256": "1b8b68f0ed382fec33d7784e2cfe2641ee2207b50b36d189bb1b0e3005bca0c8"
     },
     "tools/corresponding_source_test_allowances.json": {
       "archive_mode": "0644",
@@ -8785,6 +9409,14 @@
       "origin": "git_blob",
       "sha256": "6216a95c5c11187dadc416251f320a599fed368e1209b7443ebd6e3c1dd8215d"
     },
+    "tools/switch_registry.json": {
+      "archive_mode": "0644",
+      "bytes": 79333,
+      "git_blob": "2a78a3fca79401f6460d810580039e93c29a3796",
+      "git_mode": "100644",
+      "origin": "git_blob",
+      "sha256": "7a508c88c979c94759d6ad4fddb9a2e09783e8d406fd6c45750874ff9940698e"
+    },
     "tools/templates/corresponding-source-README.md": {
       "archive_mode": "0644",
       "bytes": 12091,
@@ -8795,11 +9427,11 @@
     },
     "tools/test_build_corresponding_source.py": {
       "archive_mode": "0644",
-      "bytes": 65381,
-      "git_blob": "0baf1bb4200e9056a83724148f4743abf3f9499b",
+      "bytes": 70068,
+      "git_blob": "eca665a11fe01c356e37753bf8ed8224eec544c1",
       "git_mode": "100644",
       "origin": "git_blob",
-      "sha256": "3a185847f3d19106f9dc3ffb9d7012afbe549605a04351003da1eeacafe9b95f"
+      "sha256": "14551b8d01526d2544bfd1ae4cbb1adefb1c4fe24e79b971bb6e8336e17ceeea"
     }
   },
   "license": "AGPL-3.0-only",
@@ -8915,8 +9547,8 @@
   },
   "projection": {
     "cargo_registry_dependencies": "locked, not vendored",
-    "excluded_entries": 2287,
-    "excluded_inventory_sha256": "90006606eeda69bda0775e5905c9e9bccaa6b9aa6569c79aa88d55bc4399ca7b",
+    "excluded_entries": 2387,
+    "excluded_inventory_sha256": "2ffd8c3fdbde26af37b36e46a8e7ffd64d72f9bb1cd916b3ea91f8b10021164e",
     "excluded_payload_suffixes": [
       ".safetensors",
       ".pt",
@@ -9046,6 +9678,6 @@
     "tar": "USTAR",
     "uid": 0
   },
-  "source_commit": "afc9b5dfb69d070a306ffe6696d9b4f96db4ddec",
-  "source_tree": "1580b494a8ae436fb938afeb8f77a76052d3f6e8"
+  "source_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+  "source_tree": "519678470f283dd5d39281d7d90df8bbc31999e8"
 }

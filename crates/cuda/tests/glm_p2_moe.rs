@@ -224,7 +224,7 @@ fn p2_experts_are_as_close_to_fp64_as_the_decode_path() {
     gpu!();
     let st = Stream::new().unwrap();
     let rows = 48;
-    for (li, &(bits_gu, bits_d)) in [(2usize, 2usize), (3, 3), (4, 4), (5, 5)].iter().enumerate() {
+    for (li, &(bits_gu, bits_d)) in [(2usize, 2usize), (3, 3), (4, 4), (5, 5), (6, 6), (6, 4), (5, 4)].iter().enumerate() {
         let d = glm_dims(12);
         let lay = synth_layer(d, bits_gu, bits_d, 40 + li as u64, true);
         let [gate, upg, down] = lay.groups.as_ref().unwrap();
@@ -637,14 +637,14 @@ fn a_layer_of_subbanks_the_p2_gemms_do_not_take_is_refused_by_name() {
     gpu!();
     let d = MoeDims { hidden: 128, inter: 128, experts: 16, topk: 8, scale: 2.5, limit: 10.0 };
     let mk = |bits: usize, seed: u64| synth_layer(d, bits, bits, seed, true);
-    // 6-bit experts: no P2 kernel; the supported subbanks of the same layer are
-    let (a, b) = (mk(2, 1), mk(6, 2));
+    // 7-bit experts: no P2 kernel (2 to 6 bits are taken); the supported subbanks of the same layer are
+    let (a, b) = (mk(2, 1), mk(7, 2));
     fn parts(l: &Layer, ids: Vec<u32>) -> (Vec<u32>, &[Vec<LoadedGroup>; 3]) {
         (ids, l.groups.as_ref().unwrap())
     }
     let sb = subbanks_of(d, &[parts(&a, (0..8).collect()), parts(&b, (8..16).collect())]);
     let why = glm_p2_moe::supported_subbanks(&sb).unwrap_err();
-    assert!(why.contains("subbank 1") && why.contains("6/6/6"), "{why}");
+    assert!(why.contains("subbank 1") && why.contains("7/7/7"), "{why}");
     let st = Stream::new().unwrap();
     let mut s = PrefillScratch::new(&d, 16).unwrap();
     let mut os = OwnScratch::new(&d, 16).unwrap();
@@ -782,6 +782,237 @@ fn bench_p2_experts_against_p1() {
 /// The golden of the P2 experts (`testdata/gpu/golden_glm_p2_moe.txt`, scripts/gpu_gate.sh): hashes of y and out in both K orders on
 /// synthetic layers at the GLM widths and the packs' bit widths, at row counts that are and are not multiples of a tile; committed so
 /// that a change that moves a P2 expert bit shows up in the gate (and `glm_p2_moe::ARITH_ID` must change with it).
+/// One expert's three groups at its own widths (gate `bg`, up `bu`, down `bd`).
+fn expert_groups(d: MoeDims, bg: usize, bu: usize, bd: usize, seed: u64) -> [LoadedGroup; 3] {
+    [
+        synth_group(d.hidden, d.inter, bg, Codebook::Mul1, seed * 10 + 1),
+        synth_group(d.hidden, d.inter, bu, Codebook::Mul1, seed * 10 + 2),
+        synth_group(d.inter, d.hidden, bd, Codebook::Mul1, seed * 10 + 3),
+    ]
+}
+
+/// A layer every expert of which has gate `bg`, up `bu`, down `bd` bits, bound by the loader's constructor (`MoeSubbanks::from_groups`)
+/// as its one subbank: with `bg != bu` the split-width bank RED-SNOW's layer 13 binds for expert 80.
+fn split_layer(d: MoeDims, bg: usize, bu: usize, bd: usize, seed: u64) -> Layer {
+    let g: Vec<[LoadedGroup; 3]> = (0..d.experts).map(|e| expert_groups(d, bg, bu, bd, seed * 1000 + e as u64)).collect();
+    let col = |i: usize| -> Vec<LoadedGroup> { g.iter().map(|x| x[i].clone()).collect() };
+    let (gate, upg, down) = (col(0), col(1), col(2));
+    let sb = MoeSubbanks::from_groups(&gate, &upg, &down, d, ExpertOwnership::all(d.experts)).unwrap();
+    assert_eq!(sb.banks().len(), 1, "one width class: one subbank");
+    let ex = sb.into_banks().pop().unwrap();
+    Layer { ex, groups: Some([gate, upg, down]) }
+}
+
+/// A split-width bank (gate 6 / up 5 / down 4 bits) keeps the P2 contract: each matrix decoded at its own width gives a pair as close to
+/// the f64 reference as the uniform 5/5/4 bank's decode path (the coarser of the two widths bounds it), every pair's bits are the same in
+/// calls of any width and in any block shape, and both K orders run.
+#[test]
+fn p2_split_width_experts_keep_the_p2_contract() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(12);
+    let lay = split_layer(d, 6, 5, 4, 88);
+    let k = lay.ex.subbank_key();
+    assert_eq!((k.bits_gate, k.bits_up, k.bits_down), (6, 5, 4));
+    assert!(glm_p2_moe::supported(&lay.ex), "a split 6/5 gate/up bank is a P2 format");
+    let [gate, upg, down] = lay.groups.as_ref().unwrap();
+    let rows = 129;
+    let mut r = Rng(4242);
+    let xh = activations(&mut r, rows, d.hidden, 1.5);
+    let (pick, wts) = make_picks(&mut r, Style::Uniform, rows, d.experts, d.topk);
+    let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+    let mut s = PrefillScratch::new(&d, rows).unwrap();
+    // the bound: the uniform 5/5/4 bank's decode path (P1) against its own f64 reference
+    let bound = {
+        let u = synth_layer(d, 5, 4, 89, true);
+        let [ug, uu, ud] = u.groups.as_ref().unwrap();
+        let p1 = run(&u.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, None);
+        let yref = pair_ref(d, ug, uu, ud, &xh, &pick, rows, &st);
+        err(&yref, &pairs_of(&p1, &pick, d)).1
+    };
+    let yref = pair_ref(d, gate, upg, down, &xh, &pick, rows, &st);
+    for &o in &ORDERS {
+        let want = run(&lay.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+        let (m2, r2, _, _) = err(&yref, &pairs_of(&want, &pick, d));
+        assert!(
+            r2 <= 1.5 * bound + 1e-7 && r2 < 1e-3,
+            "{o:?}: split 6/5/4 P2 y rms {r2:e} against the 5/5/4 decode path's {bound:e}"
+        );
+        for chunk in [1usize, 16, 77] {
+            let got = run(&lay.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, chunk, Some(o));
+            assert_same(&format!("split 6/5/4 {o:?} in calls of {chunk}"), &got, &want, &d, &pick);
+        }
+        for (g, dn) in [(1, 1), (2, 2), (3, 2)] {
+            glm_p2_moe::set_shapes(g, dn);
+            let got = run(&lay.ex, &st, &mut s, &xh, &pick, &wts, &shared, rows, rows, Some(o));
+            glm_p2_moe::set_shapes(0, 0);
+            assert_same(&format!("split 6/5/4 {o:?} shapes {g}/{dn}"), &got, &want, &d, &pick);
+        }
+        eprintln!("split 6/5/4 {o:?}: y max {m2:.2e} rms {r2:.2e} (5/5/4 decode path {bound:.2e}); calls of 1/16/77 rows and 3 shapes bit-identical");
+    }
+}
+
+/// The valid pairs' y of a run, in pair order.
+fn pairs_of(r: &Run, pick: &[i32], d: MoeDims) -> Vec<f32> {
+    pick.iter()
+        .enumerate()
+        .filter(|(_, &e)| valid(e, &d))
+        .flat_map(|(p, _)| r.y[p * d.hidden..(p + 1) * d.hidden].to_vec())
+        .collect()
+}
+
+/// The f64 reference of every valid pair's y, in pair order (the arithmetic of `p2_experts_are_as_close_to_fp64_as_the_decode_path`).
+#[allow(clippy::too_many_arguments)]
+fn pair_ref(
+    d: MoeDims,
+    gate: &[LoadedGroup],
+    upg: &[LoadedGroup],
+    down: &[LoadedGroup],
+    xh: &[u16],
+    pick: &[i32],
+    rows: usize,
+    st: &Stream,
+) -> Vec<f64> {
+    let lim = d.limit as f64;
+    let mut out = Vec::new();
+    for row in 0..rows {
+        let x: Vec<f64> = (0..d.hidden).map(|i| f16_to_f64(xh[row * d.hidden + i])).collect();
+        for k in 0..d.topk {
+            let e = pick[row * d.topk + k];
+            if !valid(e, &d) {
+                continue;
+            }
+            let e = e as usize;
+            let g = linear_ref(&gate[e], &weights(&gate[e], st), &x);
+            let u = linear_ref(&upg[e], &weights(&upg[e], st), &x);
+            let a: Vec<f64> = g.iter().zip(&u).map(|(&g, &u)| (g / (1.0 + (-g).exp())).min(lim) * u.clamp(-lim, lim)).collect();
+            out.extend(linear_ref(&down[e], &weights(&down[e], st), &a));
+        }
+    }
+    out
+}
+
+/// A tensor-parallel rank's share of a MIXED-width layer bound as several subbanks (RED-SNOW at TP=2: 4/5/6-bit experts and one split
+/// 6/5/4 expert) runs under P2 as one node does: each rank's pairs (`pairs_subbanks_rank`, the loader's rank constructor
+/// `MoeSubbanks::from_groups` over `ExpertOwnership::range(E, r, 2)`) are the single node's pairs bit for bit, and its part (`Own(r)`)
+/// then the parts' sum (`Parts`, the shared expert last) is the single node's out (`run_subbanks`, `Both`) bit for bit, in calls of any
+/// width.
+#[test]
+fn p2_rank_shares_of_a_mixed_width_layer_equal_one_node() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let d = glm_dims(48);
+    let widths = |e: usize| -> (usize, usize, usize) {
+        match e {
+            13 => (6, 5, 4),
+            _ => [(6, 6, 4), (5, 5, 5), (4, 4, 6), (6, 6, 6), (5, 5, 4)][e % 5],
+        }
+    };
+    let g: Vec<[LoadedGroup; 3]> = (0..d.experts)
+        .map(|e| {
+            let (bg, bu, bd) = widths(e);
+            expert_groups(d, bg, bu, bd, 5000 + e as u64)
+        })
+        .collect();
+    let col = |i: usize| -> Vec<LoadedGroup> { g.iter().map(|x| x[i].clone()).collect() };
+    let (gate, upg, down) = (col(0), col(1), col(2));
+    let whole = MoeSubbanks::from_groups(&gate, &upg, &down, d, ExpertOwnership::all(d.experts)).unwrap();
+    let ranks: Vec<MoeSubbanks> = (0..2)
+        .map(|r| MoeSubbanks::from_groups(&gate, &upg, &down, d, ExpertOwnership::range(d.experts, r, 2).unwrap()).unwrap())
+        .collect();
+    assert!(ranks.iter().all(|sb| sb.banks().len() > 1), "each rank holds several subbanks");
+    assert!(glm_p2_moe::supported_subbanks(&whole).is_ok());
+    let gs = glm_p2_moe::group_split(d.experts);
+    let max = 300;
+    let mut s = PrefillScratch::new(&d, max).unwrap();
+    let mut os = OwnScratch::new(&d, max).unwrap();
+    let mut cases = 0;
+    for (si, &style) in [Style::Uniform, Style::Holes, Style::Skewed].iter().enumerate() {
+        for rows in [1usize, 16, 129, 300] {
+            let mut r = Rng(7100 + 17 * si as u64 + rows as u64);
+            let xh = activations(&mut r, rows, d.hidden, 1.5);
+            let (pick, wts) = make_picks(&mut r, style, rows, d.experts, d.topk);
+            let shared: Vec<f32> = (0..rows * d.hidden).map(|_| 0.1 * normal(&mut r) as f32).collect();
+            let want = run_sub(&whole, &st, &mut s, &mut os, &xh, &pick, &wts, &shared, rows, rows);
+            for chunk in [rows, 16, 129] {
+                if chunk > rows {
+                    continue;
+                }
+                let (mut out, mut y) = (Vec::new(), vec![f32::NAN; rows * d.topk * d.hidden]);
+                let mut at = 0;
+                while at < rows {
+                    let n = chunk.min(rows - at);
+                    let (pk, wt) = (&pick[at * d.topk..(at + n) * d.topk], &wts[at * d.topk..(at + n) * d.topk]);
+                    let x = up(&xh[at * d.hidden..(at + n) * d.hidden]);
+                    let sh = up(&shared[at * d.hidden..(at + n) * d.hidden]);
+                    let mut parts = [DevBuf::zeroed(n * d.hidden * 4).unwrap(), DevBuf::zeroed(n * d.hidden * 4).unwrap()];
+                    for (k, sb) in ranks.iter().enumerate() {
+                        s.poison(0xa5, &st).unwrap();
+                        s.set_picks(pk, wt).unwrap();
+                        let r0 = glm_p2_moe::runs();
+                        glm_p2_moe::pairs_subbanks_rank(
+                            sb,
+                            &x,
+                            Dtype::F16,
+                            n,
+                            &mut s,
+                            &mut os,
+                            glm_p2_moe::DEFAULT_ORDER,
+                            &st,
+                            &mut |_| Ok(()),
+                        )
+                        .unwrap();
+                        assert_eq!(glm_p2_moe::runs() - r0, 1, "one P2 expert block a layer call on a rank");
+                        glm_p2_moe::combine_dims(
+                            CombineMode::Own(k),
+                            &s.y_pairs,
+                            &s.pick,
+                            &s.wts,
+                            None,
+                            None,
+                            &mut parts[k],
+                            n,
+                            &d,
+                            &st,
+                        )
+                        .unwrap();
+                        st.sync().unwrap();
+                        let mut yy = vec![0f32; n * d.topk * d.hidden];
+                        s.y_pairs.download_range(0, &mut yy).unwrap();
+                        // this rank's pairs (its own combine group) into the composite pair buffer
+                        for (q, &e) in pk.iter().enumerate() {
+                            if valid(e, &d) && ((e as usize >= gs) as usize) == k {
+                                let p = at * d.topk + q;
+                                y[p * d.hidden..(p + 1) * d.hidden].copy_from_slice(&yy[q * d.hidden..(q + 1) * d.hidden]);
+                            }
+                        }
+                    }
+                    let mut o = DevBuf::zeroed(n * d.hidden * 4).unwrap();
+                    glm_p2_moe::combine_dims(
+                        CombineMode::Parts,
+                        &s.y_pairs,
+                        &s.pick,
+                        &s.wts,
+                        Some(&sh),
+                        Some((&parts[0], &parts[1])),
+                        &mut o,
+                        n,
+                        &d,
+                        &st,
+                    )
+                    .unwrap();
+                    st.sync().unwrap();
+                    out.extend(o.to_vec::<f32>().unwrap());
+                    at += n;
+                }
+                assert_same(&format!("ranks {style:?} {rows} rows in calls of {chunk}"), &Run { out, y }, &want, &d, &pick);
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("two ranks of a mixed-width layer (4/5/6-bit subbanks and a split 6/5/4 expert): pairs, Own parts and Parts == one node, bit for bit ({cases} cases)");
+}
+
 #[test]
 #[ignore]
 fn golden_glm_p2_moe_hashes() {
@@ -790,9 +1021,16 @@ fn golden_glm_p2_moe_hashes() {
     let st = Stream::new().unwrap();
     let hash = |v: &[f32]| gb_exl3::fnv1a(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
     let mut lines = vec![format!("arith {} default {:?}", glm_p2_moe::ARITH_ID, glm_p2_moe::DEFAULT_ORDER)];
-    for (li, &(bg, bd)) in [(2usize, 2usize), (3, 3), (4, 4), (5, 4)].iter().enumerate() {
+    // the original four widths first (their seeds and lines unchanged), then six bits (RED-SNOW 4.91 bpw), then a split-width subbank
+    // (gate 6 / up 5 / down 4: that pack's layer 13, expert 80) as `6/5/4-bit`
+    let cases: Vec<(String, Layer)> = [(2usize, 2usize), (3, 3), (4, 4), (5, 4), (6, 6), (6, 4)]
+        .iter()
+        .enumerate()
+        .map(|(li, &(bg, bd))| (format!("{bg}/{bd}-bit"), synth_layer(glm_dims(48), bg, bd, 70 + li as u64, false)))
+        .chain(std::iter::once(("6/5/4-bit split".to_string(), split_layer(glm_dims(48), 6, 5, 4, 76))))
+        .collect();
+    for (li, (label, lay)) in cases.iter().enumerate() {
         let d = glm_dims(48);
-        let lay = synth_layer(d, bg, bd, 70 + li as u64, false);
         let ex = &lay.ex;
         for rows in [1usize, 37, 300] {
             let mut r = Rng(800 + li as u64 * 10 + rows as u64);
@@ -808,12 +1046,7 @@ fn golden_glm_p2_moe_hashes() {
                     .filter(|(_, &e)| valid(e, &d))
                     .flat_map(|(p, _)| got.y[p * d.hidden..(p + 1) * d.hidden].to_vec())
                     .collect();
-                lines.push(format!(
-                    "p2m {} {bg}/{bd}-bit E=48 rows={rows} y {:016x} out {:016x}",
-                    o.id(),
-                    hash(&yv),
-                    hash(&got.out)
-                ));
+                lines.push(format!("p2m {} {label} E=48 rows={rows} y {:016x} out {:016x}", o.id(), hash(&yv), hash(&got.out)));
             }
         }
     }

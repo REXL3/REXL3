@@ -421,6 +421,21 @@ impl PrefixIndex {
         self.drop_entry(k)
     }
 
+    /// The pages the index may hold in all. A pool-page cache (the cache keeps its entries in the KV pool's idle pages instead of a region of
+    /// its own) sets it to the pool's pages: what keeps a live sequence's pages free is then the engine's room step (`Engine::pool_room`),
+    /// not this limit.
+    pub fn set_page_limit(&mut self, pages: usize) {
+        self.limits.page_blocks = pages;
+    }
+
+    /// One eviction to make room in the KV pool for a live sequence (a pool-page cache): the next victim of [`PrefixIndex::evict_lru`], never a
+    /// pinned entry, counted as an eviction for pages. `None` when every entry left is pinned.
+    pub fn evict_for_pool(&mut self) -> Option<PrefixHandle> {
+        let h = self.evict_lru()?;
+        self.stats.evicted_for_pages += 1;
+        Some(h)
+    }
+
     /// [`Eviction::SizeAware`]: whether storing an entry of `credit` holding the distinct pages `distinct` may evict what it needs. The
     /// victims are taken in credit order, as `insert`'s loop would take them, until the pages fit and a snapshot slot is free; `false` when one
     /// of them holds more credit than the newcomer (or the pinned entries leave too little room, which `insert` finds itself).

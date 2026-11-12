@@ -11,7 +11,7 @@ use super::load::{boot_mapped_with, LoadOptions};
 use super::memory;
 use super::model::{GlmModel, ModelOptions, VocabMode};
 use super::prefix;
-use super::spec::SpecConfig;
+use super::spec::{ModelDrafter, SpecConfig};
 use super::vision::{self, GlmVisionTower, TowerOptions};
 use super::vision_serve::{FeatureBudget, GlmEncoder};
 use super::{log_weight_map, GlmPack};
@@ -21,8 +21,8 @@ use crate::loadstats::{self, Component};
 use crate::memory::VisionOptions;
 use crate::pack::PackError;
 use crate::plan::{
-    choose_slots, largest_viable_slots, plan_memory_cached_windowed, CacheRequest, MemoryPlan, PlanError, SlotChoice,
-    MIN_TOKENS_PER_SLOT,
+    choose_slots, largest_viable_slots, plan_memory_cached_windowed, plan_memory_pool_cached, CacheRequest, MemoryPlan,
+    PlanError, SlotChoice, MIN_TOKENS_PER_SLOT,
 };
 use crate::serve::{allocation_error, gib, interactive_prefix_config_from_env, mem_available, memory_options, ServeOptions};
 use gb_engine::{boot, Drafter, Engine, EngineConfig, NoDrafts};
@@ -47,6 +47,18 @@ pub const MTP_VOCAB_PREFIX_STRIPS: usize = 512;
 /// A draft call uses the restricted head only when every asking stream has at least this share of its last 32 tokens inside the set; text the set does
 /// not cover (another script) keeps the full head.
 pub const MTP_VOCAB_MIN_SHARE: f32 = 0.9;
+
+/// What the NextN drafter's restricted head will allocate (`model::sub_head_bytes`) in a process that drafts with the NextN layer (`drafts`), under
+/// `REXL3_MTP_VOCAB` ([`mtp_vocab_setting`]), for the pack's `lm_head`: 0 when no restricted head is built. Both planners take it out of the room
+/// before the KV pool is sized (it was left to the headroom before: about 0.23 GiB at the default size, allocated after the plan was checked).
+pub fn draft_head_planned(drafts: bool, lm_head: &super::weights::Exl3Linear, vocab: usize) -> Result<u64, ModelError> {
+    if !drafts {
+        return Ok(0);
+    }
+    let setting = mtp_vocab_setting(std::env::var("REXL3_MTP_VOCAB").ok().as_deref()).map_err(ModelError::Config)?;
+    let bits = lm_head.bits.twice() as usize / 2;
+    Ok(setting.map_or(0, |(strips, _)| super::model::sub_head_bytes(lm_head.k, bits, &super::model::vocab_ranges(strips, vocab))))
+}
 
 /// `REXL3_MTP_VOCAB`: unset is the default (`MTP_VOCAB_PREFIX_STRIPS`, share `MTP_VOCAB_MIN_SHARE`), `off` / `0` / `full` the full head, `N` that many
 /// prefix strips with the default share, `N:S` with the share `S` (0 uses the restricted head in every call). `None`: the full head.
@@ -121,11 +133,16 @@ fn plan_for_slots(
     cache: CacheRequest,
     snapshot_bytes: u64,
     window_tokens: u64,
+    pool: bool,
 ) -> Result<MemoryPlan, PlanError> {
     let features = match vision {
         Some(v) => profile.vision_reserve_bytes(0, v.concurrent_images(slots))?,
         None => 0,
     };
+    // `--prefix-cache pool`: the cache's entries keep the pool's idle pages, so it plans snapshot slots and no pages of its own
+    if pool {
+        return plan_memory_pool_cached(profile, free, floor, slots, kv_tokens_cap, features, snapshot_bytes, 0, window_tokens);
+    }
     // the cache is sized from the window, for `auto` and an explicit `--prefix-cache-mib` alike: the pages of one full window before anything else
     // (`docs/PREFIX_CACHE_SIZING.md` section 5)
     plan_memory_cached_windowed(profile, free, floor, slots, kv_tokens_cap, features, cache, snapshot_bytes, 0, window_tokens)
@@ -192,8 +209,20 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     check_options(o)?;
     loadstats::set_component(Component::Scan);
     let cfg = GlmConfig::from_dir(&o.model_dir).map_err(ModelError::Config)?;
-    // the pack's NextN layer is loaded (3.5 GiB) and its cache allocated only when the mode drafts with it (`--spec auto|mtp`)
-    let with_mtp = super::MTP_BUILT && o.drafting && o.spec.uses_mtp() && cfg.has_mtp();
+    // a DFlash2 draft given with `--draft` is the model drafter (checked against the target before anything is read)
+    let draft_dir = draft_dir_of(o)?;
+    if let Some(dir) = draft_dir {
+        super::dflash::check_dir(dir, cfg.hidden, cfg.vocab, cfg.layers.len())?;
+    }
+    // the pack's NextN layer is loaded (3.5 GiB) and its cache allocated only when the mode drafts with it (`--spec auto|mtp`) and no draft was given
+    let with_mtp = super::MTP_BUILT && o.drafting && o.spec.uses_mtp() && cfg.has_mtp() && draft_dir.is_none();
+    if let Some(dir) = draft_dir {
+        eprintln!(
+            "rexl3 event=model_drafter drafter=dflash2 draft={} nextn=not_loaded reason=\"--draft was given: the DFlash2 draft drafts and the pack's NextN layer is left on disk\"",
+            dir.display()
+        );
+        boot::fact("model_drafter", "dflash2 (--draft); NextN layer not loaded");
+    }
     // the family's memory model, validated before a single weight is read
     let mem_opts = memory::engine_options(&memory_options(o, with_mtp));
     let profile = memory::memory_profile(&cfg, &mem_opts).map_err(|e| ModelError::Config(e.to_string()))?;
@@ -201,9 +230,11 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).map_err(|e| ModelError::Pack(PackError::Io(e.to_string())))?;
     // `--no-vision` claims and skips the tower: the text model maps (and serves) whatever the tower's format
     let pack = GlmPack::from_checkpoint_with(&ck, cfg.clone(), o.vision.is_some())?;
+    // the drafter's restricted head, built after the load: charged to the plan now (`draft_head_planned`; the build checks its bytes against it)
+    let draft_head = draft_head_planned(with_mtp && o.spec.drafts(), &pack.weights.lm_head, cfg.vocab)?;
     let scan_s = t.elapsed().as_secs_f64();
     boot::mark("packs_scanned", None);
-    let target_fingerprint = check_pack(&ck, o.allow_unvalidated_pack)?;
+    let target_fingerprint = check_pack(&ck, draft_check_of(o, &cfg)?.as_ref(), o.allow_unvalidated_pack)?;
     boot::mark("packs_checked", None);
     log_weight_map("glm5_next", &pack);
     // a pack that does not map, or one this release was not validated on, is refused above before the driver is asked anything
@@ -287,6 +318,15 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
         }
     }
 
+    // The DFlash2 draft, like the tower, is loaded before the room that is left is measured: its weights (bf16 as published, converted to the
+    // kernels' formats in memory, or the operator's own EXL3 quantization), its context rings and its scratch are out of what the KV pool is
+    // planned from. The trunk's tap buffer is allocated with the model below.
+    let chunk = alloc::prefill_chunk_for(o.prefill_chunk);
+    let draft = match draft_dir {
+        Some(dir) => Some(load_draft(dir, &cfg, booted.device.lm_head.bits, o.slots, chunk, o.floor_bytes)?),
+        None => None,
+    };
+
     // What is left to allocate. `cudaMemGetInfo` free is MemFree and leaves out the page cache (tens of GiB after the pack was read or anything was
     // built); MemAvailable counts it because the kernel gives it back, and `cudaMalloc` is a kernel allocation that takes it back on demand (measured:
     // 100 GiB allocated against 30 GiB of MemFree, `docs/EVAL_RESULTS.md` "Memory: capacity that does not depend on the boot history"). So the
@@ -298,30 +338,36 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     let host = hostmem::MemInfo::read();
     let free = hostmem::planning_free(cuda_free, host.as_ref());
     eprintln!("{}", hostmem::memory_view_line(cuda_free, host.as_ref(), o.floor_bytes));
+    // what the KV pool and the cache are planned from: the free memory less what is still to be allocated outside them (the draft head)
+    let room = free.saturating_sub(draft_head);
+    if draft_head > 0 {
+        eprintln!("rexl3 event=draft_head_planned mib={:.1}", draft_head as f64 / 1048576.0);
+    }
     boot::fact("plan_free_gib", format!("{:.1}", gib(free)));
     let kv_tokens_cap = o.kv_tokens.unwrap_or(o.max_model_len) as u64;
     // a snapshot slot of the prefix cache is the recurrent state of a prompt plus a few raw rows and the drafter's carry (the model's own figure,
     // `prefix::snapshot_bytes`); the cache is carved out of what the plan leaves (`Auto`) or before the KV pool is sized (an explicit size)
-    let snapshot_bytes = prefix::snapshot_bytes(&cfg, with_mtp).map_err(ModelError::Config)?;
+    let snapshot_bytes = prefix::snapshot_bytes_with(&cfg, with_mtp, draft.is_some()).map_err(ModelError::Config)?;
     let cache_request = o.prefix_cache.request();
     let has_tower = tower.is_some();
     let plan_at = |slots: usize| {
         plan_for_slots(
             &profile,
             mem_opts.vision.filter(|_| has_tower),
-            free,
+            room,
             o.floor_bytes,
             kv_tokens_cap,
             slots,
             cache_request,
             snapshot_bytes,
             o.max_model_len as u64,
+            o.prefix_pool,
         )
     };
     // the slot count: the one asked for, or (the default, `--slots` not given) the most the box holds; an explicit count is never changed
     let choice = choose_slots(o.slots, o.slots_auto, kv_tokens_cap, plan_at).map_err(|e| {
         let fit = largest_viable_slots(o.slots, kv_tokens_cap, plan_at);
-        ModelError::Config(refusal_text(&e.to_string(), free, cuda_free, o.floor_bytes, o.slots, !o.slots_auto, fit.as_ref()))
+        ModelError::Config(refusal_text(&e.to_string(), room, cuda_free, o.floor_bytes, o.slots, !o.slots_auto, fit.as_ref()))
     })?;
     let slots = choice.slots;
     let plan = choice.plan.clone();
@@ -347,18 +393,23 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     boot::fact("kv_pages", plan.kv_blocks.to_string());
     boot::fact("kv_tokens", plan.kv_tokens.to_string());
     if plan.cache.enabled() {
+        // a pool-page cache reaches whatever the pool holds: its entries keep the pool's idle pages
+        let reach = if o.prefix_pool { plan.kv_tokens } else { plan.cache.reach_tokens() };
         eprintln!(
-            "rexl3 event=prefix_cache_plan entries={} pages={} gib={:.2} spare_gib={:.1} reach_tokens={} window={}",
+            "rexl3 event=prefix_cache_plan entries={} pages={} gib={:.2} spare_gib={:.1} reach_tokens={reach} window={} mode={}",
             plan.cache.snapshot_slots,
             plan.cache.page_blocks,
             gib(plan.cache.bytes()),
             gib(plan.spare_bytes),
-            plan.cache.reach_tokens(),
-            o.max_model_len
+            o.max_model_len,
+            if o.prefix_pool { "pool" } else { "region" }
         );
         boot::fact("prefix_cache", format!("{} entries, {:.2} GiB", plan.cache.snapshot_slots, gib(plan.cache.bytes())));
-        boot::fact("prefix_cache_reach_tokens", plan.cache.reach_tokens().to_string());
-        if plan.cache.reach_tokens() < o.max_model_len as u64 {
+        boot::fact("prefix_cache_reach_tokens", reach.to_string());
+        if o.prefix_pool {
+            boot::fact("prefix_cache_mode", "pool");
+        }
+        if reach < o.max_model_len as u64 {
             eprintln!(
                 "rexl3 level=warn event=prefix_cache_reach reach_tokens={} window={} note=\"a prompt longer than the reach is never served from the cache; raise --prefix-cache-mib\"",
                 plan.cache.reach_tokens(),
@@ -380,8 +431,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     // an allocation the device refuses although the plan fits ends the boot with what was planned and what the host had, never a bare CUDA code
     let planned = plan.planned_bytes(slots);
     let refuse = |what: &str, e: ModelError| allocation_error(what, e, planned, o.floor_bytes, host.as_ref());
-    // the prefill chunk: the scratch of a chunk of more than 128 rows (the large-row kernels') was priced into the plan above
-    let chunk = alloc::prefill_chunk_for(o.prefill_chunk);
+    // the prefill chunk (`chunk`, above): the scratch of a chunk of more than 128 rows (the large-row kernels') was priced into the plan above
     // the pool holds the pages the cache may keep on top of the pages admission hands out
     let pool_blocks = plan.kv_blocks + plan.cache.page_blocks;
     let mut model = GlmModel::new_chunked(
@@ -391,6 +441,24 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
         chunk,
     )
     .map_err(|e| refuse("the engine's buffers (KV pool, slot state, scratch)", e))?;
+    // the draft joins the model before its snapshot pool (whose slots then keep the draft's window) and before any forward (the schedule taps)
+    let mut draft_fingerprint = None;
+    let mut drafter = ModelDrafter::NextN;
+    if let Some(d) = draft {
+        draft_fingerprint = Some(d.fingerprint);
+        drafter = ModelDrafter::Dflash2 { weight_bytes: d.weight_bytes };
+        model.enable_dflash(d.draft, d.weight_bytes).map_err(|e| refuse("the DFlash2 draft's tap buffer", e))?;
+        let tap = model.dflash().map_or(0, |s| s.tap_bytes());
+        eprintln!(
+            "rexl3 event=dflash2_loaded weights_gib={:.3} total_gib={:.3} tap_gib={:.3} form={} load_s={:.2}",
+            gib(d.weight_bytes),
+            gib(d.total_bytes),
+            gib(tap),
+            d.form,
+            d.load_s
+        );
+        boot::fact("dflash2", format!("{} draft, {:.2} GiB", d.form, gib(d.total_bytes + tap)));
+    }
     if plan.cache.enabled() {
         model.enable_prefix_cache(plan.cache.snapshot_slots).map_err(|e| refuse("the prefix cache's snapshot pool", e))?;
     }
@@ -408,7 +476,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
         },
         chunk,
     )
-    .and_then(|p| p.with_prefix_snapshots(&cfg, plan.cache.snapshot_slots, model.has_mtp()))
+    .and_then(|p| p.with_prefix_snapshots_draft(&cfg, plan.cache.snapshot_slots, model.has_mtp(), model.has_dflash()))
     .map_err(ModelError::Config)?;
     if let Err(e) = model.check_allocations(&ap) {
         return Err(ModelError::Config(format!("the memory model and the allocations disagree: {e}")));
@@ -424,17 +492,21 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     // speculation: the backend owns the drafters (the NextN layer and the copy drafter) and offers drafts from `propose_batch`; with drafting off
     // (`--no-drafts`, `--spec none`) it offers none and the engine never asks
     let mut backend = if o.drafting && o.spec.drafts() {
-        GlmBackend::with_spec(model, SpecConfig::from_env(o.spec)?)
+        GlmBackend::with_spec(model, SpecConfig { drafter, ..SpecConfig::from_env(o.spec)? })
     } else {
         GlmBackend::new(model)
     }
     .with_chunk(chunk);
     if plan.cache.enabled() {
-        let ns = prefix::namespace_of(&target_fingerprint, backend.m.has_mtp());
-        backend = backend.with_prefix_cache(ns, plan.cache)?;
+        let ns = prefix::namespace_of_draft(&target_fingerprint, backend.m.has_mtp(), draft_fingerprint.as_deref());
+        backend = if o.prefix_pool {
+            backend.with_pool_prefix_cache(ns, plan.cache)?
+        } else {
+            backend.with_prefix_cache(ns, plan.cache)?
+        };
     }
     // the NextN drafter's head over a part of the vocabulary (a draft only proposes: no output byte can change); its copy of those columns of the
-    // `lm_head` (about 0.23 GiB at the default size) is made after the plan was checked and comes out of the headroom the planner leaves the device
+    // `lm_head` (about 0.23 GiB at the default size) is made after the plan was checked, and the plan charged it (`draft_head_planned`, `room`)
     if backend.spec.is_some() && backend.m.has_mtp() {
         let setting = mtp_vocab_setting(std::env::var("REXL3_MTP_VOCAB").ok().as_deref()).map_err(ModelError::Config)?;
         if let Some((strips, share)) = setting {
@@ -476,29 +548,170 @@ pub fn engine_over(backend: GlmBackend, admission: Admission, drafting: bool) ->
     Engine::new(backend, admission, EngineConfig { max_rows: alloc::WINDOW_ROWS, max_drafts: 7, cost, drafting }, make)
 }
 
-/// The pack's fingerprint against the validated list; recorded as a boot fact. An unvalidated pack is refused unless the operator asks.
-pub(super) fn check_pack(ck: &gb_exl3::checkpoint::Checkpoint, allow_unvalidated: bool) -> Result<String, ModelError> {
+/// The DFlash2 draft directory this boot drafts with: `--draft` when drafting is on. `--spec mtp` names the pack's NextN layer, so it is
+/// refused with a draft rather than served with another drafter (`--spec copy` never reaches here with one: `serve::draft_dir_for`).
+pub fn draft_dir_of(o: &ServeOptions) -> Result<Option<&std::path::Path>, ModelError> {
+    let Some(dir) = o.draft_dir.as_deref().filter(|_| o.drafting && o.spec.drafts()) else { return Ok(None) };
+    if o.spec == SpecMode::Mtp {
+        return Err(ModelError::Config(format!(
+            "--spec mtp drafts with the pack's NextN layer, and --draft {} gives a DFlash2 draft instead: pass --spec auto to draft with it, \
+             or leave --draft out to draft with the NextN layer",
+            dir.display()
+        )));
+    }
+    Ok(Some(dir))
+}
+
+/// A loaded DFlash2 draft, before it joins the model.
+pub(super) struct LoadedDraft {
+    pub(super) draft: crate::draft::Draft,
+    pub(super) fingerprint: String,
+    pub(super) weight_bytes: u64,
+    /// Everything the draft allocated (weights, context rings, scratch).
+    pub(super) total_bytes: u64,
+    pub(super) form: &'static str,
+    pub(super) load_s: f64,
+}
+
+/// Load the DFlash2 draft at `dir` for a target of `cfg` (whose `lm_head` is `head_bits` wide) serving `slots` slots in prompt chunks of `chunk`
+/// rows. Refused when it would leave less than the floor.
+pub(super) fn load_draft(
+    dir: &std::path::Path,
+    cfg: &GlmConfig,
+    head_bits: usize,
+    slots: usize,
+    chunk: usize,
+    floor: u64,
+) -> Result<LoadedDraft, ModelError> {
+    let t = std::time::Instant::now();
+    let geom = super::dflash::check_dir(dir, cfg.hidden, cfg.vocab, cfg.layers.len())?;
+    let pack = crate::pack::Pack::open(dir).map_err(|e| ModelError::Config(format!("{}: {e}", dir.display())))?;
+    let fingerprint = crate::fingerprint::fingerprint(&pack.ck);
+    let form = if pack.has_group("fc") { "exl3" } else { "bf16" };
+    let before = mem_available();
+    // one arena block sized to the pack (its tensors, the norms widened to fp32, alignment and a margin) instead of 1 GiB blocks, whose
+    // unused tail would hold ~0.8 GiB of the published draft's 2.2 GiB
+    let pack_bytes: u64 = pack.ck.plain.values().map(|e| e.nbytes()).sum::<u64>()
+        + pack.ck.plain.values().filter(|e| e.dtype == "BF16" && e.shape.len() == 1).map(|e| e.nbytes()).sum::<u64>()
+        + pack.ck.groups.values().map(|g| g.bytes).sum::<u64>()
+        + (pack.ck.plain.len() + 4 * pack.ck.groups.len()) as u64 * 4096
+        + (64 << 20);
+    let mut ctx = crate::loadctx::LoadCtx::from_env_with_block(pack_bytes as usize);
+    // the absorbs come in pieces of at most one window (`model/dflash.rs`), so the draft's context scratch is sized for one piece
+    let ctx_rows = chunk.min(super::dflash::WINDOW);
+    let (draft, bytes) =
+        crate::draft::Draft::declare_geom(&mut ctx, &pack, geom, head_bits, cfg.vocab, slots, ctx_rows, crate::draft::BLOCK)?;
+    ctx.finish()?;
+    let ring = gb_cuda::dflash2::DraftCtxLayout::qwen38(slots).total_bytes() as u64;
+    let weight_bytes = bytes as u64 - ring;
+    let after = mem_available();
+    let total_bytes = match (before, after) {
+        (Some(b), Some(a)) => b.saturating_sub(a).max(bytes as u64),
+        _ => bytes as u64,
+    };
+    if let Some(a) = after {
+        if a < floor {
+            return Err(ModelError::Config(format!(
+                "the DFlash2 draft ({:.2} GiB) leaves MemAvailable at {:.2} GiB, below the {:.2} GiB floor: start without --draft",
+                gib(total_bytes),
+                gib(a),
+                gib(floor)
+            )));
+        }
+    }
+    Ok(LoadedDraft { draft, fingerprint, weight_bytes, total_bytes, form, load_s: t.elapsed().as_secs_f64() })
+}
+
+/// The structural check of the DFlash2 draft this boot drafts with ([`draft_dir_of`]; `crate::draft::check_draft_pack` against the GLM
+/// geometry and this target), or `None` without one.
+pub(super) fn draft_check_of(
+    o: &ServeOptions,
+    cfg: &GlmConfig,
+) -> Result<Option<Result<crate::draft::DraftCheck, crate::draft::DraftCheckError>>, ModelError> {
+    let Some(dir) = draft_dir_of(o)? else { return Ok(None) };
+    let expect = crate::draft::DraftExpect {
+        hidden: cfg.hidden,
+        vocab: cfg.vocab,
+        tap_layers: super::dflash::TAP_LAYERS,
+        target_layers: cfg.layers.len(),
+    };
+    Ok(Some(crate::draft::check_draft_pack(dir, &crate::draft::DraftGeom::GLM53_FLASH, &expect)))
+}
+
+/// The `pack_validated` name of a validated target of fingerprint `t` (its own entry `alone`) and the draft that passed its structural
+/// check: the listed (target, draft) pair, else the target's own entry. Never another target's pair: a draft listed with one target is
+/// structural beside any other ([`crate::draft::DraftCheck::pair`]).
+pub(super) fn pack_validated_name(t: &str, alone: &'static str, draft: Option<&crate::draft::DraftCheck>) -> &'static str {
+    draft.and_then(|c| c.pair(t)).unwrap_or(alone)
+}
+
+/// The pack check of the GLM family: the TARGET against the validated list (refused unless the operator asks), the DRAFT, when one drafts,
+/// by its structure (`draft`, [`draft_check_of`]): a draft only proposes, so a structurally valid one needs no flag, and a listed pair keeps
+/// its name ([`pack_validated_name`]). A structural failure is refused by name unless the operator asks. Records the boot facts; returns the
+/// target's fingerprint.
+pub(super) fn check_pack(
+    ck: &gb_exl3::checkpoint::Checkpoint,
+    draft: Option<&Result<crate::draft::DraftCheck, crate::draft::DraftCheckError>>,
+    allow_unvalidated: bool,
+) -> Result<String, ModelError> {
     let t = crate::fingerprint::fingerprint(ck);
     boot::fact("target_fingerprint", t.clone());
     match crate::fingerprint::validated_pack(&t, None) {
-        Some(name) => {
-            boot::fact("pack_validated", name);
-            Ok(t)
-        }
+        Some(name) => boot::fact("pack_validated", pack_validated_name(&t, name, draft.and_then(|d| d.as_ref().ok()))),
         None if allow_unvalidated => {
             boot::fact("pack_validated", "no (--allow-unvalidated-pack)");
-            eprintln!("rexl3 level=warn event=unvalidated_pack target={t} draft=none");
-            Ok(t)
+            eprintln!("rexl3 level=warn event=unvalidated_pack target={t}");
         }
-        None => Err(ModelError::Config(format!(
+        None => {
+            return Err(ModelError::Config(format!(
             "this pack is not one this release was validated on (target {t}); pass --allow-unvalidated-pack to serve it anyway"
-        ))),
+        )))
+        }
     }
+    match draft {
+        None => {}
+        Some(Ok(c)) => {
+            boot::fact("draft_fingerprint", c.fingerprint.clone());
+            boot::fact("draft_validated", c.how(&t));
+        }
+        Some(Err(e)) if allow_unvalidated => {
+            boot::fact("draft_validated", "no (--allow-unvalidated-pack)");
+            eprintln!("rexl3 level=warn event=unvalidated_draft reason=\"{e}\"");
+        }
+        Some(Err(e)) => {
+            return Err(ModelError::Config(format!(
+                "the draft is not a DFlash2 draft this engine runs for this target ({e}); pass --allow-unvalidated-pack to serve it anyway"
+            )))
+        }
+    }
+    Ok(t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The draft head's plan is its parts at the default vocabulary (555 strips: the 512 prefix strips, the numeric block, the last strip): the
+    /// strip copy's own size function (`Exl3Weights::select_strips_bytes`, tested against the copy on a GPU in `gb-cuda`'s `exl3_split.rs`), the
+    /// decode workspace at 128 rows, the fp16 logits and the column map.
+    #[test]
+    fn the_draft_head_is_planned_as_its_parts() {
+        let ranges = super::super::model::vocab_ranges(MTP_VOCAB_PREFIX_STRIPS, 154_880);
+        let kept: usize = ranges.iter().map(|&(lo, hi)| hi - lo).sum();
+        assert_eq!(kept, 555);
+        let cols = kept * 128;
+        for bits in [6usize, 8] {
+            let want = (4096 / 16) * kept * 64 * bits * 4
+                + 4096 * 2
+                + cols * 2
+                + gb_cuda::exl3_linear::linear_workspace_bytes(128, 4096, cols, bits)
+                + 128 * cols * 2
+                + cols * 4;
+            assert_eq!(super::super::model::sub_head_bytes(4096, bits, &ranges), want as u64, "{bits} bits");
+        }
+        // no head without the NextN drafter
+        assert_eq!(mtp_vocab_setting(Some("off")), Ok(None));
+    }
 
     use crate::hostmem::{planning_free, MemInfo};
     use crate::memory::MemoryOptions;
@@ -524,7 +737,69 @@ mod tests {
     /// The engine's plan for a given count at a given free memory, as `build_engine` makes it.
     fn plan_at(free: u64) -> impl Fn(usize) -> Result<MemoryPlan, PlanError> {
         let (profile, vision) = shipped();
-        move |slots| plan_for_slots(&profile, vision, free, FLOOR, CAP, slots, CacheRequest::Off, 0, CAP)
+        move |slots| plan_for_slots(&profile, vision, free, FLOOR, CAP, slots, CacheRequest::Off, 0, CAP, false)
+    }
+
+    #[test]
+    fn the_glm_pack_check_names_the_pair_with_the_published_draft_and_refuses_another_draft() {
+        // `check_pack`'s verdicts are `fingerprint::validated_pack`'s: the target alone is its text entry, with the published draft the
+        // pair, with any other draft nothing (refused without the flag, by name with both fingerprints)
+        let (pair, t, d) = crate::fingerprint::VALIDATED_GLM53_DRAFT[0];
+        assert_eq!(crate::fingerprint::validated_pack(t, None), Some("GLM-5.3-Flash-EXL3-2.25bpw-sm121 (text)"));
+        assert_eq!(crate::fingerprint::validated_pack(t, Some(d)), Some(pair));
+        assert_eq!(crate::fingerprint::validated_pack(t, Some("sha256:own-quant")), None);
+    }
+
+    /// The pack check names THIS target's pair (found by vcruz305 in #289): a validated target other than the pair's (RED-SNOW 2.49) with
+    /// the published draft reports its own entry and a structural draft, never the 2.25 pair; an unvalidated target served with the flag
+    /// gets a structural draft too. The shipped pair's facts keep their exact text.
+    #[test]
+    fn the_pack_check_names_the_targets_own_pair_and_never_another_targets() {
+        use crate::draft::DraftCheck;
+        use crate::fingerprint::{validated_pack, GLM53_DFLASH2_FP, VALIDATED_GLM53_DRAFT, VALIDATED_TEXT};
+        let published = DraftCheck { fingerprint: GLM53_DFLASH2_FP.into(), geometry: "glm53-flash" };
+        // the shipped pair, byte for byte
+        let glm = VALIDATED_GLM53_DRAFT[0].1;
+        let glm_alone = validated_pack(glm, None).unwrap();
+        assert_eq!(
+            pack_validated_name(glm, glm_alone, Some(&published)),
+            "GLM-5.3-Flash-EXL3-2.25bpw-sm121 + GLM-5.3-Flash-DFlash2 (bf16, as published)"
+        );
+        assert_eq!(published.how(glm), "listed (GLM-5.3-Flash-EXL3-2.25bpw-sm121 + GLM-5.3-Flash-DFlash2 (bf16, as published))");
+        assert_eq!(pack_validated_name(glm, glm_alone, None), "GLM-5.3-Flash-EXL3-2.25bpw-sm121 (text)");
+        // RED-SNOW 2.49, validated as text, with the same published draft: its own entry, the draft structural
+        let (rs_alone, rs) = *VALIDATED_TEXT.iter().find(|(n, _)| n.starts_with("vcruz305/RED-SNOW-5.3-FLASH")).unwrap();
+        assert_eq!(validated_pack(rs, None), Some(rs_alone));
+        assert_eq!(pack_validated_name(rs, rs_alone, Some(&published)), "vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw (text)");
+        assert_eq!(published.how(rs), "structural (glm53-flash)");
+        // a target off the list (served with --allow-unvalidated-pack): the draft is structural, never a listed pair
+        assert_eq!(published.how("sha256:unlisted"), "structural (glm53-flash)");
+    }
+
+    #[test]
+    fn a_draft_is_the_model_drafter_unless_drafting_is_off_and_spec_mtp_with_a_draft_is_refused() {
+        let cfg = GlmConfig::from_json(&serde_json::from_str(GLM_CONFIG).unwrap()).unwrap();
+        let mut o = ServeOptions::new("/models/glm".into());
+        o.drafting = true;
+        o.spec = SpecMode::Auto;
+        // no draft: nothing changes (the NextN layer drafts on one node and on every rank)
+        assert_eq!(draft_dir_of(&o).unwrap(), None);
+        assert_eq!(super::super::tp_boot::mtp_wanted(&o, &cfg), super::super::MTP_BUILT && cfg.has_mtp());
+        // a draft: it is the model drafter, and no rank loads the NextN layer
+        o.draft_dir = Some("/models/dflash2".into());
+        assert_eq!(draft_dir_of(&o).unwrap(), Some(std::path::Path::new("/models/dflash2")));
+        assert!(!super::super::tp_boot::mtp_wanted(&o, &cfg));
+        // `--spec mtp` names the NextN layer: refused with a draft, by name
+        o.spec = SpecMode::Mtp;
+        let e = draft_dir_of(&o).unwrap_err().to_string();
+        assert!(e.contains("--spec mtp") && e.contains("--draft") && e.contains("--spec auto"), "{e}");
+        // drafting off: the draft is not loaded (and the NextN layer neither)
+        o.spec = SpecMode::Auto;
+        o.drafting = false;
+        assert_eq!(draft_dir_of(&o).unwrap(), None);
+        o.drafting = true;
+        o.spec = SpecMode::None;
+        assert_eq!(draft_dir_of(&o).unwrap(), None);
     }
 
     #[test]

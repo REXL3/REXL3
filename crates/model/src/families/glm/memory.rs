@@ -14,6 +14,33 @@ use gb_sched::{KvLayout, MemoryError, MemoryModel, MemoryProfile, StepShape, Vis
 /// at 128 rows) are far under it, so it stays the reserve; the planner takes the larger of the two.
 pub const ACTIVATION_RESERVE: u64 = 5 << 30;
 
+/// `REXL3_GLM_RESERVE_MARGIN_GIB`: unset (the default, every shipped GLM profile) keeps the [`ACTIVATION_RESERVE`] blanket exactly as
+/// before. Set to a number of GiB, the reserve becomes the MODELLED buffers (the scratch at the plan's chunk and a full window of
+/// records, `alloc.rs`'s own arithmetic) plus that margin, for what is allocated after the plan and not modelled row by row (the CUDA
+/// context, library workspaces, communicator buffers, captured graphs). Opt-in for a profile whose margin was measured at its own
+/// window (the RED-SNOW 4.91 bpw two-node profile, `docs/GLM_TP.md` section 8): it moves memory, never a bit.
+pub const RESERVE_MARGIN_ENV: &str = "REXL3_GLM_RESERVE_MARGIN_GIB";
+
+/// How the GLM activation reserve is sized ([`RESERVE_MARGIN_ENV`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveMode {
+    /// `max(modelled, ACTIVATION_RESERVE)`: the default.
+    Blanket,
+    /// `modelled + margin` bytes.
+    ModelledPlus(u64),
+}
+
+/// The reserve mode from a lookup of [`RESERVE_MARGIN_ENV`]: unset is [`ReserveMode::Blanket`]; a value must be a finite number of GiB
+/// from 0.25 to 5 (a margin under a quarter GiB covers no CUDA context; one above the blanket is the blanket's job), anything else is
+/// refused by name rather than silently replaced.
+pub fn reserve_mode_from(get: impl Fn(&str) -> Option<String>) -> Result<ReserveMode, String> {
+    let Some(v) = get(RESERVE_MARGIN_ENV) else { return Ok(ReserveMode::Blanket) };
+    match v.trim().parse::<f64>() {
+        Ok(g) if g.is_finite() && (0.25..=5.0).contains(&g) => Ok(ReserveMode::ModelledPlus((g * (1u64 << 30) as f64) as u64)),
+        _ => Err(format!("{RESERVE_MARGIN_ENV}={v:?}: expected a margin in GiB from 0.25 to 5 (unset: the 5 GiB blanket)")),
+    }
+}
+
 /// The memory model of a GLM pack, ready to be evaluated at any serving settings.
 pub struct GlmMemorySource(pub GlmConfig);
 
@@ -32,6 +59,12 @@ pub fn engine_options(opts: &MemoryOptions) -> MemoryOptions {
 
 /// The validated profile of `cfg` at `opts`. Speculation with the pack's MTP head is refused for a pack that has none.
 pub fn memory_profile(cfg: &GlmConfig, opts: &MemoryOptions) -> Result<MemoryProfile, MemoryError> {
+    let reserve = reserve_mode_from(|k| std::env::var(k).ok()).map_err(MemoryError::Inconsistent)?;
+    memory_profile_with(cfg, opts, reserve)
+}
+
+/// [`memory_profile`] with the reserve mode given (the tests; [`memory_profile`] reads it from [`RESERVE_MARGIN_ENV`]).
+pub fn memory_profile_with(cfg: &GlmConfig, opts: &MemoryOptions, reserve: ReserveMode) -> Result<MemoryProfile, MemoryError> {
     if opts.mtp && !cfg.has_mtp() {
         return Err(MemoryError::Inconsistent(
             "glm5_next: speculation with the pack's MTP head was asked for but the pack has no NextN layer".into(),
@@ -41,13 +74,14 @@ pub fn memory_profile(cfg: &GlmConfig, opts: &MemoryOptions) -> Result<MemoryPro
     let opts = &MemoryOptions { prefill_rows: alloc::prefill_chunk_for(opts.prefill_rows), ..*opts };
     let shape =
         StepShape { page_tokens: BLOCK_TOKENS as u64, window_rows: window, scratch_rows: (opts.prefill_rows as u64).max(window) };
-    MemoryProfile::new(&GlmMemory { cfg, opts: *opts }, shape)
+    MemoryProfile::new(&GlmMemory { cfg, opts: *opts, reserve }, shape)
 }
 
 /// The GLM-5.3-Flash memory model.
 pub struct GlmMemory<'a> {
     pub cfg: &'a GlmConfig,
     pub opts: MemoryOptions,
+    pub reserve: ReserveMode,
 }
 
 impl GlmMemory<'_> {
@@ -84,8 +118,18 @@ impl MemoryModel for GlmMemory<'_> {
         AllocPlan::scratch_items_chunked(self.cfg, window, chunk, self.opts.max_context, self.opts.mtp)
             .map_or(0, |v| v.iter().map(|i| i.bytes).sum())
     }
+    /// The blanket, or ([`ReserveMode::ModelledPlus`]) the modelled buffers the profile reserves anyway (the scratch at the shape's
+    /// widest rows and a full window of records: `MemoryProfile`'s own terms) plus the margin, so the planner's `max(modelled, this)`
+    /// is exactly modelled + margin.
     fn activation_reserve(&self) -> u64 {
-        ACTIVATION_RESERVE
+        match self.reserve {
+            ReserveMode::Blanket => ACTIVATION_RESERVE,
+            ReserveMode::ModelledPlus(margin) => {
+                let window = self.opts.window_rows as u64;
+                let rows = (self.opts.prefill_rows as u64).max(window);
+                self.scratch_bytes(rows) + self.window_record_bytes_per_row() * window + margin
+            }
+        }
     }
     /// The NextN head's per-slot state when it drafts: its DSA raw-row ring (the 12th layer's, 128 KiB) and the store of pending tapped hidden
     /// rows (`alloc::MTP_TAP_CAP` fp16 rows of 4,096). Its latent cache and pooled keys are per token and charged through the KV layout
@@ -324,6 +368,61 @@ mod tests {
         let p = memory_profile(&real(), &opts()).unwrap();
         assert_eq!(p.engine_reserve_bytes(), 5 * GIB);
         assert!(p.scratch_bytes() + p.window_record_bytes() < 5 * GIB / 2, "the modelled buffers are about 1 GiB");
+    }
+
+    #[test]
+    fn the_reserve_margin_parses_or_is_refused_by_name() {
+        let of = |v: Option<&str>| reserve_mode_from(|k| (k == RESERVE_MARGIN_ENV).then(|| v.map(String::from)).flatten());
+        assert_eq!(of(None), Ok(ReserveMode::Blanket));
+        assert_eq!(of(Some("1")), Ok(ReserveMode::ModelledPlus(GIB)));
+        assert_eq!(of(Some(" 0.5 ")), Ok(ReserveMode::ModelledPlus(GIB / 2)));
+        assert_eq!(of(Some("5")), Ok(ReserveMode::ModelledPlus(5 * GIB)));
+        for bad in ["", "0", "0.1", "5.5", "-1", "nan", "inf", "1GiB", "auto"] {
+            let e = of(Some(bad)).unwrap_err();
+            assert!(e.contains(RESERVE_MARGIN_ENV), "{bad:?}: {e}");
+        }
+    }
+
+    /// Unset, the reserve is the blanket byte for byte (every shipped GLM profile's plan is unchanged); set, it is exactly the modelled
+    /// buffers plus the margin, below the blanket at the RED-SNOW two-node geometry (1M context, a 2,048-row P2 chunk, the KDA rank split,
+    /// the NextN layer). Prints the modelled figures the profile's margin is chosen against.
+    #[test]
+    fn the_opt_in_reserve_is_the_modelled_buffers_plus_the_margin() {
+        if !gb_cuda::rt::kernels_built() {
+            eprintln!("not run: this build has no CUDA kernels (no nvcc), so the kernels' workspace sizes are not known");
+            return;
+        }
+        let whole = real();
+        let rank = real().with_kda_rank(0, 2).unwrap();
+        for (name, c) in [("whole", &whole), ("kda rank 0 of 2", &rank)] {
+            for mtp in [false, true] {
+                for rows in [2048usize, 4096] {
+                    let o = engine_options(&MemoryOptions {
+                        prefill_rows: rows,
+                        max_context: 1_048_576,
+                        mtp,
+                        ..MemoryOptions::serving_defaults()
+                    });
+                    let blanket = memory_profile_with(c, &o, ReserveMode::Blanket).unwrap();
+                    let modelled = blanket.scratch_bytes() + blanket.window_record_bytes();
+                    assert_eq!(blanket.engine_reserve_bytes(), modelled.max(ACTIVATION_RESERVE));
+                    let opt = memory_profile_with(c, &o, ReserveMode::ModelledPlus(GIB)).unwrap();
+                    assert_eq!(opt.engine_reserve_bytes(), modelled + GIB, "{name} mtp {mtp} rows {rows}");
+                    // only the reserve moves: every other term of the profile is the blanket profile's
+                    assert_eq!(opt.kv_bytes_per_token(), blanket.kv_bytes_per_token());
+                    assert_eq!(opt.state_bytes_per_slot(), blanket.state_bytes_per_slot());
+                    assert_eq!(opt.scratch_bytes(), blanket.scratch_bytes());
+                    eprintln!(
+                        "RESERVE {name} mtp={mtp} chunk={} ctx=1048576: scratch {:.3} GiB + records {:.3} GiB = modelled {:.3} GiB; blanket reserve {:.3} GiB",
+                        o.prefill_rows,
+                        blanket.scratch_bytes() as f64 / GIB as f64,
+                        blanket.window_record_bytes() as f64 / GIB as f64,
+                        modelled as f64 / GIB as f64,
+                        blanket.engine_reserve_bytes() as f64 / GIB as f64
+                    );
+                }
+            }
+        }
     }
 
     #[test]

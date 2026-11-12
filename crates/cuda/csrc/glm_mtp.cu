@@ -81,6 +81,24 @@ constexpr int NT = 256;
 
 // ---------------------------------------------------------------------------------------------------------------- mtp_input
 
+// Eight bf16 values of a table row as the 16 bytes a uint4 load gives: BYTES reads them one by one (a table at any byte address: a shard
+// read in place may start at an odd byte), assembling the very words, so every value is the aligned load's bit for bit.
+template <bool BYTES>
+__device__ __forceinline__ uint4 ld_row8(const u16* p) {
+    if constexpr (!BYTES) {
+        return *(const uint4*)p;
+    } else {
+        const unsigned char* b = (const unsigned char*)p;
+        uint4 u;
+        u.x = (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16) | ((u32)b[3] << 24);
+        u.y = (u32)b[4] | ((u32)b[5] << 8) | ((u32)b[6] << 16) | ((u32)b[7] << 24);
+        u.z = (u32)b[8] | ((u32)b[9] << 8) | ((u32)b[10] << 16) | ((u32)b[11] << 24);
+        u.w = (u32)b[12] | ((u32)b[13] << 8) | ((u32)b[14] << 16) | ((u32)b[15] << 24);
+        return u;
+    }
+}
+
+template <bool BYTES>
 __global__ void __launch_bounds__(NT) mtp_input_k(const u16* table, const int* ids, const u16* hid, const float* we, const float* wh, u16* out,
                                                   int dim, int vocab, float eps) {
     __shared__ float sm[NT / 32];
@@ -95,7 +113,7 @@ __global__ void __launch_bounds__(NT) mtp_input_k(const u16* table, const int* i
     for (int v = threadIdx.x; v < nvec; v += NT) {
         float f[8], g[8];
         if (ok) {
-            unpack8bf_as_h(*(const uint4*)(erow + (size_t)v * 8), f);
+            unpack8bf_as_h(ld_row8<BYTES>(erow + (size_t)v * 8), f);
         } else {
 #pragma unroll
             for (int i = 0; i < 8; ++i) f[i] = 0.f;
@@ -113,7 +131,7 @@ __global__ void __launch_bounds__(NT) mtp_input_k(const u16* table, const int* i
     for (int v = threadIdx.x; v < nvec; v += NT) {
         float f[8], g[8], oe[8], oh[8];
         if (ok) {
-            unpack8bf_as_h(*(const uint4*)(erow + (size_t)v * 8), f);
+            unpack8bf_as_h(ld_row8<BYTES>(erow + (size_t)v * 8), f);
         } else {
 #pragma unroll
             for (int i = 0; i < 8; ++i) f[i] = 0.f;
@@ -281,8 +299,10 @@ GB_EXPORT int gb_glm_mtp_input(const void* table, const int* ids, const void* hi
     if (rows < 0 || dim < 8 || dim % 8 != 0 || vocab < 0) return ERR_INVALID;
     if (rows == 0) return 0;
     if (!table || !ids || !hid || !we || !wh || !out) return ERR_INVALID;
-    if (!aligned16(table) || !aligned16(hid) || !aligned16(we) || !aligned16(wh) || !aligned16(out)) return ERR_INVALID;
-    mtp_input_k<<<rows, NT, 0, gb_stream(stream)>>>((const u16*)table, ids, (const u16*)hid, we, wh, (u16*)out, dim, vocab, eps);
+    if (!aligned16(hid) || !aligned16(we) || !aligned16(wh) || !aligned16(out)) return ERR_INVALID;
+    // a 16-byte-aligned table (every device copy) takes the kernel it always took; any other address (a shard read in place) the byte one
+    if (aligned16(table)) mtp_input_k<false><<<rows, NT, 0, gb_stream(stream)>>>((const u16*)table, ids, (const u16*)hid, we, wh, (u16*)out, dim, vocab, eps);
+    else mtp_input_k<true><<<rows, NT, 0, gb_stream(stream)>>>((const u16*)table, ids, (const u16*)hid, we, wh, (u16*)out, dim, vocab, eps);
     return GB_CHECK_LAUNCH();
 }
 

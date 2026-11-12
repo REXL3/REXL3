@@ -165,6 +165,9 @@ pub fn pre_ref(
 
 /// z-dump entry points (debug aids, not a production path): hcx::pre with the k2 pre-sigmoid
 /// sums written to `z_out` ([hc * rows, H] f32) for bit-exact A/B of the k2 kernels.
+// the raw pointers are device addresses that cross straight into the extern kernel (the host never dereferences
+// them), as in `dsv4_kvq4::attn_raw_dev`
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn hcx_ffi_z(
     streams: *const core::ffi::c_void,
     norm: *const core::ffi::c_void,
@@ -186,6 +189,8 @@ pub fn hcx_ffi_z(
 }
 
 /// Development-only z-dump ref entry point.
+// device addresses into the extern kernel, as in `hcx_ffi_z`
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn hcx_ffi_z_ref(
     streams: *const core::ffi::c_void,
     norm: *const core::ffi::c_void,

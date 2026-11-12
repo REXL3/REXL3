@@ -222,9 +222,9 @@ impl ShardTable {
     }
 }
 
-/// A tensor-parallel group is built and verified for the family's 8-row decode window, the plain decode step and the
-/// serial prefill: the DSpark (NextN) drafting is refused BY NAME rather than run unverified — the mirror of
-/// nemotron's `engine::check_tp_plain`, adapted to this family's steps.
+/// The options a tensor-parallel group boot refuses before anything is bound — the mirror of nemotron's
+/// `engine::check_tp_plain`, adapted to this family's steps. It refuses nothing today: the DSpark (NextN) drafting runs
+/// on rank 0 over NextN layers the group replicates (see `TpLeader::propose_mtp`), so drafting is no longer refused here.
 ///
 /// There is NO window arm here, deliberately (nemotron's has one because its window is `--window-rows`-adjustable):
 /// this family's window is FIXED at [`super::model::WINDOW_ROWS`] — it does not implement

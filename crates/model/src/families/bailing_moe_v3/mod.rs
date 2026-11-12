@@ -12,6 +12,8 @@ pub mod alloc;
 pub mod backend;
 pub mod bind;
 pub mod config;
+pub mod contract;
+pub mod counters;
 pub mod device;
 pub mod engine;
 pub mod inventory;
@@ -19,6 +21,7 @@ pub mod load;
 pub mod memory;
 pub mod model;
 pub mod plan;
+pub mod spill;
 pub mod weights;
 
 pub use bind::{LayoutError, Problem};

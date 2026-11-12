@@ -69,7 +69,20 @@ fn call(o: &Owned, r: &Rows, ws: &mut DevBuf, max_tokens: usize, st: &Stream) ->
     let sg = DevBuf::from_slice(&r.sg).unwrap();
     let mut out = DevBuf::zeroed(t * H * 2).unwrap();
     let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens };
-    fmoe::prefill(&x, &logits, &sg, &o.tables(), &mut out, shape, None, fmoe::SwigluLimit::default(), ws, st).unwrap();
+    fmoe::prefill(
+        &x,
+        &logits,
+        fmoe::LogitsDtype::Bf16,
+        &sg,
+        &o.tables(),
+        &mut out,
+        shape,
+        None,
+        fmoe::SwigluLimit::default(),
+        ws,
+        st,
+    )
+    .unwrap();
     dl(&out, st)
 }
 
@@ -287,8 +300,20 @@ fn bench_prefill_moe_sweep() {
             let mut out = DevBuf::zeroed(t * H * 2).unwrap();
             let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: CHUNK };
             let ms = ms_per_call(&st, if t <= 512 { 20 } else { 8 }, |_| {
-                fmoe::prefill(&x, &logits, &sg, &o.tables(), &mut out, shape, None, fmoe::SwigluLimit::default(), &mut ws, &st)
-                    .unwrap();
+                fmoe::prefill(
+                    &x,
+                    &logits,
+                    fmoe::LogitsDtype::Bf16,
+                    &sg,
+                    &o.tables(),
+                    &mut out,
+                    shape,
+                    None,
+                    fmoe::SwigluLimit::default(),
+                    &mut ws,
+                    &st,
+                )
+                .unwrap();
             });
             let flop = t as f64 * (TK + 1) as f64 * 3.0 * (H * I) as f64 * 2.0;
             let mut sel = DevBuf::zeroed(t * (TK + 1) * 4).unwrap();
@@ -337,13 +362,39 @@ fn bench_prefill_moe_short_prompts() {
         let shape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: CHUNK };
         let ms = ms_per_call(&st, 64, |i| {
             let (x, l, g) = &dev[i % 16];
-            fmoe::prefill(x, l, g, &o.tables(), &mut out, shape, None, fmoe::SwigluLimit::default(), &mut ws, &st).unwrap();
+            fmoe::prefill(
+                x,
+                l,
+                fmoe::LogitsDtype::Bf16,
+                g,
+                &o.tables(),
+                &mut out,
+                shape,
+                None,
+                fmoe::SwigluLimit::default(),
+                &mut ws,
+                &st,
+            )
+            .unwrap();
         });
         let frost = if t <= 64 {
             let fshape = fmoe::Shape { t, ne: NE, top_k: TK, h: H, i: I, kc: KC, max_tokens: 64 };
             ms_per_call(&st, 64, |i| {
                 let (x, l, g) = &dev[i % 16];
-                fmoe::forward(x, l, g, &o.tables(), &mut out, fshape, None, fmoe::SwigluLimit::default(), &mut fws, &st).unwrap();
+                fmoe::forward(
+                    x,
+                    l,
+                    fmoe::LogitsDtype::Bf16,
+                    g,
+                    &o.tables(),
+                    &mut out,
+                    fshape,
+                    None,
+                    fmoe::SwigluLimit::default(),
+                    &mut fws,
+                    &st,
+                )
+                .unwrap();
             })
         } else {
             f64::NAN

@@ -76,6 +76,15 @@ impl ChatFormat for GlmFormat {
         ToolSyntax { open: "<tool_call>", close: "</tool_call>", parse: tools::parse_call }
     }
 
+    /// GLM opens a new turn with a single role token. `generation_config.json`'s eos already ends the reply on `<|user|>` and
+    /// `<|observation|>` (the latter also closes a tool turn), but not on `<|assistant|>` or `<|system|>`. Near the context
+    /// edge a greedy reply can generate one of those after answering and start a second turn; ending the reply there makes a
+    /// generated role token finish like an eos. Tool calls are unaffected: a GLM tool call is `<tool_call>…</tool_call>` text
+    /// and a tool turn ends on `<|observation|>`, which is unchanged. RED-SNOW uses this same format and the same ids.
+    fn reply_role_stops(&self, tok: &Tok) -> Vec<u32> {
+        ["<|assistant|>", "<|system|>"].iter().filter_map(|t| tok.token_to_id(t)).collect()
+    }
+
     fn check_media(&self, messages: &Value, allow_images: bool) -> Result<(), ApiError> {
         check_media(messages, allow_images)
     }

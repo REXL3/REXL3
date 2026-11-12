@@ -51,8 +51,42 @@ __device__ __forceinline__ int seq_of(const int* seq_start, int n_seq, int r) {
 }
 
 // inverse frequency of rope pair i (of RD / 2), as the main attention computes it
+// Inline double-precision log2(1+f) and exp2(f) (Chebyshev, |err| <= 1e-15): the libdevice pow()
+// call this replaces allocated a 32-byte ABI stack frame in pool_k/stage_k.
+__device__ __forceinline__ double qsa_log2_1p(double f) {
+    const double t = 2.0 * f - 1.0;
+    const double c[21] = {0.5431066063272242, 0.4950546725594648, -0.04246897678943053, 0.004857682971233253,
+                          -0.0006250849758344025, 8.579810126566589e-05, -1.2267189104557654e-05, 1.80404306228224e-06,
+                          -2.7083424840661536e-07, 4.130472061193504e-08, -6.378092798963078e-09, 9.948251555138851e-10,
+                          -1.5646131744936357e-10, 2.4779620423615675e-11, -3.947816865091107e-12, 6.321994346698142e-13,
+                          -1.0168037091243386e-13, 1.6339068560129244e-14, -2.579847148936565e-15, 4.212551646282433e-16,
+                          -1.1454389610824063e-16};
+    double b0 = c[20], b1 = 0.0;
+#pragma unroll
+    for (int j = 19; j >= 0; --j) { double nb = 2.0 * t * b0 - b1 + c[j]; b1 = b0; b0 = nb; }
+    return b0 - t * b1;
+}
+__device__ __forceinline__ double qsa_exp2_frac(double f) {
+    const double t = 2.0 * f - 1.0;
+    const double c[12] = {1.4569998750129625, 0.49752486781044203, 0.04289311198967972, 0.0024714281639958823,
+                          0.00010690611635801226, 3.7013814279846185e-06, 1.0682375359679143e-07, 2.6430328675962523e-09,
+                          5.7226419361749437e-11, 1.101455589061255e-12, 1.9120059647102983e-14, 2.9755922334246345e-16};
+    double b0 = c[11], b1 = 0.0;
+#pragma unroll
+    for (int j = 10; j >= 0; --j) { double nb = 2.0 * t * b0 - b1 + c[j]; b1 = b0; b0 = nb; }
+    return b0 - t * b1;
+}
+__device__ __forceinline__ double qsa_pow(double x, double y) {
+    int e; double m = frexp(x, &e);
+    const double L = qsa_log2_1p(2.0 * m - 1.0) + (double)(e - 1);
+    double t = y * L;
+    int k = (int)floor(t);
+    double f = t - (double)k;
+    double r = qsa_exp2_frac(f);
+    return ldexp(r, k);
+}
 __device__ __forceinline__ float inv_freq(float theta, int i) {
-    return (float)pow((double)theta, -(double)(2 * i) / (double)RD);
+    return (float)qsa_pow((double)theta, -(double)(2 * i) / (double)RD);
 }
 
 // rope one 128-dim vector held one element per thread (d = threadIdx.x) through `sh`; result rounded to f16

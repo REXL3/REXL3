@@ -218,6 +218,7 @@ fn preparation_clock_is_not_reset_and_the_blocking_worker_owns_its_lifetime() {
     let state = Arc::new(gb_server::http::AppState {
         handle: s.state.handle.clone(),
         tok: s.state.tok.clone(),
+        reply_stop: s.state.reply_stop.clone(),
         format: Arc::new(BarrierFormat {
             inner: s.state.format.clone(),
             entered: entered.clone(),

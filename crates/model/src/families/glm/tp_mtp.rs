@@ -161,9 +161,30 @@ pub trait DraftModel {
     /// The slot's tap book (host state, identical on every rank).
     fn mtp_book(&self, slot: usize) -> Option<TapBook>;
     fn mtp_draft_keyed(&mut self, asks: &[DraftAsk<'_>], keyed: &[Option<Sampling>]) -> Result<Vec<Option<Drafts>>, ModelError>;
+    /// A DFlash2 draft is loaded (`--draft`). A model without one (every rank group today) keeps the defaults.
+    fn has_dflash(&self) -> bool {
+        false
+    }
+    /// Whether `slot` may draft with the DFlash2 draft for a sequence of `tokens` tokens.
+    fn dflash_ready(&self, _slot: usize, _tokens: usize) -> bool {
+        false
+    }
+    /// One DFlash2 draft round for the asking sequences (each one [`DraftModel::dflash_ready`]).
+    fn dflash_draft(&mut self, _asks: &[super::model::DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        Err(ModelError::Config("this model has no DFlash2 draft".into()))
+    }
 }
 
 impl DraftModel for GlmModel {
+    fn has_dflash(&self) -> bool {
+        GlmModel::has_dflash(self)
+    }
+    fn dflash_ready(&self, slot: usize, tokens: usize) -> bool {
+        GlmModel::dflash_ready(self, slot, tokens)
+    }
+    fn dflash_draft(&mut self, asks: &[super::model::DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        GlmModel::dflash_draft(self, asks)
+    }
     fn has_mtp(&self) -> bool {
         GlmModel::has_mtp(self)
     }
@@ -183,6 +204,19 @@ pub trait GlmMtpRuntime: LockstepRuntime<Call = GlmCall> {
     fn mtp_book(&self, slot: usize) -> Option<TapBook>;
     fn mtp_draft_keyed(&mut self, asks: &[DraftAsk<'_>], keyed: &[Option<Sampling>]) -> Result<Vec<Option<Drafts>>, ModelError>;
     fn mtp_disable_slot(&mut self, slot: usize);
+    /// Rank 0's DFlash2 draft (`--draft`): it lives on rank 0 alone and reads rank 0's taps (every rank's streams are the single node's bits),
+    /// so its calls are rank 0's own, never forwarded. The defaults: no draft (a follower, the CPU mocks).
+    fn has_dflash(&self) -> bool {
+        false
+    }
+    fn dflash_ready(&self, _slot: usize, _tokens: usize) -> bool {
+        false
+    }
+    fn dflash_draft(&mut self, _asks: &[super::model::DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        Err(ModelError::Config("this rank has no DFlash2 draft".into()))
+    }
+    /// The first prompt position of `slot`'s prompt the draft absorbs (`dflash::ctx_from`; rank 0's host state, no call).
+    fn set_dflash_from(&mut self, _slot: usize, _from: usize) {}
     /// This rank's window graph cache (lane E: rank 0's backend reports it at `/metrics`). The default: none (the CPU mocks).
     fn graph_counters(&self) -> Option<gb_engine::GraphCounters> {
         None
@@ -192,6 +226,17 @@ pub trait GlmMtpRuntime: LockstepRuntime<Call = GlmCall> {
 impl<R: GlmMtpRuntime> DraftModel for TpLeader<R> {
     fn has_mtp(&self) -> bool {
         self.inner().has_mtp()
+    }
+    // the DFlash2 draft is rank 0's alone: its calls run on rank 0 without a call to the followers (it touches no trunk state; the
+    // flush before them is `TpLeader::flush`, forwarded as always)
+    fn has_dflash(&self) -> bool {
+        self.inner().has_dflash()
+    }
+    fn dflash_ready(&self, slot: usize, tokens: usize) -> bool {
+        self.inner().dflash_ready(slot, tokens)
+    }
+    fn dflash_draft(&mut self, asks: &[super::model::DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
+        self.inner_mut().dflash_draft(asks)
     }
     fn flush(&mut self) -> Result<(), ModelError> {
         TpLeader::flush(self)

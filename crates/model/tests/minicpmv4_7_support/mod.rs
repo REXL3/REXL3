@@ -60,6 +60,16 @@ impl Rig {
     /// and `8 * units` pages: 20.9 MiB on the 8-layer smoke pack, 101.4 MiB on the full pack), booted the way `serve` boots it, with
     /// `policy` for the cuts.
     pub fn load_with(slots: usize, max_ctx: usize, chunk: usize, units: u64, policy: PrefixConfig) -> Option<Rig> {
+        Self::boot_rig(slots, max_ctx, chunk, units, Some(policy))
+    }
+
+    /// [`Rig::load_with`] with the cut policy `engine_from` installs (the shipped one, `REXL3_PREFIX_*` from the environment): no test
+    /// policy replaces it, so what the engine does here is what `serve` does.
+    pub fn load_shipped(slots: usize, max_ctx: usize, chunk: usize, units: u64) -> Option<Rig> {
+        Self::boot_rig(slots, max_ctx, chunk, units, None)
+    }
+
+    fn boot_rig(slots: usize, max_ctx: usize, chunk: usize, units: u64, policy: Option<PrefixConfig>) -> Option<Rig> {
         let dir = pack_dir()?;
         let cfg = MiniCpmConfig::from_dir(&dir).unwrap();
         let unit = prefix::snapshot_bytes(&cfg) + 8 * prefix::page_bytes(&cfg);
@@ -80,7 +90,10 @@ impl Rig {
         // the test policy then replaces the configuration, not the decision
         assert_eq!(eng.prefix_stats().enabled, units > 0, "the engine from `engine_from` runs the cache the plan carved out");
         assert_eq!(plan.memory.cache.snapshot_slots as u64, units, "the plan holds the units asked for");
-        let eng = eng.with_prefix_cache(policy);
+        let eng = match policy {
+            Some(policy) => eng.with_prefix_cache(policy),
+            None => eng,
+        };
         let mem_after = gb_model::serve::mem_available();
         eprintln!(
             "loaded {} layers: {} slots, {} pool pages, {} snapshot slots, {} cache pages, context {}",

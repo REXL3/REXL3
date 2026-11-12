@@ -50,6 +50,8 @@ struct Fake {
     coopmk: bool,
     /// The identity of the draft the fake claims to run (E4b): the namespace of the cache is keyed by it.
     identity: Option<String>,
+    /// The positions a slot holds (`None`: [`CONTEXT`]); the engine-level prefix tests run prompts of thousands of tokens.
+    context: Option<usize>,
 }
 
 /// One draft round's asks: (slot, anchor, max) of each stream.
@@ -74,8 +76,9 @@ impl MiniCpmRuntime for Fake {
         if slot >= SLOTS {
             return Err(ModelError::Request(format!("slot {slot} of {SLOTS}")));
         }
-        if first + n > CONTEXT {
-            return Err(ModelError::Request(format!("position {} is past the context of {CONTEXT}", first + n - 1)));
+        let context = self.context.unwrap_or(CONTEXT);
+        if first + n > context {
+            return Err(ModelError::Request(format!("position {} is past the context of {context}", first + n - 1)));
         }
         Ok(())
     }
@@ -1207,4 +1210,126 @@ fn under_the_row_limit_an_image_prompt_is_cut_as_on_a_128_grid_and_every_token_k
         "{} fixture prompts, {compared} token positions: the row limit feeds the runtime what a 128-row grid does",
         reqs.len()
     );
+}
+
+// ------------------------------------------------------------------------------------------- the shipped cut policy, through the engine
+
+/// An engine over the fake runtime with `cfg` for the cuts: 16 snapshot slots (128 pages), one prompt at a time.
+fn engine_with(cfg: gb_engine::PrefixConfig) -> gb_engine::Engine<MiniCpmBackend<Fake>> {
+    let c = real();
+    let unit = prefix::snapshot_bytes(&c) + 8 * prefix::page_bytes(&c);
+    let budget = prefix::budget_for_bytes(&c, 16 * unit);
+    let arena = SnapshotArena::bookkeeping_only(&c, budget).unwrap();
+    let fake = Fake { context: Some(1 << 16), ..Fake::default() };
+    let b = MiniCpmBackend::with_runtime(fake, 512).with_prefix_arena(arena, FINGERPRINT.into()).unwrap();
+    let mm = gb_sched::ModelMemory {
+        weights_bytes: 0,
+        kv_bytes_per_token: 30_720,
+        state_bytes_per_slot: 64_389_120,
+        activation_reserve: 0,
+    };
+    let admission = gb_sched::Admission::new(96 << 30, 0, mm, SLOTS).unwrap();
+    let cost = gb_sched::CostModel::from_table(vec![(1, 1.0), (64, 1.0)]);
+    let make: Box<dyn Fn() -> Box<dyn gb_engine::Drafter>> = Box::new(|| Box::new(gb_engine::NoDrafts));
+    let cfg_engine = gb_engine::EngineConfig { max_rows: 64, max_drafts: 7, cost, drafting: false };
+    gb_engine::Engine::new(b, admission, cfg_engine, make).with_prefix_cache(cfg)
+}
+
+/// The engine with the family's shipped prefix config: what `engine_from` installs (`minicpm_prefix_config`), no variable set.
+fn shipped_engine() -> gb_engine::Engine<MiniCpmBackend<Fake>> {
+    engine_with(super::super::engine::minicpm_prefix_config(&|_| None).unwrap())
+}
+
+/// `n` tokens of a stream named by `seed`, inside the fake's vocabulary.
+fn words(seed: u64, n: usize) -> Vec<u32> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            1 + (x % (VOCAB as u64 - 1)) as u32
+        })
+        .collect()
+}
+
+/// One greedy request alone through the engine, to the end: (reply, cached tokens).
+fn serve_one(e: &mut gb_engine::Engine<MiniCpmBackend<Fake>>, prompt: &[u32], cache: bool) -> (Vec<u32>, usize) {
+    let sampling = gb_sampling::Sampling { seed: 0, temperature: 0.0, top_k: 20, top_p: 1.0, min_p: 0.0 };
+    let r =
+        gb_engine::Request { prompt: prompt.to_vec(), sampling, max_new: 4, stop: vec![], draft: false, images: vec![], cache };
+    let id = e.submit(r).unwrap();
+    e.run().unwrap();
+    assert!(e.take_failed().is_empty(), "no request may fail");
+    let outs = e.take_outputs();
+    let o = outs.iter().find(|o| o.id == id).unwrap();
+    assert_eq!(o.tokens.len(), 4);
+    (o.tokens.clone(), o.cached_tokens)
+}
+
+/// The baseline gate's prefix-cache stage on the family's shipped config: two requests about one document of 8,003 tokens, each ending in
+/// its own question and the generation prompt (one shared token, then 17 that differ). The gated delta net's state cannot be cut back, so the
+/// second request hits only if the first left a snapshot before its question: the shipped end cut (64 tokens clear of the end) does; the
+/// default policy's (16) lands inside the question and the second request prefills the whole document again.
+#[test]
+fn the_shipped_policy_resumes_a_second_question_about_a_document_from_the_first_sightings_cut() {
+    let doc = words(8003, 8003);
+    let question = |q: u32| -> Vec<u32> {
+        let mut p = doc.clone();
+        p.push(5);
+        p.extend((0..17).map(|i| 1 + (q * 7 + i) % (VOCAB as u32 - 1)));
+        p
+    };
+    let (first, second) = (question(1), question(2));
+    assert_ne!(first[8004..], second[8004..]);
+    let mut e = shipped_engine();
+    let (_, c1) = serve_one(&mut e, &first, true);
+    assert_eq!(c1, 0, "a cold cache");
+    let (got, c2) = serve_one(&mut e, &second, true);
+    assert_eq!(c2, first.len() - 64, "the second question resumes at the first sighting's end cut, inside the document");
+    assert!(c2 >= first.len() / 2 && c2 <= 8004);
+    assert_eq!(e.prefix_stats().hits, 1);
+    let (want, c3) = serve_one(&mut e, &second, false);
+    assert_eq!((got, c3), (want, 0), "the hit's reply is the uncached one");
+    assert_eq!(e.prefix_stats().restore_failures, 0);
+
+    let mut old = engine_with(gb_engine::PrefixConfig::default());
+    serve_one(&mut old, &first, true);
+    assert_eq!(serve_one(&mut old, &second, true).1, 0, "the default policy: the second question prefills the whole document");
+}
+
+/// The baseline gate's long tool loop on the shipped config: the prompt is 311 tokens at turn 1 and grows 57 to 59 tokens a turn, each turn's
+/// prompt the last one's without its 9-token generation prompt, then the call, the result and a new generation prompt. Cached from turn 2
+/// on, never decreasing, and every reply is the uncached one; the default policy caches nothing for five turns.
+#[test]
+fn the_shipped_policy_caches_a_tool_loop_from_turn_two_and_never_goes_back() {
+    let lens = [311usize, 368, 425, 482, 539, 596, 653, 710, 767, 824, 883, 942, 1001];
+    let conversation = words(1100, 1001);
+    let turns: Vec<Vec<u32>> = lens
+        .iter()
+        .enumerate()
+        .map(|(k, &n)| {
+            let mut p = conversation[..n - 9].to_vec();
+            p.extend((0..9).map(|i| 1 + (k as u32 * 11 + i * 3) % (VOCAB as u32 - 1))); // rendered differently next turn
+            p
+        })
+        .collect();
+    let mut e = shipped_engine();
+    let mut cached = Vec::new();
+    for t in &turns {
+        let (got, c) = serve_one(&mut e, t, true);
+        let (want, _) = serve_one(&mut e, t, false);
+        assert_eq!(got, want, "turn {}: the reply is the uncached one", cached.len() + 1);
+        cached.push(c);
+    }
+    assert_eq!(cached[0], 0);
+    assert_eq!(cached[1], 311 - 64, "turn 2 resumes at turn 1's end cut");
+    assert!(cached[1..].iter().all(|&c| c > 0), "cached from turn 2 on: {cached:?}");
+    assert!(cached.windows(2).all(|w| w[0] <= w[1]), "never decreasing: {cached:?}");
+    assert!(cached[12] + 300 >= 1001, "and at most 300 tokens behind the conversation: {cached:?}");
+    assert_eq!(e.prefix_stats().restore_failures, 0);
+
+    let mut old = engine_with(gb_engine::PrefixConfig::default());
+    let old_cached: Vec<usize> = turns.iter().map(|t| serve_one(&mut old, t, true).1).collect();
+    assert_eq!(old_cached[..5], [0, 0, 0, 0, 0], "the default policy: what the gate reported ({old_cached:?})");
 }

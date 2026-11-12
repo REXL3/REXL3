@@ -59,6 +59,8 @@ pub struct GlmBackend {
     deadline_rows: Option<usize>,
     /// The prefix cache this backend reserved (its namespace and budget), when one is enabled (`docs/PREFIX_CACHE.md`, "GLM-5.3-Flash").
     prefix: Option<PrefixCaps>,
+    /// `--prefix-cache pool`: the cache's entries keep the KV pool's idle pages (`with_pool_prefix_cache`; the budget has no pages of its own).
+    prefix_pool: bool,
     /// `REXL3_GLM_DIGEST_LOG`: the candidates handed to the engine, per row (host only; off unless set).
     digests: DigestLog,
 }
@@ -86,7 +88,18 @@ impl GlmBackend {
         let slot_images = vec![Vec::new(); m.slots];
         let chunk = m.chunk_rows();
         let digests = DigestLog::from_env(m.slots);
-        Self { m, slot_images, error: None, fatal: None, spec: None, chunk, deadline_rows: None, prefix: None, digests }
+        Self {
+            m,
+            slot_images,
+            error: None,
+            fatal: None,
+            spec: None,
+            chunk,
+            deadline_rows: None,
+            prefix: None,
+            prefix_pool: false,
+            digests,
+        }
     }
 
     /// A backend that drafts by `cfg`: its `propose_batch` returns every asking stream's drafts (an empty list for none).
@@ -104,6 +117,7 @@ impl GlmBackend {
             chunk,
             deadline_rows: None,
             prefix: None,
+            prefix_pool: false,
             digests,
         }
     }
@@ -117,6 +131,21 @@ impl GlmBackend {
         }
         self.prefix = Some(PrefixCaps { namespace, budget });
         Ok(self)
+    }
+
+    /// [`GlmBackend::with_prefix_cache`] for a pool-page cache (`--prefix-cache pool`): the budget has no pages of its own
+    /// (`plan::plan_memory_pool_cached`), the entries keep idle pages of the KV pool and the engine's room step evicts them for a live sequence
+    /// (`Backend::prefix_pool_room`). Refused for a budget that has pages: the pool would then hold pages nobody may use.
+    pub fn with_pool_prefix_cache(self, namespace: u64, budget: CacheBudget) -> Result<Self, ModelError> {
+        if budget.page_blocks != 0 {
+            return Err(ModelError::Config(format!(
+                "a pool-page prefix cache has no pages of its own, not {} (plan it with plan_memory_pool_cached)",
+                budget.page_blocks
+            )));
+        }
+        let mut b = self.with_prefix_cache(namespace, budget)?;
+        b.prefix_pool = true;
+        Ok(b)
     }
 
     /// Prefill in slices of `rows` rows (clamped to `1..=` the model's chunk capacity): one chunk of the model per `prefill_slice`. Every row's bits
@@ -233,6 +262,8 @@ impl GlmBackend {
             let anchor = if done == 0 { 0 } else { self.m.p2_anchor(slot).unwrap_or(done) };
             let inside = |x: usize| images.iter().any(|im| x > im.start && x < im.start + im.tokens);
             let cuts = prefix::cuts_for(contract, anchor, done, cuts, &inside);
+            // a DFlash2 draft absorbs the prompt's last window, or from the window before the first snapshot still to come
+            self.m.set_dflash_from(slot, super::dflash::ctx_from(n, &cuts, done));
             let cuts = &cuts[..cuts.len().min(free)];
             let plan = prefix::plan_slice(done, n, chunk, cuts, self.m.can_snapshot_inside_chunks());
             let (at, end) = (done, plan.end);
@@ -349,7 +380,8 @@ impl Backend for GlmBackend {
     }
 
     fn prefill_piece(&mut self, slot: usize, start: u64, tokens: &[u32], total: usize, candidates: usize) -> RowOutput {
-        let _ = total; // the arithmetic does not depend on the prompt's length: every row is one window row
+        // the arithmetic does not depend on the prompt's length (every row is one window row); a DFlash2 draft reads it to skip the rows
+        // before the prompt's last window
         if self.dead() {
             return nan_row(candidates);
         }
@@ -363,6 +395,7 @@ impl Backend for GlmBackend {
                 self.digests.begin(slot);
             }
             let (mut pos, n) = (start as usize, tokens.len());
+            self.m.set_dflash_from(slot, super::dflash::ctx_from(total, &[], pos));
             let mut at = 0;
             let mut last = None;
             while at < n {
@@ -410,6 +443,10 @@ impl Backend for GlmBackend {
 
     fn prefix_free_snapshots(&self) -> usize {
         self.m.prefix_free_snapshots()
+    }
+
+    fn prefix_pool_room(&self) -> Option<gb_engine::PoolRoom> {
+        (self.prefix.is_some() && self.prefix_pool).then(|| self.m.kv_pool_room())
     }
 
     fn prefix_restore(&mut self, slot: usize, handle: &PrefixHandle, len: usize) -> Result<(), String> {

@@ -77,12 +77,14 @@ mod ffi {
     use core::ffi::c_void;
     crate::launchers! {
         pub fn gb_glm_p2m_supported(hidden: i32, inter: i32, bits_gu: i32, bits_d: i32, codebook: i32) -> i32;
+        pub fn gb_glm_p2m_supported_gu(hidden: i32, inter: i32, bits_g: i32, bits_u: i32, bits_d: i32, codebook: i32) -> i32;
         pub fn gb_glm_p2m_rotate(x: *const c_void, x_dtype: i32, pick: *const c_void, spair: *const c_void, nitems: *const c_void,
                                  suh0: *const c_void, suh1: *const c_void, a0: *mut c_void, a1: *mut c_void, rows: i32, topk: i32, k: i32,
                                  e: i32, stream: *mut c_void) -> i32;
         pub fn gb_glm_p2m_gateup(a0: *const c_void, a1: *const c_void, tg: *const c_void, tu: *const c_void, items: *const c_void,
                                  nitems: *const c_void, svh_g: *const c_void, svh_u: *const c_void, suh_d: *const c_void, ad: *mut c_void,
-                                 k: i32, n: i32, bits: i32, fold: i32, shape: i32, cap: i32, limit: f32, stream: *mut c_void) -> i32;
+                                 k: i32, n: i32, bits: i32, bits_u: i32, fold: i32, shape: i32, cap: i32, limit: f32,
+                                 stream: *mut c_void) -> i32;
         pub fn gb_glm_p2m_down(ad: *const c_void, td: *const c_void, items: *const c_void, nitems: *const c_void, svh_d: *const c_void,
                                spair: *const c_void, y: *mut c_void, k: i32, n: i32, bits: i32, fold: i32, shape: i32, cap: i32,
                                stream: *mut c_void) -> i32;
@@ -135,18 +137,10 @@ pub fn runs_here() -> u64 {
     RUNS_HERE.with(|c| c.get())
 }
 
-/// Whether the P2 expert GEMMs take this bank: every expert of the layer (a single node's bank; a rank's share is step (c)), one width for
-/// gate and up, Mul1 at 2 to 5 bits, widths multiples of 128.
+/// Whether the P2 expert GEMMs take this bank: every expert of the layer (a single node's bank; a rank's share is step (c)) and
+/// [`supported_bank`]'s formats.
 pub fn supported(ex: &MoeExperts) -> bool {
-    let d = ex.dims;
-    ex.holds_every_expert()
-        && ex.bits_u == ex.bits_gu
-        && !ex.split_gu
-        // SAFETY: a pure function of its integer arguments
-        && unsafe {
-            ffi::gb_glm_p2m_supported(d.hidden as i32, d.inter as i32, ex.bits_gu as i32, ex.bits_d as i32, codebook_code(ex.codebook))
-                == 1
-        }
+    ex.holds_every_expert() && supported_bank(ex)
 }
 
 /// The first expert id of combine group 1: the TP=2 ownership's cut (`ExpertOwnership::range(E, 1, 2)` starts at `E * 1 / 2`).
@@ -213,16 +207,23 @@ pub fn pairs_with(
     pairs_on(ex, x, x_dtype, rows, s, pick, ex.dims.experts, order, true, st, mark)
 }
 
-/// Whether the P2 expert GEMMs take this bank whatever experts it holds (a TP rank's share included): one width for gate and up, Mul1 at
-/// 2 to 5 bits, widths multiples of 128.
+/// Whether the P2 expert GEMMs take this bank whatever experts it holds (a TP rank's share included): Mul1 at 2 to 6 bits, widths
+/// multiples of 128, and gate and up at one width or (a split-width subbank) at two widths one bit apart, which the gate/up GEMM runs
+/// with each matrix decoded at its own width (`csrc/glm_p2_moe.cu` `dispatch_split`). The decode path's test hook that runs equal widths
+/// as two launches (`split_gu`) is not a P2 format.
 pub fn supported_bank(ex: &MoeExperts) -> bool {
     let d = ex.dims;
-    ex.bits_u == ex.bits_gu
-        && !ex.split_gu
+    !ex.split_gu
         // SAFETY: a pure function of its integer arguments
         && unsafe {
-            ffi::gb_glm_p2m_supported(d.hidden as i32, d.inter as i32, ex.bits_gu as i32, ex.bits_d as i32, codebook_code(ex.codebook))
-                == 1
+            ffi::gb_glm_p2m_supported_gu(
+                d.hidden as i32,
+                d.inter as i32,
+                ex.bits_gu as i32,
+                ex.bits_u as i32,
+                ex.bits_d as i32,
+                codebook_code(ex.codebook),
+            ) == 1
         }
 }
 
@@ -282,7 +283,7 @@ fn pairs_bank(
     pairs_on(ex, x, x_dtype, rows, s, pick, ex.experts_local(), order, count, st, mark)
 }
 
-/// Whether the P2 expert GEMMs take every subbank of a layer ([`supported_bank`]; a split gate/up width has no P2 kernel). The refusal
+/// Whether the P2 expert GEMMs take every subbank of a layer ([`supported_bank`], split gate/up widths one bit apart included). The refusal
 /// names the first subbank that fails. Whether the subbanks hold every expert (one node) is [`run_subbanks`]'s check.
 pub fn supported_subbanks(sb: &MoeSubbanks) -> Result<(), String> {
     for (i, b) in sb.banks().iter().enumerate() {
@@ -339,6 +340,33 @@ pub fn pairs_subbanks_with(
 ) -> Result<(), CudaError> {
     // every expert on this node: a pair whose expert no subbank held would keep a stale y for the combine to read
     if !sb.ownership().is_all() || supported_subbanks(sb).is_err() {
+        return Err(INVALID);
+    }
+    for (i, b) in sb.banks().iter().enumerate() {
+        pairs_bank(b, x, x_dtype, rows, s, os, order, i == 0, st, mark)?;
+    }
+    Ok(())
+}
+
+/// The pairs stage of a tensor-parallel RANK whose share of a mixed-width layer is bound as several subbanks (RED-SNOW's layers at TP=2):
+/// for each subbank in order, the global picks in `s.pick` remapped to its local ids (-1 for every expert it does not hold, the peer's
+/// included), then plan, rotation, gate/up and down over its pairs only ([`pairs_rank`] once per subbank). Every pair whose expert this
+/// rank holds gets in `s.y_pairs` the y its expert gives in a bank of its own width, exactly as on one node ([`pairs_subbanks_with`]); the
+/// peer's pairs are not written, and the rank's combine (`CombineMode::Own`, its own group = the experts it holds under the range
+/// ownership) never reads them. One P2 expert block in [`runs`] a layer.
+#[allow(clippy::too_many_arguments)]
+pub fn pairs_subbanks_rank(
+    sb: &MoeSubbanks,
+    x: &DevBuf,
+    x_dtype: Dtype,
+    rows: usize,
+    s: &mut PrefillScratch,
+    os: &mut OwnScratch,
+    order: Order,
+    st: &Stream,
+    mark: &mut dyn FnMut(&'static str) -> Result<(), CudaError>,
+) -> Result<(), CudaError> {
+    if sb.banks().is_empty() || supported_subbanks(sb).is_err() {
         return Err(INVALID);
     }
     for (i, b) in sb.banks().iter().enumerate() {
@@ -414,6 +442,7 @@ fn pairs_on(
             d.hidden as i32,
             d.inter as i32,
             ex.bits_gu as i32,
+            ex.bits_u as i32,
             fold,
             SHAPE_GU.load(Ordering::Relaxed),
             s.cap as i32,

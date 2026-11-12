@@ -837,10 +837,22 @@ impl Cluster {
             if g.tp_port != 0 && g.tp_port == g.http_port {
                 r.err(&path, format!("tp_port and http_port are both {}", g.tp_port));
             }
-            if let Some(MemReq::PerRank(v)) = &g.min_free_gib {
-                if v.len() != g.ranks.len() {
+            // a per-rank list must name every rank of the group that uses it: the group's own, or else the top-level
+            // `memory.min_free_gib` (`min_free_for`), where a rank past the end would be checked against 0 GiB
+            match (&g.min_free_gib, &self.min_free_gib) {
+                (Some(MemReq::PerRank(v)), _) if v.len() != g.ranks.len() => {
                     r.err(&path, format!("min_free_gib has {} entries for {} ranks", v.len(), g.ranks.len()));
                 }
+                (None, Some(MemReq::PerRank(v))) if v.len() != g.ranks.len() => r.err(
+                    &path,
+                    format!(
+                        "uses memory.min_free_gib, which has {} entries for this group's {} ranks (give the group its own \
+                         min_free_gib, or make the top-level one a single number)",
+                        v.len(),
+                        g.ranks.len()
+                    ),
+                ),
+                _ => {}
             }
             if let Some(max) = self.binary_max_ranks {
                 if g.ranks.len() as u64 > max {
@@ -1171,6 +1183,30 @@ mod tests {
 
     fn has(errs: &[String], needle: &str) -> bool {
         errs.iter().any(|e| e.contains(needle))
+    }
+
+    /// A top-level per-rank `memory.min_free_gib` is held to the rank count of every group that falls back to it, as a group's
+    /// own list is: a short list left the missing ranks checked against 0 GiB, a memory check that always passed.
+    #[test]
+    fn a_top_level_per_rank_memory_list_must_name_every_rank_of_a_group_that_uses_it() {
+        let with = |mem: &str| TWO_NODE.replace(r#""pack": "/models/p","#, &format!(r#""pack": "/models/p", "memory": {mem},"#));
+        let short = with(r#"{"min_free_gib": [90]}"#);
+        assert_ne!(short, TWO_NODE);
+        assert!(
+            has(&errs(&short), "uses memory.min_free_gib, which has 1 entries for this group's 2 ranks"),
+            "{:?}",
+            errs(&short)
+        );
+        assert!(has(&errs(&with(r#"{"min_free_gib": [90, 80, 70]}"#)), "has 3 entries for this group's 2 ranks"));
+        let c = Cluster::parse(&with(r#"{"min_free_gib": [90, 80]}"#)).unwrap();
+        assert_eq!((c.min_free_for(&c.groups[0], 0), c.min_free_for(&c.groups[0], 1)), (Some(90.0), Some(80.0)));
+        let c = Cluster::parse(&with(r#"{"min_free_gib": 90}"#)).unwrap();
+        assert_eq!(c.min_free_for(&c.groups[0], 1), Some(90.0), "a single number covers any rank count");
+        // a group with its own list never reads the top-level one, so it is not held to it
+        let own = short.replace(r#""http_port": 8941}"#, r#""http_port": 8941, "min_free_gib": [90, 80]}"#);
+        assert_ne!(own, short);
+        let c = Cluster::parse(&own).unwrap();
+        assert_eq!(c.min_free_for(&c.groups[0], 1), Some(80.0));
     }
 
     #[test]

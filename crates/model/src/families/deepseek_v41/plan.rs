@@ -786,9 +786,9 @@ impl std::fmt::Display for AdmissionError {
 impl std::error::Error for AdmissionError {}
 
 /// The row depth the model's scratch is allocated at: the executor's chunk (capped at the kernel's `MAX_ROWS`) or a window, whichever is
-/// wider — the same expression [`super::model::Dsv41Model::new`] uses.
-fn model_rows(req: &AdmissionRequest) -> usize {
-    req.prefill_rows.clamp(super::model::WINDOW_ROWS, gb_cuda::dsv4_attn::MAX_ROWS)
+/// wider — [`super::model::scratch_rows`], the function [`super::model::Dsv41Model::new`] uses.
+pub(super) fn model_rows(req: &AdmissionRequest) -> usize {
+    super::model::scratch_rows(req.prefill_rows)
 }
 
 /// The kernel crate's view of this pack's geometry. A config that does not translate is refused by name at bind ([`super::device`]);

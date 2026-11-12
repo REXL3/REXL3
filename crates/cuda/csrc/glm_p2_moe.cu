@@ -253,14 +253,17 @@ struct Shape {
     static_assert(WPM * TPW == 8, "a matrix's warps cover its 8 column tiles");
 };
 
-template <int K2, int MT, int MATS>
+// K2B: matrix 1's width (MATS = 2: up), K2 matrix 0's (gate, or down). Equal for every bank but a split-width subbank (RED-SNOW 4.91 bpw:
+// one expert of gate 6 / up 5 bits); a stage holds matrix 0's A rows and tiles, then matrix 1's, each at its own width.
+template <int K2, int MT, int MATS, int K2B = K2>
 __host__ __device__ constexpr int stage_bytes() {
-    return MATS * (16 * MT * kBK * 2 + (kBK / 16) * 8 * tile_words<K2>() * 4);
+    return (16 * MT * kBK * 2 + (kBK / 16) * 8 * tile_words<K2>() * 4) +
+           (MATS == 2 ? 16 * MT * kBK * 2 + (kBK / 16) * 8 * tile_words<K2B>() * 4 : 0);
 }
 
-template <int K2, int MT, int MATS, int ST>
+template <int K2, int MT, int MATS, int ST, int K2B = K2>
 __host__ __device__ constexpr int smem_bytes() {
-    constexpr int ring = ST * stage_bytes<K2, MT, MATS>();
+    constexpr int ring = ST * stage_bytes<K2, MT, MATS, K2B>();
     constexpr int epi = MATS * 16 * MT * kLds * 4;
     return ring > epi ? ring : epi;
 }
@@ -283,19 +286,23 @@ struct GemmArgs {
 };
 
 // Block (x = 128-column block, y = item of the class). See the file comment for the arithmetic; MT is the class's most m16 tiles, the
-// item's own count `tiles` (<= MT) is a compile-time constant of the loop (MA) so no MMA is predicated.
-template <int K2, int MT, int MATS, bool FOLD, int NW, int ST>
+// item's own count `tiles` (<= MT) is a compile-time constant of the loop (MA) so no MMA is predicated. K2B is matrix 1's width (up, at
+// MATS = 2; = K2 for every uniform bank): a warp decodes its own matrix's tiles at its matrix's width, nothing else differs (the same A
+// fragments, MMAs, K order and epilogue), so a pair of a split-width expert gets the arithmetic of P2 at each matrix's width.
+template <int K2, int MT, int MATS, bool FOLD, int NW, int ST, int K2B = K2>
 __global__ void __launch_bounds__(NW * 32, MATS == 1 ? 2 : 1) gemm_kernel(const GemmArgs g) {
     using S = Shape<MATS, NW>;
     constexpr int TPW = S::TPW, WPM = S::WPM;
     constexpr int kThreads = NW * 32;
     constexpr int kStages = ST;
-    constexpr int TW = tile_words<K2>();
-    constexpr int LW = lane_words<K2>();
+    static_assert(MATS == 2 || K2B == K2, "one matrix has one width");
+    constexpr int TW = tile_words<K2>();                // matrix 0
+    constexpr int TWB = tile_words<K2B>();              // matrix 1
     constexpr int A_BYTES = 16 * MT * kBK * 2;          // one matrix's A stage
-    constexpr int B_WORDS = (kBK / 16) * 8 * TW;        // one matrix's B stage: 4 k tiles x 8 column tiles
-    constexpr int MSTAGE = A_BYTES + B_WORDS * 4;       // one matrix's share of a stage
-    constexpr int STAGE = MATS * MSTAGE;
+    constexpr int B_WORDS = (kBK / 16) * 8 * TW;        // matrix 0's B stage: 4 k tiles x 8 column tiles
+    constexpr int B_WORDS_B = (kBK / 16) * 8 * TWB;     // matrix 1's
+    constexpr int MSTAGE = A_BYTES + B_WORDS * 4;       // matrix 0's share of a stage (matrix 1's starts after it)
+    constexpr int STAGE = MATS == 2 ? MSTAGE + A_BYTES + B_WORDS_B * 4 : MSTAGE;
     extern __shared__ __align__(128) unsigned char smem[];
 
     if ((int)blockIdx.y >= *g.nitems) return;  // uniform per block
@@ -308,7 +315,7 @@ __global__ void __launch_bounds__(NW * 32, MATS == 1 ? 2 : 1) gemm_kernel(const 
     const int KC = K / kBK;
     const int tiles_n = N / 16;
     const uint32_t* T0 = reinterpret_cast<const uint32_t*>(g.t0[e]) + (size_t)nb * 8 * TW;
-    const uint32_t* T1 = MATS == 2 ? reinterpret_cast<const uint32_t*>(g.t1[e]) + (size_t)nb * 8 * TW : T0;
+    const uint32_t* T1 = MATS == 2 ? reinterpret_cast<const uint32_t*>(g.t1[e]) + (size_t)nb * 8 * TWB : T0;
 
     auto stage_a = [&](int s, int m) { return reinterpret_cast<half*>(smem + s * STAGE + m * MSTAGE); };
     auto stage_b = [&](int s, int m) { return reinterpret_cast<uint32_t*>(smem + s * STAGE + m * MSTAGE + A_BYTES); };
@@ -327,15 +334,17 @@ __global__ void __launch_bounds__(NW * 32, MATS == 1 ? 2 : 1) gemm_kernel(const 
                 cp_async16(stage_a(s, m) + a_off(r, c), src, ok);
             }
         }
-        constexpr int BCH = B_WORDS / 4;                  // 16-byte chunks a matrix
-        constexpr int BROW = 8 * TW / 4;                  // chunks a k tile
+        constexpr int BCH = B_WORDS / 4;                  // 16-byte chunks of matrix 0
+        constexpr int BCH_B = MATS == 2 ? B_WORDS_B / 4 : 0;  // of matrix 1
 #pragma unroll
-        for (int i = 0; i < (MATS * BCH + kThreads - 1) / kThreads; ++i) {
+        for (int i = 0; i < (BCH + BCH_B + kThreads - 1) / kThreads; ++i) {
             const int idx = i * kThreads + t;
-            if (idx < MATS * BCH) {
-                const int m = idx / BCH, rem = idx % BCH, kl = rem / BROW, w = rem % BROW;
-                const uint32_t* src = (m ? T1 : T0) + (size_t)(kc * (kBK / 16) + kl) * tiles_n * TW + w * 4;
-                cp_async16(stage_b(s, m) + kl * 8 * TW + w * 4, src, true);
+            if (idx < BCH + BCH_B) {
+                const int m = idx >= BCH, rem = m ? idx - BCH : idx;
+                const int tw = m ? TWB : TW, brow = 8 * tw / 4;  // a k tile's chunks at this matrix's width
+                const int kl = rem / brow, w = rem % brow;
+                const uint32_t* src = (m ? T1 : T0) + (size_t)(kc * (kBK / 16) + kl) * tiles_n * tw + w * 4;
+                cp_async16(stage_b(s, m) + kl * 8 * tw + w * 4, src, true);
             }
         }
     };
@@ -378,11 +387,23 @@ __global__ void __launch_bounds__(NW * 32, MATS == 1 ? 2 : 1) gemm_kernel(const 
 #pragma unroll
             for (int kk = 0; kk < kBK / 16; ++kk) {
                 uint32_t b[TPW][2][2];
+                // this warp's matrix's tiles at that matrix's width (the warp's matrix is uniform per warp)
+                auto decode_b = [&](auto k2c) {
+                    constexpr int KX = decltype(k2c)::value;
+                    constexpr int TWX = tile_words<KX>();
 #pragma unroll
-                for (int j = 0; j < TPW; ++j) {
-                    uint32_t w[LW];
-                    load_lane_words<K2>(sb + (kk * 8 + wm * TPW + j) * TW, lane, w);
-                    decode_lane<K2, CB_MUL1>(w, lane, b[j][0], b[j][1]);
+                    for (int j = 0; j < TPW; ++j) {
+                        uint32_t w[lane_words<KX>()];
+                        load_lane_words<KX>(sb + (kk * 8 + wm * TPW + j) * TWX, lane, w);
+                        decode_lane<KX, CB_MUL1>(w, lane, b[j][0], b[j][1]);
+                    }
+                };
+                if constexpr (K2B == K2) {
+                    decode_b(std::integral_constant<int, K2>{});
+                } else if (mat) {
+                    decode_b(std::integral_constant<int, K2B>{});
+                } else {
+                    decode_b(std::integral_constant<int, K2>{});
                 }
 #pragma unroll
                 for (int p = 0; p < MA; ++p) {
@@ -550,36 +571,36 @@ __global__ void __launch_bounds__(32) combine_kernel(const float* __restrict__ y
 
 // ---- launch plumbing ----------------------------------------------------------------------------------------------------------------
 
-template <int K2, int MT, int MATS, bool FOLD, int NW, int ST>
+template <int K2, int MT, int MATS, bool FOLD, int NW, int ST, int K2B = K2>
 int launch(const GemmArgs& a, int cap, cudaStream_t st) {
-    constexpr int sm = smem_bytes<K2, MT, MATS, ST>();
+    constexpr int sm = smem_bytes<K2, MT, MATS, ST, K2B>();
     static_assert(sm <= 101376, "a block's shared memory must fit the 99 KB an SM gives one");
     static bool attr = false;  // idempotent; a race between host threads sets the same value twice
     if (!attr) {
         const cudaError_t e =
-            cudaFuncSetAttribute(gemm_kernel<K2, MT, MATS, FOLD, NW, ST>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
+            cudaFuncSetAttribute(gemm_kernel<K2, MT, MATS, FOLD, NW, ST, K2B>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
         if (e != cudaSuccess) return (int)e;
         attr = true;
     }
     const dim3 grid((unsigned)(a.N / 128), (unsigned)cap);
-    gemm_kernel<K2, MT, MATS, FOLD, NW, ST><<<grid, NW * 32, sm, st>>>(a);
+    gemm_kernel<K2, MT, MATS, FOLD, NW, ST, K2B><<<grid, NW * 32, sm, st>>>(a);
     return GB_CHECK_LAUNCH();
 }
 
 // The three item classes of P1's plan, heaviest first (its blocks fill the machine, the single-tile ones fill in behind): 3-4 tiles at
 // MT = 4, 2 tiles at MT = 2, 1 tile at MT = 1.
-template <int K2, int MATS, bool FOLD, int NW, int ST>
+template <int K2, int MATS, bool FOLD, int NW, int ST, int K2B = K2>
 int launch_classes(const GemmArgs& a, int cap, cudaStream_t st) {
     GemmArgs c = a;
     c.items = a.items + 2 * cap;
     c.nitems = a.nitems + 2;
-    int rc = launch<K2, 4, MATS, FOLD, NW, ST>(c, cap, st);
+    int rc = launch<K2, 4, MATS, FOLD, NW, ST, K2B>(c, cap, st);
     c.items = a.items + cap;
     c.nitems = a.nitems + 1;
-    if (!rc) rc = launch<K2, 2, MATS, FOLD, NW, ST>(c, cap, st);
+    if (!rc) rc = launch<K2, 2, MATS, FOLD, NW, ST, K2B>(c, cap, st);
     c.items = a.items;
     c.nitems = a.nitems;
-    if (!rc) rc = launch<K2, 1, MATS, FOLD, NW, ST>(c, cap, st);
+    if (!rc) rc = launch<K2, 1, MATS, FOLD, NW, ST, K2B>(c, cap, st);
     return rc;
 }
 
@@ -607,6 +628,25 @@ int launch_shape(int shape, const GemmArgs& a, int cap, cudaStream_t st) {
     }
 }
 
+// Gate and up at two widths (a split-width subbank): gate K2, up K2B, the default block shape only (8 warps, 3 stages; the shape is never
+// a bit, so any `shape` asked for runs as the default here), widths one bit apart (the pairs the packs hold; `gb_glm_p2m_supported_gu`).
+int dispatch_split(int bits_g, int bits_u, int fold, const GemmArgs& a, int cap, cudaStream_t st) {
+#define GP2S(BG_, BU_)                                                                                       \
+    if (bits_g == BG_ && bits_u == BU_)                                                                       \
+        return fold ? launch_classes<2 * BG_, 2, true, 8, 3, 2 * BU_>(a, cap, st)                             \
+                    : launch_classes<2 * BG_, 2, false, 8, 3, 2 * BU_>(a, cap, st);
+    GP2S(2, 3)
+    GP2S(3, 2)
+    GP2S(3, 4)
+    GP2S(4, 3)
+    GP2S(4, 5)
+    GP2S(5, 4)
+    GP2S(5, 6)
+    GP2S(6, 5)
+#undef GP2S
+    return (int)cudaErrorInvalidValue;
+}
+
 template <int MATS>
 int dispatch(int bits, int fold, int shape, const GemmArgs& a, int cap, cudaStream_t st) {
 #define GP2M(B_, K2_) \
@@ -616,6 +656,7 @@ int dispatch(int bits, int fold, int shape, const GemmArgs& a, int cap, cudaStre
         GP2M(3, 6)
         GP2M(4, 8)
         GP2M(5, 10)
+        GP2M(6, 12)
         default: return (int)cudaErrorInvalidValue;
     }
 #undef GP2M
@@ -625,12 +666,21 @@ bool dtype_ok(int d) { return d >= 0 && d <= 2; }
 
 }  // namespace
 
-// Whether the P2 expert GEMMs take a layer: hidden and expert widths multiples of 128, the Mul1 codebook at 2 to 5 bits (GLM's packs: 2
-// and 3 bits on the 2.25 bpw pack, 4 on its NextN layer, 4 and 5 on sc_4.10bpw).
+// Whether the P2 expert GEMMs take a layer: hidden and expert widths multiples of 128, the Mul1 codebook at 2 to 6 bits (GLM's packs: 2
+// and 3 bits on the 2.25 bpw pack, 4 on its NextN layer, 4 and 5 on sc_4.10bpw; 4, 5 and 6 on the RED-SNOW 4.91 bpw pack). Six bits is
+// the same kernel at K2 = 12: the decode path's own trellis decoder takes it, and a stage of the gate/up block at MT = 4 is 28,672 bytes
+// (three stages 86,016, under the 101,376 a block gets; the four-stage shape is compiled only where it fits, `launch_shape`).
 GB_EXPORT int gb_glm_p2m_supported(int hidden, int inter, int bits_gu, int bits_d, int codebook) {
     const bool shape = hidden > 0 && inter > 0 && hidden % 128 == 0 && inter % 128 == 0;
-    const bool b = bits_gu >= 2 && bits_gu <= 5 && bits_d >= 2 && bits_d <= 5;
+    const bool b = bits_gu >= 2 && bits_gu <= 6 && bits_d >= 2 && bits_d <= 6;
     return shape && b && codebook == CB_MUL1;
+}
+
+// Whether the P2 gate/up GEMM takes gate at `bits_g` and up at `bits_u` (and down at `bits_d`): one width for both (every bank but a
+// split-width subbank), or two widths one bit apart in 2..6 (`dispatch_split`; RED-SNOW 4.91 bpw's layer 13, expert 80: gate 6 / up 5).
+GB_EXPORT int gb_glm_p2m_supported_gu(int hidden, int inter, int bits_g, int bits_u, int bits_d, int codebook) {
+    const bool u = bits_u == bits_g || ((bits_u - bits_g == 1 || bits_g - bits_u == 1) && bits_u >= 2 && bits_u <= 6);
+    return gb_glm_p2m_supported(hidden, inter, bits_g, bits_d, codebook) && u;
 }
 
 // Bytes of the plan's workspace for `rows` rows of `topk` picks over E experts (the chunks' counts and the experts' offsets).
@@ -675,16 +725,18 @@ GB_EXPORT int gb_glm_p2m_rotate(const void* x, int x_dtype, const void* pick, co
 }
 
 // Gate and up with the SwiGLU epilogue: ad [padded rows][N] fp16 (the down projection's A rows). K = the model width, N = the expert width.
+// bits: gate's width; bits_u: up's (= bits but for a split-width subbank).
 // items / nitems: P1's plan (3 classes of `cap` slots). fold: the K order (1 fold128, 0 chain). limit <= 0: no clamp.
 GB_EXPORT int gb_glm_p2m_gateup(const void* a0, const void* a1, const void* tg, const void* tu, const void* items, const void* nitems,
-                                const void* svh_g, const void* svh_u, const void* suh_d, void* ad, int K, int N, int bits, int fold,
-                                int shape, int cap, float limit, void* stream) {
+                                const void* svh_g, const void* svh_u, const void* suh_d, void* ad, int K, int N, int bits, int bits_u,
+                                int fold, int shape, int cap, float limit, void* stream) {
     if (K <= 0 || N <= 0 || K % 128 || N % 128 || cap < 1 || !a0 || !a1 || !tg || !tu || !items || !nitems || !svh_g || !svh_u || !suh_d ||
         !ad)
         return (int)cudaErrorInvalidValue;
     GemmArgs a{static_cast<const half*>(a0), static_cast<const half*>(a1), static_cast<const uint64_t*>(tg), static_cast<const uint64_t*>(tu),
                static_cast<const int4*>(items), static_cast<const int*>(nitems), static_cast<const half*>(svh_g),
                static_cast<const half*>(svh_u), static_cast<const half*>(suh_d), static_cast<half*>(ad), nullptr, nullptr, K, N, limit};
+    if (bits_u != bits) return dispatch_split(bits, bits_u, fold, a, cap, gb_stream(stream));
     return dispatch<2>(bits, fold, shape, a, cap, gb_stream(stream));
 }
 

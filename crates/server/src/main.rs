@@ -112,6 +112,8 @@ struct Args {
     mock: MockOptions,
     /// `--prefix-cache on|off`
     prefix_cache: Option<bool>,
+    /// `--prefix-cache pool` (the cache on, kept in the KV pool's idle pages).
+    prefix_pool: bool,
     /// `--prefix-cache-mib N`
     prefix_cache_mib: Option<u64>,
     /// `--tp-ranks`, `--tp-rank`, `--tp-peer` and the `REXL3_TP_*` variables, resolved (`None`: one process).
@@ -214,6 +216,7 @@ fn parse_from(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         exit_after: 10,
         mock: MockOptions::default(),
         prefix_cache: None,
+        prefix_pool: false,
         prefix_cache_mib: None,
         tp: None,
     };
@@ -408,10 +411,12 @@ fn parse_from(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--exit-after" => a.exit_after = val("--exit-after")?.parse().map_err(|_| "--exit-after must be a number")?,
             "--mock" => a.mock = MockOptions::parse(&val("--mock")?)?,
             "--prefix-cache" => {
-                a.prefix_cache = Some(match val("--prefix-cache")?.as_str() {
-                    "on" => true,
+                let v = val("--prefix-cache")?;
+                a.prefix_pool = v == "pool";
+                a.prefix_cache = Some(match v.as_str() {
+                    "on" | "pool" => true,
                     "off" => false,
-                    other => return Err(format!("--prefix-cache is `on` or `off`, got `{other}`")),
+                    other => return Err(format!("--prefix-cache is `on`, `off` or `pool`, got `{other}`")),
                 })
             }
             "--prefix-cache-mib" => {
@@ -563,6 +568,7 @@ fn serve_options(a: &Args, vision_slot: Option<gb_model::serve::VisionSlot>) -> 
     o.verify_pack = a.verify_pack;
     o.spec_tree = a.spec_tree;
     o.tp = a.tp.clone().filter(|t| t.is_group());
+    o.prefix_pool = a.prefix_pool;
     o.prefix_cache = match (a.prefix_cache, a.prefix_cache_mib) {
         (_, Some(0)) | (Some(false), _) => gb_model::serve::PrefixCacheOption::Off,
         (_, Some(mib)) => gb_model::serve::PrefixCacheOption::Mib(mib),
@@ -580,6 +586,9 @@ fn start_engine(
     let cfg = runtime_config(a);
     match a.backend.as_str() {
         "mock" => {
+            if a.prefix_pool {
+                return Err("--prefix-cache pool: the mock backend's cache has pages of its own; use --prefix-cache on".into());
+            }
             let (slots, drafting, mock) = (a.slots, a.drafting && a.spec.drafts(), a.mock.clone());
             // like the real engine, the KV pool defaults to one full-length context (`--kv-tokens` shrinks it), plus the co-tenancy headroom
             let kv_tokens = (a.kv_tokens.unwrap_or(a.max_model_len) + a.kv_headroom_tokens) as u64;
@@ -653,17 +662,27 @@ fn start_engine(
 /// `--print-fingerprints`: each pack's fingerprint and whether this release was validated on the pair.
 fn print_fingerprints(a: &Args) -> Result<(), String> {
     let open = |d: &std::path::Path| gb_model::pack::Pack::open(d).map_err(|e| format!("{}: {e}", d.display()));
-    let t = gb_model::fingerprint::fingerprint(&open(&a.model)?.ck);
-    let d = match &a.draft {
-        Some(dir) => Some(gb_model::fingerprint::fingerprint(&open(dir)?.ck)),
+    let target = open(&a.model)?;
+    let t = gb_model::fingerprint::fingerprint(&target.ck);
+    let draft = match &a.draft {
+        Some(dir) => Some(open(dir)?),
         None => None,
     };
+    let d = draft.as_ref().map(|p| gb_model::fingerprint::fingerprint(&p.ck));
     println!("target    {t}");
-    if let Some(d) = &d {
+    if let (Some(d), Some(p)) = (&d, &draft) {
         println!("draft     {d}");
+        println!("draft_check {}", gb_model::serve::draft_structure_line(&target, p));
     }
-    // the one validation the serve paths of every family use (a text-only pack is an entry of its own, not a pair)
-    println!("{}", gb_model::fingerprint::validation_line(&t, d.as_deref()));
+    // the one validation the serve paths of every family use (`serve::pack_verdict`: the target by the list, a draft by its structure)
+    let structural = draft.as_ref().map(|p| gb_model::draft::structural_check(p, &target.ck.config));
+    let line = match gb_model::serve::pack_verdict(&t, d.as_deref().zip(structural.as_ref())) {
+        // a draft validated by its structure: the target's entry
+        Ok(v) if v.draft.as_deref().is_some_and(|x| x.starts_with("structural")) => format!("validated {}", v.pack),
+        // a listed pair, a target alone, or a refusal: the list's own line
+        _ => gb_model::fingerprint::validation_line(&t, d.as_deref()),
+    };
+    println!("{line}");
     Ok(())
 }
 
@@ -921,10 +940,12 @@ async fn serve_main() {
     let bound = listener.local_addr().map(|x| x.to_string()).unwrap_or(addr);
     let (handle, engine_thread) = start_engine(&a, tok.vocab, vision_slot.clone()).unwrap_or_else(|e| fail(&e));
     handle.metrics.observability.slots.store(a.slots as u64, std::sync::atomic::Ordering::Relaxed);
+    let reply_stop = gb_server::http::reply_stop_set(&tok, &*format);
     let state = Arc::new(AppState {
         handle,
         tok,
         format,
+        reply_stop,
         defaults: GenDefaults::from_dir(&a.model),
         model_name: a.name.clone(),
         model_aliases: a.model_aliases.clone(),
@@ -1179,6 +1200,25 @@ mod tests {
     fn opts(args: &[&str]) -> gb_model::serve::ServeOptions {
         let a = parse_from(args.iter().map(|s| s.to_string())).unwrap();
         serve_options(&a, None)
+    }
+
+    #[test]
+    fn the_pool_page_prefix_cache_is_a_value_of_the_prefix_cache_flag() {
+        let o = opts(&["--model", "/m", "--prefix-cache", "pool"]);
+        assert!(o.prefix_pool);
+        assert_eq!(o.prefix_cache, gb_model::serve::PrefixCacheOption::On);
+        // the other values are as they were, and never the pool
+        for (v, want) in [("on", gb_model::serve::PrefixCacheOption::On), ("off", gb_model::serve::PrefixCacheOption::Off)] {
+            let o = opts(&["--model", "/m", "--prefix-cache", v]);
+            assert!(!o.prefix_pool);
+            assert_eq!(o.prefix_cache, want);
+        }
+        assert!(!opts(&["--model", "/m"]).prefix_pool);
+        // a size with the pool is a contradiction the starter refuses by name (`serve::refuse_unbuilt_pool_cache`): it reaches it as `Mib`
+        let o = opts(&["--model", "/m", "--prefix-cache", "pool", "--prefix-cache-mib", "1024"]);
+        assert!(o.prefix_pool && o.prefix_cache == gb_model::serve::PrefixCacheOption::Mib(1024));
+        let e = parse_from(["--model", "/m", "--prefix-cache", "both"].iter().map(|s| s.to_string())).err().unwrap();
+        assert!(e.contains("`pool`"), "{e}");
     }
 
     #[test]

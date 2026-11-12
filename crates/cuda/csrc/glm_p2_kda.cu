@@ -188,18 +188,18 @@ __global__ void __launch_bounds__(VS * 2) chunk_kernel(const float* __restrict__
             for (int r = 0; r < C; ++r) {
                 const bool ok = r < n;
                 const size_t o = ((size_t)(r0 + r) * heads + head) * D + tid;
-                pg[r] = ok ? g[o] : 1.0f;
-                pk[r] = ok ? k[o] : 0.0f;
-                pq[r] = ok ? q[o] : 0.0f;
+                pg[r] = ok ? __ldg(g + o) : 1.0f;
+                pk[r] = ok ? __ldg(k + o) : 0.0f;
+                pq[r] = ok ? __ldg(q + o) : 0.0f;
             }
         }
         if (vload) {
 #pragma unroll
             for (int e = 0; e < VPT; ++e) {
                 const int idx = vt * VPT + e, r = idx / VS, jj = idx % VS;
-                pv[e] = r < n ? reinterpret_cast<const unsigned short*>(v)[((size_t)(r0 + r) * heads + head) * D + j0 + jj] : (unsigned short)0;
+                pv[e] = r < n ? __ldg(&reinterpret_cast<const unsigned short*>(v)[((size_t)(r0 + r) * heads + head) * D + j0 + jj]) : (unsigned short)0;
             }
-            if (vt < C) pb = vt < n ? beta[(size_t)(r0 + vt) * heads + head] : 0.0f;
+            if (vt < C) pb = vt < n ? __ldg(&beta[(size_t)(r0 + vt) * heads + head]) : 0.0f;
         }
     };
     fetch(0, min(C, rows));

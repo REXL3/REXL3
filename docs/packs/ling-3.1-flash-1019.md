@@ -1,6 +1,6 @@
 # Pack sheet: `ling31-flash-1019-sage-1.51`
 
-Checked against model version `v1` (sealed approval `approve-ling31-flash-1019-sage-1.51-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `ling31-flash-1019-sage-1.51-1.tar.gz`), brought in by #PR. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-ling31-flash-1019-sage-1.51-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `ling31-flash-1019-sage-1.51-1.tar.gz`), brought in by #153. This version is not yet part of a product release; the release tag is set when a release manifest names it.
 
 ## 1. Identity
 

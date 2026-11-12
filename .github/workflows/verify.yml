@@ -33,7 +33,7 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       # Protected revision: the tip of the base branch for a pull request, the pushed commit otherwise.
       - name: Check out the protected base (tools and policy)

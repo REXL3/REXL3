@@ -1,14 +1,14 @@
 # Pack sheet: `nemotron35-super-vl-sage-3.85`
 
-Checked against release `v0.1.0` (source commit `799fa750f8eb`, archive `nemotron35-super-vl-sage-3.85-1.tar.gz`).
+Checked against version 2 (dev approval `approve-nemotron35-super-vl-sage-3.85-2`, source commit `75031112ba12`, engine release `engine-v0.1.1-75031112`, archive `nemotron35-super-vl-sage-3.85-2.tar.gz`). Version 1 (release `v0.1.0`, engine commit `799fa750f8eb`) stays in the tree unchanged. The runtime files of the two versions are identical (`profile.json`, `model.lock.json`, `KNOWN_ISSUES.md`); version 2 is the same pack and profile requalified on the v0.1.1 engine.
 
 ## 1. Identity
 
 | Field | Value | Source |
 | --- | --- | --- |
 | Runtime id | `nemotron35-super-vl-sage-3.85` | `profile.json` |
-| Versions | `v1` (latest) | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` |
-| Release tag | `v0.1.0` (one product release; there is no per-runtime tag) | `approval.json` |
+| Versions | `v1` (v0.1.0), `v2` (latest) | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` |
+| Release tag | version 1 shipped in `v0.1.0`; version 2 ships in the next product release (there is no per-runtime tag) | `approval.json` |
 | What it serves | Nemotron-3.5-Super-VL (`NemotronH_Omni_Reasoning_V3`), EXL3 3.85 bits per weight; speculation uses the MTP head that ships in the pack | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `vcruz305/Nemotron-Super-VL-EXL3-3.85bpw` at `3963815246eda892a4c3b88e18d0d1c39288c8e0` | `model.lock.json` |
 | Draft or second model | none | `model.lock.json` |
@@ -40,35 +40,37 @@ Source: `profile.json` `capabilities`, `KNOWN_ISSUES.md`, and the `GET /v1/model
 
 ## 4. Sampling and output defaults
 
-The pack's `generation_config.json` (at the pinned revision) sets temperature 1.0 and top_p 0.95; it states no `top_k`. The server's fallback `top_k` of 20 applies when a request leaves it out, and that value is not sourced from the pack or the base model. The server applies each value only when a request leaves that field out, and refuses non-zero presence, frequency and repetition penalties. Because a request that names nothing does not think, and a thinking request can spend its whole output budget on thinking, set `max_tokens` generously when you turn thinking on; the qualification run used a text budget of 65,536 tokens and 8,192 for the tool-calling suite, at temperature 0 for the text suites and 0.001 for the tool-calling suite. Sources: the pack's `generation_config.json`, the v0.1.0 model release page, `quality/q200/summary.json` in the evidence.
+The pack's `generation_config.json` (at the pinned revision) sets temperature 1.0 and top_p 0.95; it states no `top_k`. The server's fallback `top_k` of 20 applies when a request leaves it out, and that value is not sourced from the pack or the base model. The server applies each value only when a request leaves that field out, and refuses non-zero presence, frequency and repetition penalties. Because a request that names nothing does not think, and a thinking request can spend its whole output budget on thinking, set `max_tokens` generously when you turn thinking on; the quality run (carried from version 1) used a text budget of 65,536 tokens and 8,192 for the tool-calling suite, at temperature 0 for the text suites and 0.001 for the tool-calling suite. Sources: the pack's `generation_config.json`, the v0.1.0 model release page, `quality/q200/summary.json` in the evidence.
 
 ## 5. Behaviour to expect
 
 - A request that names no reasoning setting does not think. The pack's chat template would think by default; this server does not, unless the request asks (the qualification sent `enable_thinking: true` with `reasoning_effort: xhigh`).
 - Thinking can use the whole output budget. In the quality run (effort `xhigh`, 65,536-token budget) 8 of 40 IFEval prompts ran to the budget without finishing and were counted incorrect (`quality/q200/summary.json`).
-- A cold request that fills the window is slow: a prompt of 1,046,622 tokens took about 1,777 s (about 30 minutes) to prefill in the qualification run, which is why the profile sets a 7,200 s request timeout. The 16 slots share one KV pool sized at the window; a request that does not fit waits in order and is failed after 6,900 s in the queue (`KNOWN_ISSUES.md`).
+- A cold request that fills the window is slow: a prompt of 1,046,622 tokens took about 1,777 s (about 30 minutes) to prefill in the version 1 qualification run, and version 2 measured the same full-window prompt speed (section 6), which is why the profile sets a 7,200 s request timeout. The 16 slots share one KV pool sized at the window; a request that does not fit waits in order and is failed after 6,900 s in the queue (`KNOWN_ISSUES.md`).
 - Image input is limited to 3,328 tokens per image. The refusal above that limit was not exercised in the v0.1.0 qualification (`KNOWN_ISSUES.md`).
 - Video files are refused; frame lists are accepted but not covered by the qualification (section 3).
-- A 24-hour soak was not run for v0.1.0 (`KNOWN_ISSUES.md`).
-- Free memory at the full window: the lowest reading during the baseline runs was about 27 GiB, with no swap (section 6).
-- The sealed `profile.json` still records `qualification.state: unverified`, and `KNOWN_ISSUES.md` describes the frozen configuration and lists as open some items the release gates have since run. The qualification of this release is the evidence asset `evidence.tar.gz` (section 6). Where the two differ, the release evidence is the record of what was measured on this commit.
+- A 24-hour soak was not run (`KNOWN_ISSUES.md`).
+- Free memory at the full window: the lowest reading during the version 2 baseline runs was about 27.2 GiB, with no swap (section 6).
+- The sealed `profile.json` still records `qualification.state: unverified`, and `KNOWN_ISSUES.md` describes the frozen configuration and lists as open some items the release gates have since run. The qualification of version 2 is its evidence asset `evidence.tar.gz` (section 6). Where the two differ, the release evidence is the record of what was measured on this commit.
 
 ## 6. Measured behaviour
 
-All figures are from this release's own qualification, recorded in `evidence.tar.gz` (the release asset): one GB10 node, engine `0.1.0` at commit `799fa750f8eb`, 16 slots, window 1,048,576, vision on.
+All figures are from version 2's qualification, recorded in `evidence.tar.gz` (the dev approval's evidence asset): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), 16 slots, window 1,048,576, vision on. Seven gates ran on that binary; `context` and `quality` are carried from version 1's sealed qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
 
 | Quantity | Value | Recorded in |
 | --- | --- | --- |
-| Generation speed, one stream (median of 3 runs) | 50.8 tok/s (50.3 to 50.8); floor 42 | `performance/performance-cases.json` |
-| Prompt speed at 50% window fill, about 524,000 tokens (median of 3) | 879 tok/s (878 to 883); floor 683 | same |
-| Prompt speed at full window fill, about 1,047,000 tokens (median of 3) | 589 tok/s (588 to 589); floor 471 | same |
-| Lowest free memory during the baseline runs | 26.93 to 27.04 GiB, no swap | `performance/runs/run-0N-RESULT.json` |
-| Context gate | 16 of 16 rows pass with prompts of 130,048, 261,120, 523,264 and 1,047,552 tokens | `single/summary.json` |
-| Exactness | 67 of 67 cases pass (drafted equals serial; chunked prefill equals whole prefill) | `exactness/exactness-cases.json` |
-| Prefix cache | gate passes; a shared prefix is served from the cache and the reply is identical (84 checks, 0 failures) | `exactness/prefix-cache/check_prefix_cache.log` |
-| Release gates | all nine PASS in one composed pass (doctor 4/4, lifecycle 10/10, capability 5/5, vision 3/3, context 16/16, exactness 67/67, prefix cache 1/1, performance 4/4, quality 5/5) | `single/summary.json` |
+| Generation speed, one stream (median of 3 runs, each 5 streamed replies, speculation on, short context) | 50.1 tok/s (50.1 to 50.2); floor 42 | `v011/performance/performance-cases.json` |
+| Prompt speed at 50% window fill, about 524,000 tokens (median of 3, cold) | 881 tok/s (880 to 882); floor 683 | same |
+| Prompt speed at full window fill, about 1,047,000 tokens (median of 3, cold) | 589 tok/s (588 to 589); floor 471 | same |
+| Draft acceptance during the baseline runs | 0.85 | `v011/performance/runs/run-0N-RESULT.json` |
+| Lowest free memory during the baseline runs | 27.16 to 27.18 GiB, no swap | same |
+| Boot to ready | 16.6 s first boot, 28.4 s restart | `v011/lifecycle/lifecycle-cases.json` |
+| Exactness | 68 of 68 cases pass (drafted equals serial; chunked prefill equals whole prefill up to a 1,047,552-token prompt) | `v011/exactness/exactness-cases.json` |
+| Prefix cache | gate passes; a shared prefix is served from the cache and the reply is identical (84 checks, 0 failures) | `v011/exactness/prefix-cache/check_prefix_cache.log` |
+| Context gate (carried from version 1) | 16 of 16 rows pass with prompts of 130,048, 261,120, 523,264 and 1,047,552 tokens | version 1 evidence, `single/summary.json` |
+| Release gates | all PASS in one composed pass: fresh on the v0.1.1 binary — doctor 4/4, lifecycle 10/10, capability 5/5, boundary 5/5, vision 3/3, exactness 68/68, prefix cache 1/1, performance 4/4, performance smoke 3/3; carried — context 16/16, quality 5/5 | `v011/composed/summary.json` |
 
-Quality (the Q200 suite at reasoning effort `xhigh`, text budget 65,536 tokens, tool-calling budget 8,192; temperature 0, and 0.001 for tool calling), recorded in `quality/quality-cases.json`. These are this release's regression baseline, not a claim of absolute quality:
+Quality, carried from version 1 (the Q200 suite at reasoning effort `xhigh`, text budget 65,536 tokens, tool-calling budget 8,192; temperature 0, and 0.001 for tool calling; one GB10, engine `799fa750f8eb`). These are this pack's regression baseline, not a claim of absolute quality:
 
 | Suite | Correct | Accuracy |
 | --- | --- | --- |
@@ -78,20 +80,20 @@ Quality (the Q200 suite at reasoning effort `xhigh`, text budget 65,536 tokens, 
 | hard_reasoning | 20 of 20 (reviewed manually by a review agent independent of the model, as recorded in the evidence) | 100% |
 | BFCL tool calling (20 hard cases) | 15 of 20 | 75.0% |
 
-No figure from an earlier version or an earlier build is carried here.
+Only `context` and `quality` are carried; every other figure above was measured on the v0.1.1 binary.
 
 ## 7. Limits of this release
 
 - One GB10 node only; no tensor-parallel or two-node profile.
 - Images up to 3,328 tokens each; video files and audio are refused; video as image frames is not covered by the qualification.
 - Audio and constrained JSON response formats are refused (section 3).
-- The nine gates are the qualification of this release; no 24-hour soak was run for v0.1.0, and no other long-run result is part of them.
+- The gates above are the qualification of version 2; no 24-hour soak was run, and no other long-run result is part of them.
 - The quality figures are one run on one node; a later release is held to them with a stated noise allowance, not to a fixed target. The IFEval score is lowered by prompts that thinking took to the budget (section 5).
-- The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
-- A cold-boot time for this release is not stated in the sealed files; the readiness deadline is 600 s.
+- Version 2 was qualified for engine commit `75031112ba12` and its release binary; a different engine build is not covered by this sheet. `context` and `quality` come from version 1's build under the carried-gate rule (CONTRIBUTING section 3).
+- The readiness deadline is 600 s; the measured boots are in section 6.
 
 ## 8. Where to look next
 
-- The release's `KNOWN_ISSUES.md`: `runtimes/nemotron-3.5/nemotron-3.5-super-vl/v1/KNOWN_ISSUES.md`
+- The release's `KNOWN_ISSUES.md`: `runtimes/nemotron-3.5/nemotron-3.5-super-vl/v2/KNOWN_ISSUES.md` (identical to version 1's)
 - The user guide: [USER_GUIDE](../USER_GUIDE.md)
 - Reporting a problem: user guide section 11

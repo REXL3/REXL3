@@ -1,0 +1,39 @@
+{
+ "versions": {
+  "python": "3.12.13",
+  "torch": "2.14.0+cu130",
+  "torchvision": "0.29.1+cu130",
+  "transformers": "5.12.1",
+  "numpy": "2.5.3",
+  "pillow": "12.3.0",
+  "machine": "aarch64",
+  "torch_cpu_capability": "SVE128",
+  "torch_threads": 20
+ },
+ "pack_files_sha256": {
+  "image_processing_nemotron_h_omni.py": "0344e8432097e0718672d6529c68fd6095c36bea176500f131d203d1c7d497e0",
+  "processing_nemotron_h_omni.py": "406bc7689161d19e2a01e34f0ac8a7cc1bbc927f664d03bae3d23d00ea27f11a",
+  "modeling_nemotron_h_omni.py": "dfe88cc516f27b1dc8508ec7e448d81143aaf13d01400f5f93525b7f1271d929",
+  "modeling_radio.py": "ceec4c1ecd2a2649a79e74b16a2ea4af60e6cd11fbecebbd681c33fb1fccb943",
+  "preprocessor_config.json": "0b80e5c895052ff2d8e528eca719a6b6e39b7b1b60afb0b94553ffae948e22bc",
+  "processor_config.json": "ce813d598192df1b09813631b5f9c78f31c1e2e8d291c7c660c8dfa92a9597a7",
+  "config.json": "be121eafe4c174c8bc7204da2cd063baa0392c0adfd41dd82fc9e0bba5b0f9a0",
+  "chat_template.jinja": "1369e90b19976f99ce2070eb21ade8fcb4af640f008e14e82af5c5e89a9cc816",
+  "tokenizer.json": "d0432ad8b1c2984a2e2dca82e1933e3fd5628df6e95c51fba4c3ee9950dce299",
+  "tokenizer_config.json": "97878930a1910c17a84eb2c5a7137a164cf142abb7d0ad7436e72b503b7bdf09"
+ },
+ "seed": 20261011,
+ "evs_cases": 23,
+ "evs_seconds": 3.1,
+ "total_seconds": 4.8,
+ "device": "cpu",
+ "rates": [
+  0.7,
+  0.5,
+  0.3,
+  0.9,
+  0.99,
+  0.1,
+  1.0
+ ]
+}

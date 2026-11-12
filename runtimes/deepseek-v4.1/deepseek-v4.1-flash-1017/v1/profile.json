@@ -1,0 +1,168 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "dsv41-flash-1017-sage-1.55",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "fcaf7e98eb0bc5b480cb45adbeebbe97fa3e8d3a",
+    "path": "docs/examples/cluster.dsv41-sage-single.json",
+    "sha256": "ca22b398c199ce6a2798375752d097de3a7e82d7a70125f143d81858c736d66c"
+  },
+  "target_repo": "vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+  "default_profile": "dsv41-single-262k",
+  "profiles": {
+    "dsv41-single-262k": {
+      "kind": "single",
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir",
+        "binary_dir"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "262144",
+        "--kv-dtype",
+        "q4",
+        "--no-video",
+        "--no-vision",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--served-model-name",
+        "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw"
+      ],
+      "env": {
+        "REXL3_DSV41_KV": "q4",
+        "REXL3_DSV41_FAST_MOE": "1",
+        "REXL3_DSV41_SPEC_LEARN": "1",
+        "REXL3_DSV41_MOE_TOPP": "1.0"
+      },
+      "files": {},
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8940,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 256
+      }
+    },
+    "dsv41-tp2-1m": {
+      "kind": "cluster",
+      "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+      "site_fields": [
+        "nodes",
+        "http_port",
+        "tp_port",
+        "fabric_interface",
+        "hca"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "1048576",
+        "--kv-dtype",
+        "q4",
+        "--no-video",
+        "--no-vision",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--served-model-name",
+        "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--tp-ranks",
+        "2",
+        "--tp-rank",
+        "0",
+        "--tp-peer",
+        "@NODES@:@TP_PORT@",
+        "--tp-connect-timeout",
+        "300",
+        "--tp-ready-timeout",
+        "900",
+        "--tp-peer-timeout",
+        "60",
+        "--shutdown-grace",
+        "5"
+      ],
+      "env": {
+        "REXL3_DSV41_KV": "q4",
+        "REXL3_DSV41_FAST_MOE": "1",
+        "REXL3_DSV41_SPEC_LEARN": "1",
+        "REXL3_DSV41_MOE_TOPP": "1.0",
+        "NCCL_MAX_NCHANNELS": "4",
+        "NCCL_SOCKET_IFNAME": "@FABRIC_INTERFACE@",
+        "NCCL_IB_HCA": "=@HCA@"
+      },
+      "files": {
+        "config/cluster.tp2-1m.json": "8859a03b3c7d320c352ef914ca486f1804f0af76c47c7f77c3005c77bcee2b11"
+      },
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8940,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 256
+      },
+      "cluster_adapter": "attested-v1",
+      "cluster_file": "config/cluster.tp2-1m.json",
+      "group": "tp2"
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

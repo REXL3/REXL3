@@ -350,6 +350,27 @@ def extract_tree(archive, dest, approval, *, approval_path=None, preverified=Fal
     e.require(tree_inventory(dest) == expected, 'extracted tree differs')
 
 
+def write_latest(latest, version):
+    """Point LATEST at v<version>: create it, keep it when it already names v<version>, or move it forward
+    from an earlier v<M> when a later version of a model already on main is promoted. A malformed LATEST
+    or one naming a later version is refused, never overwritten."""
+    data = f'v{version}\n'.encode()
+    if latest.exists():
+        e.require(latest.is_file() and not latest.is_symlink(), 'existing LATEST is not a regular file')
+        match = re.fullmatch(rb'v([1-9][0-9]*)\n', latest.read_bytes())
+        e.require(match is not None, 'existing LATEST malformed')
+        current = int(match[1])
+        e.require(current <= version, 'existing LATEST names a later version')
+        if current == version:
+            return
+        latest.write_bytes(data)
+    else:
+        with latest.open('xb') as stream:
+            stream.write(data)
+    latest.chmod(0o644)
+    e.require(latest.read_bytes() == data, 'LATEST write drift')
+
+
 def _prepare_model_branch(root, model, target_commit):
     """Local `model/<model>` branch anchored on the remote when present, then target merged forward.
 
@@ -419,13 +440,7 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     m.write_or_validate_model_json(model_dir / 'MODEL.json', family=family, model=model, doc=doc)
     branch = _prepare_model_branch(root, model, target_commit)
     extract_tree(archive, tree, approval, approval_path=approval_path, preverified=True)
-    latest = model_dir / 'LATEST'
-    if latest.exists():
-        e.require(latest.read_text() == f'v{version}\n', 'existing LATEST differs')
-    else:
-        with latest.open('xb') as stream:
-            stream.write(f'v{version}\n'.encode())
-        latest.chmod(0o644)
+    write_latest(model_dir / 'LATEST', version)
     problems = verify_tree(tree, approved_templates, trusted_approvals=registry,
                            assets_dir=assets_dir, family=family, model=model,
                            precomputed=precomputed)

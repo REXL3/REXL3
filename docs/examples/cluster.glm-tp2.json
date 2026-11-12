@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "glm-tp2",
+  "_comment": "Portable configuration example: host, user and private workspace paths are placeholders, not original measured infrastructure. Historical context follows; this is not a new qualification claim. GLM-5.3-Flash 2.25bpw as a two-rank tensor-parallel group (lane L2b, docs/GLM_TP.md): N1 = rank 0, N4 = rank 1, each owning half of the routed experts (0..144 | 144..288). With lane L2b's binary each rank holds the WHOLE pack (92 GiB on disk, 87 GiB of text weights); from lane L9 on, a rank maps and allocates only its share (46.3 GiB: docs/GLM_TP.md section 8). Text only and greedy-exact by construction: --no-vision, --prefix-cache off, --spec none, pinned --slots and --kv-tokens (the group plans before it loads). N2 and N3 are the gn100s: disabled by owner rule, listed so that a rank map naming them is refused.",
+  "user": "rexl3",
+  "binary": "/srv/rexl3/bin/rexl3-serve",
+  "nodes": [
+    {"name": "N1", "number": 1, "address": "192.0.2.1", "expected_hostname": "host-a"},
+    {"name": "N2", "number": 2, "address": "192.0.2.2", "disabled": true,
+     "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"},
+    {"name": "N3", "number": 3, "address": "192.0.2.3", "disabled": true,
+     "reason": "gn100 disconnected from the CRS812 on 2026-10-10; switch bridge port disabled; owner rule: never use the gn100s"},
+    {"name": "N4", "number": 4, "address": "192.0.2.4", "expected_hostname": "host-d"}
+  ],
+  "nccl": {
+    "env_file": "/srv/rexl3/nccl/nccl.env",
+    "max_nchannels": 4,
+    "socket_ifname": "=enP7s7",
+    "hca": ["rocep1s0f0:1", "roceP2p1s0f0:1"]
+  },
+  "pack": "/srv/models/r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+  "memory": {"_comment": "the whole pack on every rank with lane L2b's binary (87 GiB of text weights; 46.3 GiB a rank from lane L9 on) plus 4 slots of KDA state, 32,768 KV tokens and the 512-row chunk's scratch; the 20 GiB headroom rule", "min_free_gib": 64},
+  "serve": {
+    "flags": ["--allow-unvalidated-pack", "--backend", "cuda", "--no-vision", "--slots", "4", "--max-model-len", "8192", "--kv-tokens", "32768",
+              "--prefill-chunk", "512", "--spec", "none", "--no-drafts", "--prefix-cache", "off", "--served-model-name", "glm"],
+    "env": {"REXL3_GLM_DIGEST_LOG": "/tmp/rexl3-glm-tp2-digests.log"}
+  },
+  "tp": {"connect_timeout_s": 600, "ready_timeout_s": 900, "peer_timeout_s": 15, "shutdown_grace_s": 20},
+  "groups": [
+    {"name": "g0", "ranks": ["N1", "N4"], "tp_port": 29610, "http_port": 8951, "http_host": "0.0.0.0"}
+  ],
+  "supervisor": {"backoff_base_s": 15, "backoff_cap_s": 300, "stable_after_s": 300, "max_restarts": 2, "window_s": 900}
+}

@@ -85,6 +85,20 @@ class AnchorPolicy(unittest.TestCase):
         self.assertEqual((code, err), (0, ''), out + err)
         self.assertIn('1 tree(s), 0 problem(s)', out)
 
+    def test_allow_list_file_with_a_digest_list_passes_and_an_unlisted_digest_fails(self):
+        digest = self.f.approved['v1']
+        listed = self.base / 'approved-list.json'
+        listed.write_bytes(encoded({'schema': 'rexl3.approved-templates.v1',
+                                    'templates': {'v1': ['sha256:' + '1' * 64, digest]}}))
+        code, out, err = self.cli(approved=listed)
+        self.assertEqual((code, err), (0, ''), out + err)
+        self.assertIn('1 tree(s), 0 problem(s)', out)
+        listed.write_bytes(encoded({'schema': 'rexl3.approved-templates.v1',
+                                    'templates': {'v1': ['sha256:' + '1' * 64]}}))
+        code, out, _ = self.cli(approved=listed)
+        self.assertEqual(code, 1, out)
+        self.assertIn('template not approved', out)
+
     def test_attacker_registry_that_blesses_the_edit_fails_the_pinned_hash(self):
         approval = self.tree / 'approval.json'
         document = e.loads(approval.read_bytes())
@@ -229,6 +243,25 @@ class V2Mutations(unittest.TestCase):
         self.assertRejected('template not approved', approved={'v1': 'sha256:' + '0' * 64})
         self.assertRejected('template not approved', approved={})
 
+    def test_template_digest_in_a_list_of_approved_digests(self):
+        digest = self.f.approved['v1']
+        other = 'sha256:' + '1' * 64
+        self.assertEqual(self.verify(approved={'v1': digest}), [])
+        self.assertEqual(self.verify(approved={'v1': [other, digest]}), [])
+        self.assertEqual(self.verify(approved={'v1': [digest, other]}), [])
+
+    def test_template_digest_not_in_the_list_or_version_not_listed(self):
+        digest = self.f.approved['v1']
+        self.assertRejected('template not approved', approved={'v1': ['sha256:' + '0' * 64, 'sha256:' + '1' * 64]})
+        self.assertRejected('template not approved', approved={'v2': [digest]})
+        self.assertRejected('template not approved', approved={'v2': digest})
+
+    def test_malformed_allow_list_value_is_not_approved(self):
+        digest = self.f.approved['v1']
+        for value in ([], [digest, 1], [[digest]], {digest: True}, None, 1):
+            with self.subTest(value=value):
+                self.assertRejected('template not approved', approved={'v1': value})
+
     def test_runtime_file_edited_together_with_its_manifest_entry(self):
         write(self.tree, 'launch.sh', b'forged').chmod(0o755)
         manifest = e.load_json(self.tree / 'source.manifest.json')
@@ -306,6 +339,38 @@ class V2Mutations(unittest.TestCase):
         code, out, err = run_cli(*args, '--assets-dir', staged)
         self.assertEqual((code, err), (0, ''), out)
         self.assertIn('1 tree(s), 0 problem(s)', out)
+
+
+class AllowListPolicy(unittest.TestCase):
+    """The committed template allow-list approves every committed tree and the v0.1.1 approvals."""
+
+    # Template v1 digest recorded by the v0.1.1 dev approvals (template approval pinned to its content tree).
+    V011_TEMPLATE_V1 = 'sha256:1a13b3e24965ffa6aa806c3e0db0e02109f253af823fe6a69e753e98ef21da8e'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = e.load_json(ALLOW_LIST)
+
+    def test_schema_and_shape(self):
+        self.assertEqual(self.doc['schema'], 'rexl3.approved-templates.v1')
+        for version, listed in self.doc['templates'].items():
+            listed = [listed] if isinstance(listed, str) else listed
+            self.assertTrue(listed, version)
+            self.assertEqual(len(set(listed)), len(listed), version)
+            for digest in listed:
+                self.assertRegex(digest, r'\Asha256:[0-9a-f]{64}\Z')
+
+    def test_every_committed_tree_template_is_approved(self):
+        approvals = sorted((ROOT / 'runtimes').glob('*/*/v*/approval.json'))
+        for path in approvals:
+            template = e.load_json(path)['template']
+            with self.subTest(tree=str(path.parent.relative_to(ROOT))):
+                self.assertTrue(e.template_approved(self.doc['templates'], template['version'], template['digest']))
+
+    def test_v011_template_digest_is_approved(self):
+        self.assertTrue(e.template_approved(self.doc['templates'], 'v1', self.V011_TEMPLATE_V1))
+        self.assertFalse(e.template_approved(self.doc['templates'], 'v2', self.V011_TEMPLATE_V1))
+        self.assertFalse(e.template_approved(self.doc['templates'], 'v1', 'sha256:' + '0' * 64))
 
 
 class WorkflowPolicy(unittest.TestCase):

@@ -1,0 +1,218 @@
+# Scalar manifest of the Nemotron vision tower's fp32 gates (crates/cuda/tests/nemotron_vit_fp32_gates.rs).
+# Made by tools/nemotron_omni/vision_sdpa_check.py refs + manifest: `file` is the size and SHA-256 of each node-local reference file
+# (never committed: activations of the pack's weights), `floor` the bf16 eager model's own rel_l2 to fp32 (worst stage for blocks),
+# `engine` the engine's rel_l2 to fp32 when this manifest was made (printed beside the current numbers, not gated).
+manifest 1
+reference fp32_eager: the pack's RadioModel and projector with the bf16 weights widened exactly, the processor's pixels rounded to bf16, eager attention, no TF32, deterministic algorithms
+torch 2.14.0+cu130
+transformers 5.12.1
+gpu NVIDIA GB10
+seed 0
+image check_512x512 512 512
+image demo_scene 448 640
+image jpeg_q90_320x240 480 576
+image rings_333x517 672 416
+image gray_220x140 416 640
+image palette_180x180 512 512
+image grad_64x64 512 512
+image rgba_200x150 480 608
+image noise_257x255 512 544
+image grad_1080x1920 1088 1920
+image grad_6000x4000_cap 1504 2240
+image synth_512x512 512 512
+image synth_320x448 320 448
+file check_512x512 pixels.bf16 1572864 fd72879959be57ed635da765938f024ff86ae991fa2355c8042fc6c9f312acc5
+file check_512x512 tower.f32 5242880 8cd15eaff2c3c8974b120f87249927271de387d5d0201265d2612f14a7840601
+file check_512x512 final_ln.f32 5242880 8dcca18c795b921771e01e292ae846d5d4307955102c4a1fd73aaa1db4ea89af
+file check_512x512 mlp1.f32 4194304 ad54085515d7157e4055773dc5e8bc5eb2b0bb694daa4125d2eab804942ec624
+file check_512x512 blocks.f32 506880 b2652dbf6136e8f42690c178f69ed075c43d626ea159905f907c525a7a95a703
+file demo_scene pixels.bf16 1720320 9925c7c0672dd6ccbc312ba2c65695adfc9c6ac4c09cbc1c9dafe05cd01557bd
+file demo_scene tower.f32 5734400 f2eff8b8988036ce250518df171f68eba0a66b4ff9946dade1c0536624c51f67
+file demo_scene final_ln.f32 5734400 e771fdb3cae5e60100e6ade9e6b3b1597551c58008d4aa55193832cb3a695e35
+file demo_scene mlp1.f32 4587520 1e7f4f6e47b0d0dc333c7efd1a9acc4020780c2a82fdbedf5d7b78758402e1c7
+file demo_scene blocks.f32 506880 ea54a19fbc9609c3e3864aed26fb32f8b6b561579e73585cde94d44de4839422
+file jpeg_q90_320x240 pixels.bf16 1658880 92e4462bf79ec28766d6d1b89b741e367be300f187775b03551b9fe67ed13bde
+file jpeg_q90_320x240 tower.f32 5529600 3748f5d24106d809dab984d0d807c1127f566d23a3a0dcf5af9be332e83d85ae
+file jpeg_q90_320x240 final_ln.f32 5529600 2ff3d27243d7baeb502c3a26cb39e2aeee0fe1d2044c39fe618d331d25853792
+file jpeg_q90_320x240 mlp1.f32 4423680 f18211d33e495d745e7d91e1ec6335525d3759e85144ab337f5feff86bf54993
+file jpeg_q90_320x240 blocks.f32 506880 1677d6aa622c6bc2c21c941d2aa8f5a5de64f3e27c53487e9645ba79cf50813e
+file rings_333x517 pixels.bf16 1677312 cc6a2c8c3846492c1dafb733327f02bfd8a1146c50f0fd6042095890584e3c1c
+file rings_333x517 tower.f32 5591040 e78d78def190f0b17f2ad54b3f47e4e3c3b751d652350e3e9372b43b43ecf977
+file rings_333x517 final_ln.f32 5591040 265276023cfb333b9505dc7f51dec3ea902c84c1f54cb0d4a36d4da6a41aaeeb
+file rings_333x517 mlp1.f32 4472832 e01a9ba612763749f302ee2401ded79ec39cc3b5e31214e3440ac8ef1e256e84
+file rings_333x517 blocks.f32 506880 b5b647f29fce5ffde9577a0ebe09c7532697f78e8af40acecde43d2c0e565bb4
+file gray_220x140 pixels.bf16 1597440 6701e16b10bf38a197c292e763fef3a139065db2453d7b903044bdbe2348003d
+file gray_220x140 tower.f32 5324800 2a06af94d8931c467cead210b074513cca6af44f626cb51b6084f41c516a5b31
+file gray_220x140 final_ln.f32 5324800 cd0ad684ddc0ca0ccc46102364cd44335636cb1444e2b8d946f9b869f00972b6
+file gray_220x140 mlp1.f32 4259840 92d662de0633576296e1814239c0264192239ab87bc4f11496d5eeeaf1e0b739
+file gray_220x140 blocks.f32 506880 1fd33d5256059870b4d5a7c217d043f4842ad770f50beae6c562a261f948763d
+file palette_180x180 pixels.bf16 1572864 edd522d6649d30fe774ff0118bb910869aa230514135c9d4eae08c63a2812f96
+file palette_180x180 tower.f32 5242880 c4fbfbd34e726fe3db83681a9daa7b662f466af6e276b3fed3cdd4ff30a1a58f
+file palette_180x180 final_ln.f32 5242880 2c5a56c7599a6cec8ab3e7a4925931c9413009ebb690b71b5a95145a86ed86d7
+file palette_180x180 mlp1.f32 4194304 bf97a127c147fc276184052a3f425316a3811507890cdc51b058aed2669ffc4a
+file palette_180x180 blocks.f32 506880 89e354fd70b24b0912a36de07833ad39d2ff08b9affed789755cf542b41809ab
+file grad_64x64 pixels.bf16 1572864 c44ce9a47dcd2af5d54e0d8d6b5afe6f65bb7d13f44806e539a0f13cddcc0cdd
+file grad_64x64 tower.f32 5242880 ca715799ae8a2eb21214970b9ee156663bfbb1dfe00179d376d7ac4de4c3a4ed
+file grad_64x64 final_ln.f32 5242880 c64b38ecde541ca48f24c68e52052a0f467fb945f01bdaae56e08508edb42f24
+file grad_64x64 mlp1.f32 4194304 f0676fbf876493a19dd4aa2d1735c04b8d6c0c166fc05198177b4b71d25c2d59
+file grad_64x64 blocks.f32 506880 9d7c24c13d1198dd0e41cd0336aba11aef096bd85ddf8ce23e8a69b18dc45fa5
+file rgba_200x150 pixels.bf16 1751040 9a7be808b4740072bd5a766e3737a8cd5fab009461c0c6620a471e795e8b4c51
+file rgba_200x150 tower.f32 5836800 fba8d41fe06bfa964d1f1f79a9144df82d3f3af3d7c561c55835d5b56471094a
+file rgba_200x150 final_ln.f32 5836800 d877c29244f862d7b546fe50c9fefdfae3252c4ab23b9560cfeccd2efb3d61c4
+file rgba_200x150 mlp1.f32 4669440 e150f6df0d73c4f75b686949d44a8dfc4bed148c191b1500ac9909ccb5788819
+file rgba_200x150 blocks.f32 506880 ed490423f2083a36313ccd7b00cf2cdf70f9d631f3a4d418c0aa937a7e70bf20
+file noise_257x255 pixels.bf16 1671168 d5192be67f641294c209108a988eec5a249a1b1abc543e166591c32e08e6c9e2
+file noise_257x255 tower.f32 5570560 c01675ea53f9420254e5dc4f2503da0c075b1f786513f2626b07cae4012d8125
+file noise_257x255 final_ln.f32 5570560 942df043128037b1565ed0f98fbb29920bf94c3ad5a550e714663cb8d173ad8c
+file noise_257x255 mlp1.f32 4456448 3be0c8993e3c4257719f558d7e7b08cfd11f97617ff7f353663a19bcd438f792
+file noise_257x255 blocks.f32 506880 cbaf9c05e96b3dab21a5cea2ae17aa407882532b10c8e49be4133a962d4dea75
+file grad_1080x1920 pixels.bf16 12533760 550f1a9aefcabec8066ea01843a6f411f0005c47b1289299e164bb7f2cdb82de
+file grad_1080x1920 tower.f32 41779200 74d06cbcf372a04b6b57f0994db4514c7304dcc33eef37138c54376be835ab28
+file grad_1080x1920 final_ln.f32 41779200 a04f31317a156b24f84f6474445494457358a92399f80100faeaaaef91f356c1
+file grad_1080x1920 mlp1.f32 33423360 f41f1ca5b99f2fd74b30e1f838531e30da151c52bce0f76b9769cbd606bf9a11
+file grad_1080x1920 blocks.f32 506880 fa703b31b771929dd60d5d53c6db3127ab13c553ee182d2fb1cf296b2c49ac93
+file grad_6000x4000_cap pixels.bf16 20213760 a0f2c16afc0951688dbd0d27b573d242cd8939f99ec1f5dac3bb9337edaeeea8
+file grad_6000x4000_cap tower.f32 67379200 ef1cc9e6b8ffd9b1b71137a949fdf58c085a7284e8afccd0263b523aa5d4a8ea
+file grad_6000x4000_cap final_ln.f32 67379200 95ba61ea7de1331fa8d6eb716f6c9cbc6294ec1fdebf5d8f58bbb927842eed81
+file grad_6000x4000_cap mlp1.f32 53903360 8a44690e18416a1e9f3d13c79dca6bf8cfe25bb474aa065ae9df0ef484b7125f
+file grad_6000x4000_cap blocks.f32 506880 f86849d0c44d569cc67a3247a882ead9187088df9446a0ce2ccd6b14199c34a9
+file synth_512x512 pixels.bf16 1572864 7255c2d6eea2e687a4d4de663e551f6beb515817d4588a359d82b6b44bcd9721
+file synth_512x512 tower.f32 5242880 fcb8a2302c4d4caf0acc2a745ba44ccbac2ff0f12ac0005d583781d688d61d8a
+file synth_512x512 final_ln.f32 5242880 6c7371fb3e13fde4a3454593b74cacf44bba68cd638208356e95651844a9dbd9
+file synth_512x512 mlp1.f32 4194304 5a98e26fed28f4b83cc77a5266429b5faf183778426e0f3f191820f847f4f5c6
+file synth_512x512 blocks.f32 506880 f9aa9374682a954da86aa0ae50e195810fac844f36d1e6bca33c8da924c269cc
+file synth_320x448 pixels.bf16 860160 9f71d5ca9c3defe1e4b203c0afbb10067abc30b01ee8e67b51a2e8167d095d72
+file synth_320x448 tower.f32 2867200 2980f85135b09e62abc685b9e7b7e852b6c26484ffe52ecf00cd7fa9868fff02
+file synth_320x448 final_ln.f32 2867200 e27a16fff95dfbc644297ccbf61caa641d9d69709ee2fb73a1fc82f322e1e4da
+file synth_320x448 mlp1.f32 2293760 be6c330c747ed93958a86dc7c31e683a2f2841b7e4ddbb2b943f943f0d25a233
+file synth_320x448 blocks.f32 506880 ef9e512ef036ea133dcdd4bebee4acf68bf843590afaf5d8fb9bab930478f384
+floor check_512x512 tower 1.6404e-02
+floor check_512x512 final_ln 8.8102e-03
+floor check_512x512 mlp1 1.0056e-01
+floor check_512x512 blocks 2.7782e-02
+floor demo_scene tower 5.4658e-03
+floor demo_scene final_ln 2.8545e-03
+floor demo_scene mlp1 1.4575e-02
+floor demo_scene blocks 1.1594e-02
+floor jpeg_q90_320x240 tower 7.7417e-03
+floor jpeg_q90_320x240 final_ln 4.2479e-03
+floor jpeg_q90_320x240 mlp1 2.2185e-02
+floor jpeg_q90_320x240 blocks 1.0462e-02
+floor rings_333x517 tower 8.5541e-03
+floor rings_333x517 final_ln 4.4413e-03
+floor rings_333x517 mlp1 2.6671e-02
+floor rings_333x517 blocks 1.0206e-02
+floor gray_220x140 tower 6.0096e-03
+floor gray_220x140 final_ln 3.4500e-03
+floor gray_220x140 mlp1 1.8048e-02
+floor gray_220x140 blocks 9.0584e-03
+floor palette_180x180 tower 7.1647e-03
+floor palette_180x180 final_ln 4.0441e-03
+floor palette_180x180 mlp1 1.8076e-02
+floor palette_180x180 blocks 1.1230e-02
+floor grad_64x64 tower 1.0206e-02
+floor grad_64x64 final_ln 5.3695e-03
+floor grad_64x64 mlp1 2.9152e-02
+floor grad_64x64 blocks 1.7715e-02
+floor rgba_200x150 tower 8.6331e-03
+floor rgba_200x150 final_ln 4.4050e-03
+floor rgba_200x150 mlp1 2.5380e-02
+floor rgba_200x150 blocks 9.8713e-03
+floor noise_257x255 tower 4.9254e-03
+floor noise_257x255 final_ln 3.1147e-03
+floor noise_257x255 mlp1 2.1513e-02
+floor noise_257x255 blocks 1.2723e-02
+floor grad_1080x1920 tower 6.6461e-03
+floor grad_1080x1920 final_ln 3.3336e-03
+floor grad_1080x1920 mlp1 2.8646e-02
+floor grad_1080x1920 blocks 1.2955e-02
+floor grad_6000x4000_cap tower 6.1510e-03
+floor grad_6000x4000_cap final_ln 3.2030e-03
+floor grad_6000x4000_cap mlp1 2.6428e-02
+floor grad_6000x4000_cap blocks 1.7869e-02
+floor synth_512x512 tower 1.6135e-02
+floor synth_512x512 final_ln 7.3700e-03
+floor synth_512x512 mlp1 3.8847e-02
+floor synth_512x512 blocks 1.4336e-02
+floor synth_320x448 tower 1.3851e-02
+floor synth_320x448 final_ln 6.4447e-03
+floor synth_320x448 mlp1 3.7559e-02
+floor synth_320x448 blocks 1.2896e-02
+engine check_512x512 tower 5.1484e-4
+engine check_512x512 final_ln 4.0434e-4
+engine check_512x512 mlp1_raw 3.6700e-3
+engine check_512x512 mlp1_served 4.0412e-3
+engine check_512x512 mlp1_served_rel_max 5.8142e-3
+engine check_512x512 blocks 1.3871e-3
+engine demo_scene tower 1.6396e-4
+engine demo_scene final_ln 2.6997e-4
+engine demo_scene mlp1_raw 5.2203e-4
+engine demo_scene mlp1_served 1.7409e-3
+engine demo_scene mlp1_served_rel_max 2.8287e-3
+engine demo_scene blocks 3.5411e-4
+engine jpeg_q90_320x240 tower 2.6003e-4
+engine jpeg_q90_320x240 final_ln 2.7946e-4
+engine jpeg_q90_320x240 mlp1_raw 7.9065e-4
+engine jpeg_q90_320x240 mlp1_served 1.8374e-3
+engine jpeg_q90_320x240 mlp1_served_rel_max 2.5291e-3
+engine jpeg_q90_320x240 blocks 4.0363e-4
+engine rings_333x517 tower 3.1068e-4
+engine rings_333x517 final_ln 2.8612e-4
+engine rings_333x517 mlp1_raw 7.2486e-4
+engine rings_333x517 mlp1_served 1.8166e-3
+engine rings_333x517 mlp1_served_rel_max 3.2761e-3
+engine rings_333x517 blocks 3.4596e-4
+engine gray_220x140 tower 2.1058e-4
+engine gray_220x140 final_ln 2.7047e-4
+engine gray_220x140 mlp1_raw 7.3775e-4
+engine gray_220x140 mlp1_served 1.8238e-3
+engine gray_220x140 mlp1_served_rel_max 2.4664e-3
+engine gray_220x140 blocks 3.3676e-4
+engine palette_180x180 tower 2.0712e-4
+engine palette_180x180 final_ln 2.7368e-4
+engine palette_180x180 mlp1_raw 6.8741e-4
+engine palette_180x180 mlp1_served 1.7944e-3
+engine palette_180x180 mlp1_served_rel_max 2.4246e-3
+engine palette_180x180 blocks 3.7667e-4
+engine grad_64x64 tower 3.3223e-4
+engine grad_64x64 final_ln 3.0107e-4
+engine grad_64x64 mlp1_raw 1.3687e-3
+engine grad_64x64 mlp1_served 2.1535e-3
+engine grad_64x64 mlp1_served_rel_max 2.8194e-3
+engine grad_64x64 blocks 3.7520e-4
+engine rgba_200x150 tower 3.2309e-4
+engine rgba_200x150 final_ln 2.9414e-4
+engine rgba_200x150 mlp1_raw 8.8591e-4
+engine rgba_200x150 mlp1_served 1.8743e-3
+engine rgba_200x150 mlp1_served_rel_max 1.3988e-3
+engine rgba_200x150 blocks 3.4850e-4
+engine noise_257x255 tower 2.4395e-4
+engine noise_257x255 final_ln 2.8396e-4
+engine noise_257x255 mlp1_raw 1.2211e-3
+engine noise_257x255 mlp1_served 2.0448e-3
+engine noise_257x255 mlp1_served_rel_max 2.6920e-3
+engine noise_257x255 blocks 4.1630e-4
+engine grad_1080x1920 tower 2.5681e-4
+engine grad_1080x1920 final_ln 2.8406e-4
+engine grad_1080x1920 mlp1_raw 1.2532e-3
+engine grad_1080x1920 mlp1_served 2.0799e-3
+engine grad_1080x1920 mlp1_served_rel_max 2.8036e-3
+engine grad_1080x1920 blocks 5.9351e-4
+engine grad_6000x4000_cap tower 2.4152e-4
+engine grad_6000x4000_cap final_ln 2.7787e-4
+engine grad_6000x4000_cap mlp1_raw 1.0087e-3
+engine grad_6000x4000_cap mlp1_served 1.9409e-3
+engine grad_6000x4000_cap mlp1_served_rel_max 2.8531e-3
+engine grad_6000x4000_cap blocks 5.5343e-4
+engine synth_512x512 tower 3.8004e-4
+engine synth_512x512 final_ln 3.0230e-4
+engine synth_512x512 mlp1_raw 1.0026e-3
+engine synth_512x512 mlp1_served 1.9391e-3
+engine synth_512x512 mlp1_served_rel_max 2.7803e-3
+engine synth_512x512 blocks 6.0280e-4
+engine synth_320x448 tower 4.5141e-4
+engine synth_320x448 final_ln 3.3402e-4
+engine synth_320x448 mlp1_raw 1.5354e-3
+engine synth_320x448 mlp1_served 2.2636e-3
+engine synth_320x448 mlp1_served_rel_max 3.9677e-3
+engine synth_320x448 blocks 4.3148e-4

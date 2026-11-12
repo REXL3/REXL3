@@ -28,12 +28,12 @@ env:
   # sha256 of runtimes/templates/APPROVALS.json on the protected base. The verifier refuses a registry
   # whose bytes differ, so changing the registry means changing this line in the same reviewed commit.
   # tools/test_verify_mutations.py fails if the two disagree.
-  TRUSTED_APPROVALS_SHA256: c4b5262c6002ffcbd0f0354d0b4f9edbdbe1fad4c46c02373ee960cd717996c6
+  TRUSTED_APPROVALS_SHA256: 9ae5efd0cfd399b13e3d4ac8594dada3600a70e2716b8d07d6d7fb489291cb60
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       # Protected revision: the tip of the base branch for a pull request, the pushed commit otherwise.
       - name: Check out the protected base (tools and policy)

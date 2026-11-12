@@ -1,0 +1,60 @@
+{#- DeepSeek-V4.1 chat template: the text path of the reference encoder (encoding/encoding.py, encode_messages with
+    drop_thinking=True, add_default_bos_token=True). Covers system (first and mid-conversation), user, assistant and
+    latest_reminder turns in both "chat" and "thinking" modes, with the reasoning-effort prefix. Tools, tool calls,
+    tool results, tasks and images are NOT ported here: they raise by name rather than render a prompt the model was
+    never trained on. Checked by differential rendering against encoding.py (see dsv41 bring-up notes). -#}
+{%- set bos = '<｜begin▁of▁sentence｜>' -%}
+{%- set eos = '<｜end▁of▁sentence｜>' -%}
+{%- set SYS = '<｜System｜>' -%}
+{%- set USR = '<｜User｜>' -%}
+{%- set AST = '<｜Assistant｜>' -%}
+{%- set REM = '<｜latest_reminder｜>' -%}
+{%- set thinking = (enable_thinking is defined and enable_thinking) -%}
+{%- if reasoning_effort is defined and reasoning_effort is not none -%}
+  {%- if reasoning_effort in ['minimal', 'low', 'off', 'none'] -%}{%- set effort = 50 -%}
+  {%- elif reasoning_effort in ['medium', 'high', 'xhigh'] -%}{%- set effort = 75 -%}
+  {%- elif reasoning_effort == 'max' -%}{%- set effort = 100 -%}
+  {%- elif reasoning_effort is number and reasoning_effort >= 1 and reasoning_effort <= 100 -%}{%- set effort = reasoning_effort -%}
+  {%- else -%}{{- raise_exception('reasoning_effort must be minimal, low, medium, high, xhigh, max or an integer in 1..100') -}}
+  {%- endif -%}
+{%- else -%}
+  {%- set effort = 75 -%}
+{%- endif -%}
+{%- if tools is defined and tools -%}{{- raise_exception('deepseek_v41 template: tools are not supported by this template yet') -}}{%- endif -%}
+{#- the last "user" turn: a user message, or a system message that is not the first -#}
+{%- set ns = namespace(last_user=-1) -%}
+{%- for m in messages -%}
+  {%- if m.role == 'user' or (m.role == 'system' and not loop.first) -%}{%- set ns.last_user = loop.index0 -%}{%- endif -%}
+  {%- if m.tool_calls is defined and m.tool_calls -%}{{- raise_exception('deepseek_v41 template: tool calls are not supported yet') -}}{%- endif -%}
+  {%- if m.task is defined and m.task is not none -%}{{- raise_exception('deepseek_v41 template: tasks are not supported') -}}{%- endif -%}
+  {%- if m.role not in ['system', 'user', 'assistant', 'latest_reminder'] -%}{{- raise_exception('deepseek_v41 template: unsupported role ' ~ m.role) -}}{%- endif -%}
+{%- endfor -%}
+{{- bos -}}
+{%- for m in messages -%}
+  {%- set i = loop.index0 -%}
+  {%- set content = m.content if (m.content is defined and m.content is not none) else '' -%}
+  {%- if content is not string -%}{{- raise_exception('deepseek_v41 template: only string content is supported') -}}{%- endif -%}
+  {#- the reasoning-effort prefix leads the conversation in thinking mode, under a System token -#}
+  {%- if i == 0 and (thinking or m.role == 'system') -%}{{- SYS -}}{%- endif -%}
+  {%- if i == 0 and thinking -%}{{- 'Reasoning Effort: ' ~ effort ~ ' (range 1-100, the higher the value, the more thorough the reasoning)\n\n' -}}{%- endif -%}
+  {%- if m.role == 'system' -%}
+    {%- if i > 0 -%}{{- SYS -}}{%- endif -%}
+    {{- content -}}
+  {%- elif m.role == 'user' -%}
+    {{- USR ~ content -}}
+  {%- elif m.role == 'latest_reminder' -%}
+    {{- REM ~ content -}}
+  {%- elif m.role == 'assistant' -%}
+    {%- set rc = m.reasoning_content if (m.reasoning_content is defined and m.reasoning_content is not none) else '' -%}
+    {%- if thinking and i > ns.last_user -%}{{- rc ~ '</think>' -}}{%- endif -%}
+    {{- content ~ eos -}}
+  {%- endif -%}
+  {#- the assistant header follows a user turn (or a mid-conversation system turn) unless another non-assistant turn follows -#}
+  {%- set nxt = messages[i + 1].role if i + 1 < messages|length else none -%}
+  {%- if nxt is none or nxt in ['assistant', 'latest_reminder'] -%}
+    {%- if m.role == 'user' or (m.role == 'system' and i > 0) -%}
+      {{- AST -}}
+      {%- if thinking and i >= ns.last_user -%}{{- '<think>' -}}{%- else -%}{{- '</think>' -}}{%- endif -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}

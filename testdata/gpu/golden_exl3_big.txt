@@ -1,0 +1,42 @@
+big 4096x24576 2-bit rows=129 a4f3e4103b174051
+big 4096x24576 2-bit rows=300 f6710888bf8cf9bd
+big 4096x24576 2-bit rows=1000 77cfb78f332c1e19
+big 8192x4096 3-bit rows=129 5f5ed19c9d6f2aba
+big 8192x4096 3-bit rows=300 eb9580f3d9f0311a
+big 8192x4096 3-bit rows=1000 d6be99fe8f711bdf
+big 4096x1536 2-bit rows=129 df44745c927f314b
+big 4096x1536 2-bit rows=300 6afcf036f847cc72
+big 4096x1536 2-bit rows=1000 152217c38b96bd7b
+big 1536x16384 4-bit rows=129 6fd3fe53c3c23f66
+big 1536x16384 4-bit rows=300 5a94e282120fc8d0
+big 1536x16384 4-bit rows=1000 f3a736270b0fce6d
+big 4096x512 2-bit rows=129 0e4fe6f28293e91f
+big 4096x512 2-bit rows=300 3c6c35120b4eca0a
+big 4096x512 2-bit rows=1000 2616c05ca25c70c5
+big 12288x4096 4-bit rows=129 cec71b9ec18a60ad
+big 12288x4096 4-bit rows=300 56118d5569703043
+big 12288x4096 4-bit rows=1000 e19368c448ef5fac
+big 512x384 1-bit Inst3 bias=false rows=200 078ceb7fbf086f84
+big 512x384 1-bit Mcg bias=false rows=200 41516aace9de414c
+big 512x384 1-bit Mul1 bias=false rows=200 9730d8bc55e898fa
+big 512x384 2-bit Inst3 bias=true rows=200 de815a46adbe9b80
+big 512x384 2-bit Mcg bias=true rows=200 a561ba73b07a715b
+big 512x384 2-bit Mul1 bias=true rows=200 d6e6d3f2da5b6b7b
+big 512x384 3-bit Inst3 bias=false rows=200 6e6b1797ceb52d92
+big 512x384 3-bit Mcg bias=false rows=200 006997bf07f038af
+big 512x384 3-bit Mul1 bias=false rows=200 088a523026e1f999
+big 512x384 4-bit Inst3 bias=true rows=200 2e8e694c385486e2
+big 512x384 4-bit Mcg bias=true rows=200 c53d0561cd7bd5d2
+big 512x384 4-bit Mul1 bias=true rows=200 48a648d65fedd3b7
+big 512x384 5-bit Inst3 bias=false rows=200 317a39e9df71004a
+big 512x384 5-bit Mcg bias=false rows=200 b7b81711cf7637c8
+big 512x384 5-bit Mul1 bias=false rows=200 85b80bad35ba1f58
+big 512x384 6-bit Inst3 bias=true rows=200 31985183952231ab
+big 512x384 6-bit Mcg bias=true rows=200 0948e407115c9c16
+big 512x384 6-bit Mul1 bias=true rows=200 55314756dee138db
+big 512x384 7-bit Inst3 bias=false rows=200 c38dcd41571cb7d9
+big 512x384 7-bit Mcg bias=false rows=200 0b44f07bf3747ab6
+big 512x384 7-bit Mul1 bias=false rows=200 eca6417bbc3baed6
+big 512x384 8-bit Inst3 bias=true rows=200 cd01e3f7cb47eedd
+big 512x384 8-bit Mcg bias=true rows=200 d6fa4f68cff243bb
+big 512x384 8-bit Mul1 bias=true rows=200 6ce4f1cf3bda2766

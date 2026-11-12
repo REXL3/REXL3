@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "Glm5NextForConditionalGeneration"
+  ],
+  "display_name": "RED-SNOW-5.3-Flash",
+  "engine_family": "glm",
+  "family": "glm-5.3",
+  "model": "red-snow-5.3-flash-tp2",
+  "pack": {
+    "bits": "4.91",
+    "format": "exl3",
+    "target_repo": "vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw",
+    "target_revision": "f6b8963784254095a54944f2963b2925fcf4b199"
+  },
+  "runtime_id": "redsnow-5.3-flash-tp2-sage-4.91",
+  "schema": "rexl3.prod-model.v1"
+}

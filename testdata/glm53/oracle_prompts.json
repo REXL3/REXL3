@@ -1,0 +1,121 @@
+{
+ "version": 1,
+ "note": "Prompt set of the GLM-5.3-Flash whole-model oracle (tools/dump_glm_reference.py). Chat prompts are rendered by the pack's HF chat template (tools/glm_oracle_prompts.py), never by hand. Assistant prefix: chat_300, code_700, think_prefix end in the template's generation prompt `<|assistant|><think>` (thinking on); long_2300 ends in `<|assistant|><think></think>` (non-thinking, from an empty trailing assistant message). think_prefix carries an earlier assistant turn with reasoning_content, so the thinking markup appears in the history as well.",
+ "prompts": [
+  {
+   "name": "one_token",
+   "kind": "raw",
+   "text": "The"
+  },
+  {
+   "name": "short_20",
+   "kind": "raw",
+   "text": "The Kimi delta attention layer keeps a fixed-size recurrent state per head, decayed per key channel."
+  },
+  {
+   "name": "chat_300",
+   "kind": "chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful engineering assistant. Answer precisely and show your reasoning."
+    },
+    {
+     "role": "user",
+     "content": "I am planning how to serve a 90 GiB mixture-of-experts language model on a single workstation GPU that shares one 121 GiB pool of unified memory with the host. The model has 45 layers, 288 routed experts per layer of which each token activates 8, plus one shared expert, and about three quarters of the layers use a linear-attention mixer with a fixed-size recurrent state while the rest use sparse latent attention over a compressed key-value cache.\n\nPlease explain, step by step, which quantities I need to budget before the first request is admitted: the weights, the per-sequence recurrent state, the latent cache per token, the activation scratch for a prefill window, and the extra reads caused by speculative decoding when a verify window touches many more experts than a single row. Then tell me how I should decide the largest number of concurrent sequences, what safety margin to keep free for the operating system, and which failure I should make fatal at startup instead of discovering it under load. Keep the answer structured and give a small worked example with round numbers. Assume the host also runs a small web service and a model-downloader process that need a few gigabytes between them, and that a second client may start a long image request while the first one is still decoding."
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "code_700",
+   "kind": "chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Review the following Rust function for correctness and performance, then rewrite it so that the expert sum is\ndeterministic and independent of how many rows are in the batch. Point out any place where a tie could be broken\ndifferently between two runs.\n\n```rust\nuse std::cmp::Ordering;\n\n#[derive(Clone, Copy, Debug)]\npub struct Pick {\n    pub expert: u32,\n    pub weight: f32,\n}\n\n/// Select the top `k` experts for every row of `scores` (row-major, `rows` x `experts`),\n/// add the per-expert selection bias, normalise the unbiased scores of the chosen experts\n/// and scale them by `scale`.\npub fn route(\n    scores: &[f32],\n    bias: &[f32],\n    rows: usize,\n    experts: usize,\n    k: usize,\n    scale: f32,\n) -> Vec<Vec<Pick>> {\n    assert_eq!(scores.len(), rows * experts);\n    assert_eq!(bias.len(), experts);\n    let mut out = Vec::with_capacity(rows);\n    for r in 0..rows {\n        let row = &scores[r * experts..(r + 1) * experts];\n        let mut order: Vec<usize> = (0..experts).collect();\n        order.sort_by(|&a, &b| {\n            let sa = 1.0 / (1.0 + (-row[a]).exp()) + bias[a];\n            let sb = 1.0 / (1.0 + (-row[b]).exp()) + bias[b];\n            sb.partial_cmp(&sa).unwrap_or(Ordering::Equal)\n        });\n        order.truncate(k);\n        let mut picks: Vec<Pick> = order\n            .iter()\n            .map(|&e| Pick {\n                expert: e as u32,\n                weight: 1.0 / (1.0 + (-row[e]).exp()),\n            })\n            .collect();\n        let total: f32 = picks.iter().map(|p| p.weight).sum();\n        for p in picks.iter_mut() {\n            p.weight = p.weight / (total + 1e-20) * scale;\n        }\n        out.push(picks);\n    }\n    out\n}\n\n/// Combine the expert outputs of one row. `outputs[i]` is the vector produced by `picks[i]`.\npub fn combine(picks: &[Pick], outputs: &[Vec<f32>], shared: &[f32]) -> Vec<f32> {\n    let width = shared.len();\n    let mut acc = vec![0.0f32; width];\n    for (p, o) in picks.iter().zip(outputs.iter()) {\n        for j in 0..width {\n            acc[j] += p.weight * o[j];\n        }\n    }\n    for j in 0..width {\n        acc[j] += shared[j];\n    }\n    acc\n}\n\npub fn mean_abs(v: &[f32]) -> f32 {\n    if v.is_empty() {\n        return 0.0;\n    }\n    v.iter().map(|x| x.abs()).sum::<f32>() / v.len() as f32\n}\n```\n\nAlso say whether `partial_cmp(..).unwrap_or(Equal)` can misbehave when a score is NaN, and how you would test the\nrewritten version against the original on random inputs, including inputs with many exactly equal scores."
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "long_2300",
+   "kind": "chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarise the following design notes in five bullet points, then list two risks that the notes underestimate.\n\n## Target model versus the Qwen assumptions\n\nFrom the pack's `config.json` and `quantization_config.json`.\n\n| Aspect | GLM-5.3-Flash EXL3 | REXL3 today |\n| --- | --- | --- |\n| Layers | 45: 34 KDA linear-attention, 11 DSA sparse-MLA (layers 3,7,...,43) | GQA plus GDN, 16/48 split |\n| Attention | MLA latent KV (rank 512, q rank 1536, 64 heads, no RoPE), DSA indexer (32 heads, top-k 2048, k-pool 4) | GQA only; `kv_per_token` wrong for MLA |\n| Recurrent state | KDA 64 x 128 x 128 per layer, about 136 MiB per sequence at fp32 | GDN only |\n| Residuals | mHC, 4 streams, 20 Sinkhorn iterations; layer 45 has no hyper-connection | none |\n| FFN | Layers 0-2 dense; 3-44 MoE: 288 routed, top-8, 1 shared, sigmoid router with bias, scale 2.5 | dense only |\n| Drafting | DFlash2 taps layers 5/14/24/33/42; NextN/MTP layer 45 in pack | selector walk reference only |\n| Vision | ViT 24 layers, patch 14, merge 2, temporal patch 2, BF16 | none |\n| Memory | 91.8 GiB weights on a 121 GiB unified box; KV about 4.3 GiB at 262,144 tokens | admission only |\n\n## Quants available for testing\n\n| Quant | Size | Architecture | Draft or MTP | License | Local? |\n| --- | --- | --- | --- | --- | --- |\n| Qwen3.8-27B-EXL3-4.00bpw | 15.4 GiB | dense, GDN hybrid, 16 full-attention layers, vision | DFlash2 EXL3 4.00bpw (1.17 GiB), MTP head at 4 bpw | Apache-2.0 | no |\n| Qwen3.8-Flash-Next-EXL3-2.50bpw | 60 GiB | MoE (125B, 6B active), vision | MTP head, plus a 3 bpw n-gram table (18.5 GiB) streamed from disk | Apache-2.0 | no |\n| GLM-5.3-Flash-EXL3-2.25bpw-sm121 | 91.8 GiB | see \"Target model\" above | DFlash2 EXL3 3.00bpw (0.6 GiB), NextN layer | MIT (draft weights CC BY-NC-ND) | yes |\n| MiMo-V2.6-Flash-RL-exl3 | 91 GiB | MoE 256 experts top-8, 48 layers, sliding window 128 | 3 MTP layers; DFlash v1 draft (unquantized) | MIT, marked WIP and unvalidated | no |\n\nAlso on disk: `RadixArk/Qwen3.8-27B-DSpark` (an official DSpark head for the dense Qwen) and several NVFP4 packs.\nDisk has about 780 GB free, so downloading all four is feasible.\n\nCoverage of the speculative methods you named:\n\n| Method | Test model |\n| --- | --- |\n| DFlash2 | Qwen3.8-27B, GLM |\n| DFlash (v1) | MiMo |\n| MTP / NextN | Qwen3.8-27B, Flash-Next, GLM, MiMo (3 layers) |\n| DSpark | Qwen3.8-27B (RadixArk head), GLM (RedHat head, see the speculative design below) |\n| Copy / n-gram | all |\n\nExisting numbers from your repos for baselines: Qwen3.8-27B on an RTX 3090 gives 42.8 tok/s autoregressive,\n116.3 with MTP, 162.9 with DFlash2 (acceptance length 5.66). ExLlamaV3 keeps GDN history as 8 fp32 rows per\nlayer, about 1.22 GiB per sequence slot with speculation. Flash-Next on the 3090: 27.8 without MTP, 38.6 with.\n\n## Baselines for GLM on one GB10\n\n| Engine | Autoregressive | Structured | Code | Prose | Concurrency | Source |\n| --- | --- | --- | --- | --- | --- | --- |\n| ExLlamaV3 + TabbyAPI, DFlash2 K=5, 8K | 22.9 / 22.6 / 22.5 | 52.9 | 50.0 | 20.6 | batch 1 | r0b0tlab/glm53-flash-exl3-exllamav3-gb10 |\n| r0b0tlab vLLM fork, DFlash2 K=5 | 17.9-19.0 | 50.2 | 43.4 | 19.5 | about 67 aggregate at x4 to x16 | r0b0tlab/glm53-flash-exl3-dflash2-sm121 |\n| TensorFold on 2 GB10, different 4-bit checkpoint | n/a | 95.6 | 72.4 | 45.7 | 95.1 at x4 | jayleaton/glm53-tensorfold-spark (self-reported; patches partly untested on GPU) |\n| Atlas native | none | none | none | none | none | cannot run a full model |\n\nProposed REXL3 gates for the GLM pack: drafted and serial output byte-identical in 100 of 100 cases; at least 53\nstructured and 50 code tok/s; prose no lower than autoregressive (22.5); concurrency 4 above 80 aggregate;\nhost `MemAvailable` never below the guard floor.\n\n## Speculative decoding design\n\n**Prerequisite.** Drafted equals serial only if row r of a K+1-row verify equals the serial one-row step bit for\nbit on the mixed 2/3/4-bit pack. No upstream proves this on this pack. Pin tiling and split independent of row\ncount, expert sums in fixed order, DSA ties by index, and one KDA update routine compiled without FMA fusion.\n\n**Interface changes before the CUDA backend freezes** (current `Backend` and `Drafter` cannot do these):\n- Export tap rows (layers 5/14/24/33/42, layer-output semantics) and the final hidden state per accepted row.\n- Give the drafter the sampler key (seed, absolute position) and let it return per-position confidence.\n- Per-row KDA history: save k, v, g, beta per row, replay the accepted prefix from the pre-window state with the\n  same routine. About 2.7 MB per row across layers, bit-exact, versus 136 MiB per full snapshot. On a full accept\n  a ping-pong parity buffer already holds the final state.\n- Optional parent indices and masks for trees, per-step verify width, padded row buckets, and per-row expert\n  count and acceptance telemetry.\n\n**Pathways, ranked for GLM on one GB10** (gains are projections, not measurements):\n1. **DFlash2 with on-device selector walk, keyed-noise drafting and adaptive K.** Block 8, top-16 selector,\n   accept-while-match against the target's keyed sample, so it is lossless by construction. TensorFold's drafter\n   adds the target's keyed Gumbel noise (NOISE 0.7, EDGE 0.6) so drafts track the sample at T above 0, and cuts\n   chains on a probability-product threshold.\n2. **Arbiter between drafters.** TensorFold's `drafter_choice.py` picks per round by committed tokens per\n   model-millisecond with periodic probing. Candidates: DFlash2, MTP, copy drafter.\n3. **MTP (NextN) as the second arm.** The layer is already in the pack at 4 bpw. It is a full MoE layer, so each\n   step costs 8 experts, and K=1 to 2 should be cheap. No measured GLM acceptance exists yet.\n4. **Copy and n-gram drafter.** Already built on CPU. Zero GPU cost, good for structured and code output.\n5. **DSpark.** DSpark is the DFlash backbone plus a Markov head (low-rank bigram bias applied sequentially) and a\n   confidence head that schedules verify length and a global survival budget across requests. A GLM-5.3-Flash\n   head exists: `RedHatAI/GLM-5.3-Flash-speculator.dspark-preview` (MIT, 2.5B parameters, 5.1 GB bf16, taps\n   20/28/32/36/40/44, block 8, weighted acceptance length 3.77 in bf16 on their setup). It is 8x heavier than the\n   EXL3 DFlash2 draft, so it would need quantizing, and on local Qwen3.8-27B evidence DFlash2 beat the official\n   DSpark head single-stream (42.4 vs 34.5 tok/s). Treat it as a permissive-weights option and a concurrency\n   experiment, not the default. Reuse its confidence-scheduling idea inside the arbiter.\n6. **DFlash v1** (MiMo's draft) and trees are later. Trees need per-node KDA state and touch more experts.\n\n**Why adaptive K matters on this MoE (derived, then to be measured).** One decode row reads about 4.3 GB of\nnon-expert weights plus 8/288 of 87.4 GB of routed experts, about 6.7 GB, a ceiling near 36 tok/s at 240 GB/s,\nagainst 22.5 measured. A 6-row window touches up to about 45 distinct experts per layer under uniform routing, so\nroughly 2.7x the bytes of one row. That predicts break-even at acceptance le"
+    },
+    {
+     "role": "assistant",
+     "content": ""
+    }
+   ],
+   "add_generation_prompt": false
+  },
+  {
+   "name": "think_prefix",
+   "kind": "chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a concise assistant for kernel engineers."
+    },
+    {
+     "role": "user",
+     "content": "Why can a verify window of several rows read many more expert weights than a single decode row?"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "Each row picks its own 8 of 288 experts. Different rows usually pick different experts, so the union grows with the number of rows until it saturates. Weight reads are per distinct expert, not per row.",
+     "content": "Because every row routes independently, the set of distinct experts touched by a window is the union over its rows, so the bytes read grow with the window size even though the arithmetic per row is unchanged."
+    },
+    {
+     "role": "user",
+     "content": "Given that, how should a drafter decide how many rows to propose at once? Answer in three sentences."
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "img_small",
+   "kind": "image",
+   "image": "testdata/vision/demo_scene.png",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "Describe this image in one or two sentences."
+      }
+     ]
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "img_cap",
+   "kind": "image",
+   "image": "testdata/vision/grad_6000x4000_cap.png",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "What are the dominant colors and how do they change across the image?"
+      }
+     ]
+    }
+   ],
+   "add_generation_prompt": true
+  }
+ ]
+}

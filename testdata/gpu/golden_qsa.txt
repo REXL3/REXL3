@@ -1,0 +1,27 @@
+slot 0 pool plane (650 blocks) 7061fc032bd9ebf9
+slot 1 pool plane (1027 blocks) ae009148e409c525
+slot 2 pool plane (2250 blocks) 0d3b8b352941a1a5
+R1 slot0 p2599 queries 4efbd38a5b7822e4
+R1 slot0 p2599 selection f9409b68652a4224 sizes [512]
+R1 slot0 p2599 attention (window parts) a6e7107c7f931c63
+R1 slot0 p2599 attention (one part) 66ced5b50585e824
+R1 slot2 p8999 queries 545345d88aaddf98
+R1 slot2 p8999 selection f3e213105ebbec02 sizes [512]
+R1 slot2 p8999 attention (window parts) c9ed8eb3e00dd8be
+R1 slot2 p8999 attention (one part) ed9a5c95e625fda1
+R3 slot1 around the threshold queries 3c03c0a8b8f42984
+R3 slot1 around the threshold selection 65412614e25d316d sizes [512, 512, 512]
+R3 slot1 around the threshold attention (window parts) 0fcdabbe32c73a20
+R3 slot1 around the threshold attention (one part) 9231abaa80125d9a
+R9 slot1 p4100 queries eff4f442bccd6869
+R9 slot1 p4100 selection fe965c90d2192a4a sizes [512, 512, 512, 512, 512, 512, 512, 512, 512]
+R9 slot1 p4100 attention (window parts) 807135dbffd59f2c
+R9 slot1 p4100 attention (one part) 502d54b04ebfe13c
+mixed slots queries efa783411d62283e
+mixed slots selection 0b39c766e99a1260 sizes [512, 512, 512, 512, 512, 512]
+mixed slots attention (window parts) aba2a2c0c60a024b
+mixed slots attention (one part) 529bcda8709ddb72
+R40 slot2 queries dee1a4aa36d1b7e9
+R40 slot2 selection 03eb5b8c8a13ca68 sizes [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
+R40 slot2 attention (window parts) f667d1e75a590be3
+R40 slot2 attention (one part) beeab3147e44a8f8

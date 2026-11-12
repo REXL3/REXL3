@@ -1,0 +1,9 @@
+# GLM-5.3-Flash 2.25 bpw (r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121), crates/model/tests/glm_perf.rs perf_digest under the DEFAULT prefill contract P1
+# (the decode path's bits for every prompt row). Written on node 4 from the unmodified base 1681cab1 at chunk 128 and at chunk 2048 (equal), and
+# equal on glm/perf-p2 (Lane P, 2026-10-18). Graphs on give the same lines (the test asserts it). Compare: REXL3_DIGEST_EXPECT=this file.
+DIGEST graphs_off serial_2300 6a4e442ae674bef6
+DIGEST graphs_off windows_2300 173c89126447e28f
+DIGEST graphs_off boundary_2040 cf1e26baffd388d6
+DIGEST graphs_off multi a91b645d3e2d1973
+DIGEST graphs_off mtp 28c4e494d4a11ed5
+DIGEST graphs_off state 69fe1667be93fd4c

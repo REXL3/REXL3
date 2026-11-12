@@ -1,0 +1,80 @@
+{
+  "schema": "rexl3.runtime-profile.v1",
+  "state": "final",
+  "runtime_id": "glm53-flash-sage-2.25",
+  "source": {
+    "repository": "REXL3/REXL3-dev",
+    "commit": "6b56c6bad8dfb041d39b431355e7d9e5bcfe6e66",
+    "path": "docs/GLM53.md",
+    "sha256": "fc17befa8e9ab21f882879870ee5a6277a7cebae5eb7030e237b627732c5971d"
+  },
+  "target_repo": "r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw",
+  "default_profile": "glm53-flash-single",
+  "profiles": {
+    "glm53-flash-single": {
+      "kind": "single",
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir",
+        "binary_dir"
+      ],
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@",
+        "--slots",
+        "1",
+        "--max-model-len",
+        "262144",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--prefix-cache-mib",
+        "3584",
+        "--served-model-name",
+        "GLM-5.3-Flash-EXL3-2.25bpw-sm121"
+      ],
+      "env": {
+        "REXL3_MEMORY_FLOOR_GIB": "4"
+      },
+      "files": {},
+      "capabilities": {
+        "text": true,
+        "sse": true,
+        "reasoning": true,
+        "tools": true,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "json_schema": false,
+        "prefix_cache": true
+      },
+      "readiness_timeout_s": 900,
+      "http_port": 8950,
+      "http_host": "127.0.0.1",
+      "smoke_request": {
+        "model": "GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the single word: ready"
+          }
+        ],
+        "max_tokens": 2048,
+        "chat_template_kwargs": {
+          "reasoning_effort": "low"
+        }
+      }
+    }
+  },
+  "qualification": {
+    "state": "unverified",
+    "evidence": []
+  },
+  "configuration_state": "frozen"
+}

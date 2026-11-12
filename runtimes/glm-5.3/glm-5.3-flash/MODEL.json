@@ -9,9 +9,9 @@
   "pack": {
     "bits": "2.25",
     "format": "exl3",
-    "target_repo": "r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121",
+    "target_repo": "r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw",
     "target_revision": "b3194b87af5665bd8b1dd6316c99a48607fc137d"
   },
-  "runtime_id": "glm53-flash-2.25bpw-sm121",
+  "runtime_id": "glm53-flash-sage-2.25",
   "schema": "rexl3.prod-model.v1"
 }

@@ -1,0 +1,128 @@
+{
+  "engine": {
+    "artifacts": {
+      "rexl3-cluster-0.1.1-75031112-linux-aarch64-sm121": "623d4a65d75d3da53f68dcb637587a494ecdc7d0cefc3d4c2d5586364a291f71",
+      "rexl3-serve-0.1.1-75031112-linux-aarch64-sm121": "4fc2cb440b9e668ba07618faabd23c213feb2a28968370950fa98f0b0d165fe5"
+    },
+    "dev_commit": "75031112ba1279b6da97d5604be5160648cc9f2c",
+    "dev_tree": "519678470f283dd5d39281d7d90df8bbc31999e8",
+    "engine_release_tag": "engine-v0.1.1-75031112"
+  },
+  "models": [
+    {
+      "approval_sha256": "d17dda427fbf9ba6e2b9b03706b4f8a366c627a894cefdbdb8efa664b629167f",
+      "architectures": "Qwen3_5ForConditionalGeneration",
+      "context": "262,144 (single-node)",
+      "evidence": "qwen38-27b-dflash2-exl3-4.00-v4-evidence.tar.gz",
+      "family": "qwen3.8",
+      "model": "qwen3.8-27b",
+      "pack_format": "EXL3 4.00 bpw + DFlash2 4.00 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "qwen38-27b-dflash2-exl3-4.00",
+      "speculative_decoding": "DFlash2 (k=16, auto)",
+      "version": "v4",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "bc2371eb5b2e8021b281b6082f89986ea25285b3750ea375b5a3012cd981a8b7",
+      "architectures": "Qwen4ExpForConditionalGeneration",
+      "context": "262,144 (single-node)",
+      "evidence": "qwen38-flash-next-exl3-3.05-v3-evidence.tar.gz",
+      "family": "qwen3.8",
+      "model": "qwen3.8-flash-next",
+      "pack_format": "EXL3 3.05 bpw (+ DFlash2 4.00 bpw draft, opt-in profile)",
+      "prefix_cache": "on",
+      "runtime_id": "qwen38-flash-next-exl3-3.05",
+      "speculative_decoding": "MTP (auto); DFlash2 draft in qwen38-flash-next-single-262k-draft",
+      "version": "v3",
+      "vision": "off (owner exception through 2027-01-31)"
+    },
+    {
+      "approval_sha256": "7dd917e144bd94a8be40d7d19017ddb191833e506545fbf84f4afba1bb52a1cf",
+      "architectures": "Glm5NextForConditionalGeneration",
+      "context": "262,144 (single-node)",
+      "evidence": "glm53-flash-sage-2.25-v2-evidence.tar.gz",
+      "family": "glm-5.3",
+      "model": "glm-5.3-flash",
+      "pack_format": "EXL3 2.25 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "glm53-flash-sage-2.25",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v2",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "32185a603fbc745862854394ae668a089be7d914c19f6aeb4bfe25a7ef32d8ef",
+      "architectures": "Glm5NextForConditionalGeneration",
+      "context": "1,048,576 (two-node)",
+      "evidence": "glm53-flash-tp2-sage-2.25-v1-evidence.tar.gz",
+      "family": "glm-5.3",
+      "model": "glm-5.3-flash-tp2",
+      "pack_format": "EXL3 2.25 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "glm53-flash-tp2-sage-2.25",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "ec30e53e48079899bbf2047c81213f6f3c444d99cfd00f3789cb6defa1bdeb68",
+      "architectures": "Glm5NextForConditionalGeneration",
+      "context": "524,288 (two-node)",
+      "evidence": "redsnow-5.3-flash-tp2-sage-4.91-v1-evidence.tar.gz",
+      "family": "glm-5.3",
+      "model": "red-snow-5.3-flash-tp2",
+      "pack_format": "EXL3 4.91 bpw",
+      "prefix_cache": "on (pool-page)",
+      "runtime_id": "redsnow-5.3-flash-tp2-sage-4.91",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "bdc5d82c9ca25c447edf428dd6c216312f8f9df740474213f568625dfaf310a3",
+      "architectures": "NemotronH_Omni_Reasoning_V3",
+      "context": "1,048,576 (single-node)",
+      "evidence": "nemotron35-super-vl-sage-3.85-v2-evidence.tar.gz",
+      "family": "nemotron-3.5",
+      "model": "nemotron-3.5-super-vl",
+      "pack_format": "EXL3 3.85 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "nemotron35-super-vl-sage-3.85",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v2",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "6c5726edbc5cd6b3debef627758aa68fbf3c177d3d70e338d9afad3c6ac0c1a5",
+      "architectures": "MiniCPMV4_7ForConditionalGeneration",
+      "context": "262,144 (single-node)",
+      "evidence": "minicpmv47-35b-a3b-rexl3-sage-6.08-v1-evidence.tar.gz",
+      "family": "minicpm-v-4.7",
+      "model": "minicpm-v-4.7-35b-a3b",
+      "pack_format": "EXL3 6.08 bpw + DSpark 6.00 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "minicpmv47-35b-a3b-rexl3-sage-6.08",
+      "speculative_decoding": "DSpark draft (auto)",
+      "version": "v1",
+      "vision": "on (image)"
+    },
+    {
+      "approval_sha256": "35758d241246f14456abc9c357da68213b72e9048b3f03979def5e5733956adb",
+      "architectures": "DeepseekV41ForCausalLM",
+      "context": "1,048,576 (two-node, dsv41-tp2-1m)",
+      "evidence": "dsv41-flash-1017-sage-rexl3-1.55-v1-evidence.tar.gz",
+      "family": "deepseek-v4.1",
+      "model": "deepseek-v4.1-flash-1017-tp2",
+      "pack_format": "EXL3 1.55 bpw",
+      "prefix_cache": "on",
+      "runtime_id": "dsv41-flash-1017-sage-rexl3-1.55",
+      "speculative_decoding": "MTP (auto)",
+      "version": "v1",
+      "vision": "off (owner exception through 2026-12-31)"
+    }
+  ],
+  "notes": "REXL3 v0.1.1: engine 75031112 with the tester fixes, MiniCPM-V-4.7-35B-A3B and two-node RED-SNOW-5.3-Flash, GLM-5.3-Flash and DeepSeek-V4.1-Flash-1017 runtimes, and requalified Qwen3.8-27B, Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron-3.5-Super-VL versions.",
+  "schema": "rexl3.release-manifest.v1",
+  "version": "v0.1.1"
+}

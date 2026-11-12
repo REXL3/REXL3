@@ -79,6 +79,14 @@ have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
 [ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"   # section 4.3
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do                # the engine binaries the approval names (section 4.4)
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
 
 ./launch.sh --yes install-deps          # system packages and a private Python environment
 ./launch.sh doctor                      # read-only checks; must exit 0
@@ -150,6 +158,22 @@ so to use it, copy the two downloaded assets to those names in a fresh directory
 ```bash
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+```
+
+The bundle ships without its engine binaries (`bin/rexl3-serve`, and `bin/rexl3-cluster` for a
+two-node recipe). They are assets of the same release, named with their SHA-256 in the approval's
+`engine_binaries`. Download each one, check its hash, and install it at its path with mode 0755,
+before `install-deps` (which refuses a bundle with a missing binary):
+
+```bash
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do                # the engine binaries the approval names (section 4.4)
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
 ```
 
 Use a new directory for every version. Never extract over a bundle that is running. Keep the download

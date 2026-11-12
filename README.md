@@ -130,9 +130,22 @@ want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"][
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
 [ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"
 
-# 3. Extract into a new directory and run the launcher lifecycle
+# 3. Extract into a new directory
 mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+
+# 4. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
+#    SHA-256 against the approval, and install it at its path with mode 0755
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
+
+# 5. Run the launcher lifecycle
 ./launch.sh --yes install-deps                # pinned system packages and a private Python environment
 ./launch.sh doctor                            # read-only checks; must exit 0
 ./launch.sh print-command                     # the exact command, including the profile's port

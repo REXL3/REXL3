@@ -63,7 +63,9 @@ Dev tracks a model's qualification with labels `model:MODEL` and `engine`, and s
    PR needs the `local-validation` check (below).
 
 There are no separate LATEST or pack-sheet PRs, no separate publish step, and no `prod/<runtime>/v<N>`
-release. `LATEST` is part of the model PR's tree addition.
+release. `LATEST` is part of the model PR's tree addition. When a later version of a model already on
+`main` is promoted, the tool moves `LATEST` forward from the earlier `v<M>` to the new `v<N>`; it refuses a
+`LATEST` that names a later version or is malformed.
 
 ## promote_runtime
 

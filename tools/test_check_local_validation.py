@@ -16,8 +16,8 @@ HEAD = 'a' * 40
 OWNERS = {'am423', 'vcruz305'}
 
 
-def review(login, state='APPROVED', body=None):
-    return {'state': state, 'user': {'login': login}, 'body': body}
+def review(login, state='APPROVED', body=None, commit_id=HEAD):
+    return {'state': state, 'commit_id': commit_id, 'user': {'login': login}, 'body': body}
 
 
 def block(head=HEAD, model='qwen3.8/qwen3.8-27b', pr=PR, **overrides):
@@ -105,11 +105,40 @@ class CheckTest(unittest.TestCase):
                 state, _ = self.run_check(files, pr_doc(), reviews=[review('am423', body=body)])
                 self.assertEqual(state, 'failure')
 
+    def test_stale_review_commit_is_rejected_even_when_the_body_names_the_head(self):
+        files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'}]
+        stale = review('am423', body=block(), commit_id='b' * 40)
+        state, _ = self.run_check(files, pr_doc(), reviews=[stale])
+        self.assertEqual(state, 'failure')
+
     def test_malformed_block_is_ignored(self):
         files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'}]
         state, _ = self.run_check(files, pr_doc(),
                                   reviews=[review('am423', body='LOCAL-VALIDATION v1\nhead: ' + HEAD + '\npr: 7\nmodel: x')])
         self.assertEqual(state, 'failure')
+
+    def test_release_batch_and_per_model_blocks_cover_every_changed_model(self):
+        files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'},
+                 {'filename': 'runtimes/qwen3.8/qwen3.8-flash-next/v1/approval.json'}]
+        doc = pr_doc(ref='release/v0.1.2')
+        batch = block().replace('model: qwen3.8/qwen3.8-27b',
+                                'models: qwen3.8/qwen3.8-27b, qwen3.8/qwen3.8-flash-next')
+        state, _ = self.run_check(files, doc, reviews=[review('am423', body=batch)])
+        self.assertEqual(state, 'success')
+        second = block(model='qwen3.8/qwen3.8-flash-next')
+        state, _ = self.run_check(files, doc, reviews=[review('am423', body=block() + '\n\n' + second)])
+        self.assertEqual(state, 'success')
+        state, _ = self.run_check(files, doc, reviews=[review('am423', body=block())])
+        self.assertEqual(state, 'failure')
+
+    def test_sealed_receipt_validation_can_cover_a_release_batch(self):
+        files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'},
+                 {'filename': 'runtimes/qwen3.8/qwen3.8-flash-next/v1/approval.json'}]
+        body = block().replace('model: qwen3.8/qwen3.8-27b',
+                               'models: qwen3.8/qwen3.8-27b qwen3.8/qwen3.8-flash-next')
+        body += '\nsealed_receipts: PASS'
+        state, _ = self.run_check(files, pr_doc(ref='release/v0.1.2'), reviews=[review('am423', body=body)])
+        self.assertEqual(state, 'success')
 
     def test_status_attaches_to_the_head_sha(self):
         posted = []

@@ -89,6 +89,12 @@ class ScopeTest(unittest.TestCase):
         bad = files + [f('tools/check.py')]
         results = self.check('model/qwen3.8-27b', bad, title='FEAT: Promoted qwen3.8-27b v1')
         self.assertTrue(any('out of scope' in reason for reason in self.names(results, 'scope')))
+        # Registry changes stay on model/*-approval or release/v* branches.
+        for registry_path in ('runtimes/templates/approvals/qwen3.8/qwen3.8-27b.json',
+                              'runtimes/templates/approvals/qwen3.8/other.json'):
+            results = self.check('model/qwen3.8-27b', files + [f(registry_path)],
+                                 title='FEAT: Promoted qwen3.8-27b v1')
+            self.assertTrue(any('out of scope' in reason for reason in self.names(results, 'scope')))
         no_frag = [f('runtimes/qwen3.8/qwen3.8-27b/v1/approval.json')]
         results = self.check('model/qwen3.8-27b', no_frag, title='FEAT: Promoted qwen3.8-27b v1')
         self.assertTrue(any('must be present' in reason for reason in self.names(results, 'fragment')))
@@ -101,6 +107,10 @@ class ScopeTest(unittest.TestCase):
         sealed = [f('runtimes/qwen3.8/qwen3.8-27b/v1/approval.json')]
         results = self.check('engine/topic', sealed)
         self.assertTrue(any('forbidden paths' in reason for reason in self.names(results, 'scope')))
+        for registry_path in ('runtimes/templates/APPROVALS.json',
+                              'runtimes/templates/approvals/qwen3.8/qwen3.8-27b.json'):
+            results = self.check('engine/topic', [f(registry_path)])
+            self.assertTrue(any('forbidden paths' in reason for reason in self.names(results, 'scope')))
         no_frag = [f('tools/verify_runtime_tree.py')]
         results = self.check('engine/topic', no_frag)
         self.assertTrue(any('fragment' in reason for reason in self.names(results, 'fragment')))
@@ -120,6 +130,23 @@ class ScopeTest(unittest.TestCase):
         self.assertTrue(any('must be a deletion' in reason for reason in self.names(results, 'scope')))
         out = files + [f('tools/check.py')]
         results = self.check('release/v0.1.0', out)
+        self.assertTrue(any('out of scope' in reason for reason in self.names(results, 'scope')))
+
+    def test_release_accepts_multi_model_registry_docs_and_source_in_one_pr(self):
+        files = [
+            f('runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'),
+            f('runtimes/qwen3.8/qwen3.8-27b/MODEL.json'),
+            f('runtimes/qwen3.8/qwen3.8-flash-next/v2/approval.json'),
+            f('runtimes/templates/approvals/qwen3.8/qwen3.8-27b.json'),
+            f('runtimes/templates/approvals/qwen3.8/qwen3.8-flash-next.json'),
+            f('docs/packs/qwen3.8-27b.md'), f('docs/packs/qwen3.8-flash-next.md'),
+            f('crates/server/src/main.rs'), f('Cargo.lock'), f('SOURCE_IDENTITY.json'),
+            f('releases/v0.1.2/manifest.json'), f('releases/v0.1.2/NOTES.md'), f('CHANGELOG.md'),
+            f('changes/unreleased/qwen3.8-27b.md', status='removed'),
+        ]
+        results = self.check('release/v0.1.2', files, title='BUMP: Cut the v0.1.2 release')
+        self.assertEqual(self.names(results, 'scope'), [''])
+        results = self.check('release/v0.1.2', files + [f('runtimes/templates/APPROVED.json')])
         self.assertTrue(any('out of scope' in reason for reason in self.names(results, 'scope')))
 
 

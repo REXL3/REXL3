@@ -10,12 +10,15 @@ is `docs/PROMOTION.md` in `REXL3/REXL3-dev`; this file is the production side of
 A hash proves that bytes did not change. It does not prove that a benchmark ran. A tree is accepted
 only if all of these hold:
 
-1. The approval is `rexl3.profile-approval.v2` and its exact bytes are listed in
-   `runtimes/templates/APPROVALS.json` under `approvals["<family>/<model>/v<N>"]`: `approval_sha256`,
-   `source_commit`, `source_tree`, `runtime_id`. A maintainer reviews that entry; it is the independent
-   anchor.
-2. The registry file matches the hash pinned in `.github/workflows/verify.yml`
-   (`TRUSTED_APPROVALS_SHA256`), so changing the registry also changes a second reviewed file.
+1. The approval is `rexl3.profile-approval.v2` and its exact bytes are listed under
+   `approvals["<family>/<model>/v<N>"]`: `approval_sha256`, `source_commit`, `source_tree`, `runtime_id`.
+   The anchor lives in the top-level `runtimes/templates/APPROVALS.json` or its modular
+   `runtimes/templates/approvals/<family>/<model>.json` file. The loader merges both forms, refuses
+   duplicate keys, and treats every reviewed entry as an independent anchor.
+2. Existing base anchors in either `APPROVALS.json` or `runtimes/templates/approvals/<family>/<model>.json`
+   are append-only: deleting or mutating an existing base anchor is refused. A newly added modular anchor
+   is reviewed in the same `release/v<X.Y.Z>` PR as its tree and must be downloaded and 9-gate verified in
+   that same run (`TRUSTED_APPROVALS_SHA256` in `verify.yml` is retired to eliminate multi-model rebase conflicts).
 3. The verifier, the registry and the template allow-list (`runtimes/templates/APPROVED.json`) are
    read from the protected base revision of `main`, never from the pull request. A pull request cannot
    change the rules it is judged by. `.github/CODEOWNERS` makes `@am423` and `@vcruz305` owners of
@@ -26,6 +29,11 @@ only if all of these hold:
    no skip. `FAIL`, `NOT_RUN`, zero tests and strings that look like a pass are refused.
 5. The tree equals the wrapper projection plus the original `approval.json`, byte for byte: no missing,
    extra, edited, linked or mode-changed file.
+6. Diff-scoped verification skips only the remote download and archive revalidation for a tree whose
+   bytes equal the protected base and whose anchor is unchanged. It still validates every candidate
+   `MODEL.json`, `LATEST`, `v<N>/approval.json` and registry binding. Every newly added anchor must
+   name a discovered tree that is downloaded and fully verified in that same run; orphan anchors and
+   candidate-only carried-gate source anchors are refused. `--full` disables the transport skip.
 
 One secret, `DEV_ASSETS_TOKEN`, lets `verify` read the private dev release (see "What CI checks").
 There is no auto-merge anywhere.
@@ -52,38 +60,48 @@ released:
 Dev tracks a model's qualification with labels `model:MODEL` and `engine`, and scope files under
 `releases/v0.1.0/models` (added by dev tooling; plain text).
 
-## The two-PR flow
+## Promotion flows
 
-1. **`model/<model>-approval`** — register the dev approval: add the entry to
-   `runtimes/templates/APPROVALS.json` and update the `TRUSTED_APPROVALS_SHA256` pin in
-   `.github/workflows/verify.yml` in the same commit (tool tests enforce the two agree). This merges
-   first, because CI trusts only the registry on main.
-2. **`model/<model>`** — bring the validated model into prod: `runtimes/<family>/<model>/**`
-   (`MODEL.json`, `LATEST`, `v<N>/`), `docs/packs/<model>.md`, `changes/unreleased/<model>.md`. This
-   PR needs the `local-validation` check (below).
+The standard product cut is a **single-PR `release/v<X.Y.Z>` flow**, opened on explicit maintainer
+instruction from **one unified `engine-v<X.Y.Z>-<8hex>` dev release** (never create separate
+`approve-<runtime_id>-<N>` dev releases or `2N` per-model PRs for a product cut):
+
+- One reviewed `release/v<X.Y.Z>` PR carries the corresponding engine source, every promoted model tree and
+  its `MODEL.json`/`LATEST`, modular `runtimes/templates/approvals/<family>/<model>.json` anchors, pack docs,
+  release manifest, notes and `CHANGELOG.md`.
+- Its `LOCAL-VALIDATION v1` review covers every changed model at the exact PR head `commit_id`.
+- A `release/v<X.Y.Z>` PR is the only branch that may combine engine source, sealed trees and registry
+  anchors; an `engine/*` branch may change neither registry form.
+
+Fresh models in one product cut use the unified internal dev release `engine-v<X.Y.Z>-<8hex>`, where
+`<X.Y.Z>` is the native engine version and `<8hex>` is the first eight lowercase hex digits of the
+approval's full `source_commit`. Each model has prefixed approval, bundle, source and evidence assets and
+shares the release's bound `rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz` archive. Older `approve-<runtime_id>-<N>`
+approvals remain valid for legacy and T0 carried-forward entries.
+
+*(Emergency single-model hotfix only: the standalone `model/<model>-approval` -> `model/<model>` path remains
+accepted by the verifier if an out-of-band single-model hotfix is ever explicitly requested.)*
 
 There are no separate LATEST or pack-sheet PRs, no separate publish step, and no `prod/<runtime>/v<N>`
-release. `LATEST` is part of the model PR's tree addition. When a later version of a model already on
-`main` is promoted, the tool moves `LATEST` forward from the earlier `v<M>` to the new `v<N>`; it refuses a
-`LATEST` that names a later version or is malformed.
+release. `LATEST` is part of the tree addition. When a later version of a model already on `main` is
+promoted, the tool moves `LATEST` forward from the earlier `v<M>` to the new `v<N>`.
 
 ## promote_runtime
 
-`tools/promote_runtime.py` produces the sealed tree at `runtimes/<family>/<model>/v<N>` from the dev
-approval assets (dev release `approve-<runtime_id>-<N>`). It runs on a maintainer's machine with an
-authenticated `gh`, never in CI. The tool derives dev release tags from `runtime_id` — read from
-`MODEL.json` and the sealed approval, which must agree — never from folder names. A maintainer runs it;
-an agent runs it only on an explicit, quoted maintainer instruction (CONTRIBUTING.md section 7).
+`tools/promote_runtime.py` stages each sealed tree at `runtimes/<family>/<model>/v<N>` and its modular
+anchor `runtimes/templates/approvals/<family>/<model>.json` onto `release/v<X.Y.Z>` from the unified
+`engine-v<X.Y.Z>-<8hex>` dev release. It runs on a maintainer's machine with an authenticated `gh`,
+never in CI:
 
 ```bash
 python3 tools/promote_runtime.py \
   --family <family> --model <model> --version <N> \
-  --approve-tag approve-<runtime_id>-<N> \
+  --approve-tag engine-v<X.Y.Z>-<8hex> \
+  --release-branch release/v<X.Y.Z> \
   --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
-  --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" \
   [--dry-run] [--display-name "Display Name" --engine-family <module> \
    --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
 ```
@@ -139,7 +157,8 @@ For a `model/<model>` PR, a maintainer other than the author reviews locally bef
 4. On a GB10 host, run the tree's `launch.sh doctor` and `launch.sh smoke`, plus a gate subset
    (capability, context, prefix_cache at minimum).
 5. Post the `LOCAL-VALIDATION v1` block from CONTRIBUTING.md section 4 as an APPROVED review on the
-   current head. CI evaluates it with
+   current head. Both the review body's `head` field and the review API's `commit_id` must equal that
+   head; editing an old review body cannot revalidate a new commit. CI evaluates it with
    `python3 tools/check_local_validation.py --repo OWNER/REPO --pr N --head-sha SHA --codeowners PATH --token TOKEN`,
    which sets the commit status `local-validation` on the head SHA and re-evaluates on push and on
    review submit/dismiss.
@@ -149,8 +168,9 @@ For a `model/<model>` PR, a maintainer other than the author reviews locally bef
 Required on every PR to main (each ALWAYS reports; job-level conditions that succeed as a no-op, never
 workflow-level path or branch filters):
 
-- `verify` — the tree verifier plus unit tests, from the protected base revision, with the
-  `DEV_ASSETS_TOKEN` download step for v2 trees.
+- `verify` — the tree verifier plus unit tests, from the protected base revision. With `--base`,
+  unchanged trees use the diff-scoped transport skip described above; changed or newly anchored v2
+  trees still require the authenticated `DEV_ASSETS_TOKEN` download and full verification.
 - `pr-rules` — title, branch name, path scope per branch type, `changes/unreleased/` fragment presence.
 - `model-completeness` — runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success
   otherwise.
@@ -161,9 +181,9 @@ workflow-level path or branch filters):
 
 - Releases are immutable and a bad release is superseded by a patch release (`docs/RELEASING.md`);
   deletion needs both maintainers.
-- A bad model tree is superseded by a corrected promoted version from dev. Removing a tree or its
-  registry entry needs both maintainers; the registry entry and the `TRUSTED_APPROVALS_SHA256` pin
-  change in the same commit.
+- A bad model tree is superseded by a corrected promoted version from dev. Existing sealed registry
+  anchors are append-only: the diff-scoped verifier refuses their deletion or mutation, and a fix
+  lands as a new `v<N>` anchor and tree.
 
 ## Legacy v1
 

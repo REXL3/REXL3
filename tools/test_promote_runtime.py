@@ -139,6 +139,39 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse((root / 'runtimes' / FAMILY / MODEL / 'v1').exists())
 
+    def test_prepare_release_branch_stays_local_and_preserves_registry_siblings(self):
+        root, _ = self.make_prod_bare()
+        empty = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}}
+        write(root, 'runtimes/templates/APPROVALS.json', e.json_bytes(empty))
+        p.git('add', '.', cwd=root)
+        p.git('commit', '-m', 'TEST: Added empty registry', cwd=root)
+        commit = p.git('rev-parse', 'HEAD', cwd=root).stdout.strip()
+        p.git('update-ref', 'refs/remotes/origin/main', commit, cwd=root)
+        original_git = p.git
+        with patch.object(p, 'gh', side_effect=AssertionError('release branch must not call GitHub')), \
+             patch.object(p, 'git') as git_mock:
+            def local_git(*args, **kwargs):
+                if args[0] in ('push', 'fetch', 'ls-remote'):
+                    raise AssertionError('release branch must stay local: ' + repr(args))
+                return original_git(*args, **kwargs)
+            git_mock.side_effect = local_git
+            code = p.prepare_promotion(
+                FAMILY, MODEL, 1, approve_tag='approve-synthetic-demo-1', target_commit=commit,
+                prod_checkout=root, assets_dir=self.assets, registry=self.registry,
+                approved_templates=self.f.approved, release_branch='release/v0.1.2', meta=dict(
+                    display_name='Synthetic Demo', engine_family='synthetic',
+                    architectures=['SyntheticForConditionalGeneration'], pack={'format': 'exl3'}))
+        self.assertEqual(code, 0)
+        self.assertEqual(p.git('branch', '--show-current', cwd=root).stdout.strip(), 'release/v0.1.2')
+        merged = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
+        self.assertIn(f'{FAMILY}/{MODEL}/v1', merged['approvals'])
+        sibling = copy.deepcopy(next(iter(self.registry['approvals'].values())))
+        path = p._write_release_registry_entry(root, FAMILY, 'sibling-model', 2, sibling)
+        self.assertIsNotNone(path)
+        merged = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
+        self.assertIn(f'{FAMILY}/{MODEL}/v1', merged['approvals'])
+        self.assertIn(f'{FAMILY}/sibling-model/v2', merged['approvals'])
+
     def test_prepare_creates_model_branch_with_tree_model_json_and_latest(self):
         root, commit = self.make_prod_bare()
         calls = []
@@ -326,6 +359,55 @@ class PromotionTest(unittest.TestCase):
                                      approved_templates=self.f.approved, key=f'{FAMILY}/{MODEL}/v1')
         self.assertEqual(got.read_bytes(), self.approval.read_bytes())
         self.assertGreaterEqual(calls['n'], 2, 'the release is read before and after the download')
+
+    def test_unified_download_selects_only_the_bound_prefixed_assets(self):
+        tag = 'engine-v0.1.2-' + self.f.commit[:8]
+        prefix = 'synthetic-demo-v1'
+        doc = copy.deepcopy(self.doc)
+        original = {field: doc[field]['archive'] for field in
+                    ('bundle', 'source_asset', 'engine_source_asset', 'evidence_asset')}
+        payloads = {field: (self.f.assets / name).read_bytes() for field, name in original.items()}
+        doc['approve_tag'] = tag
+        names = {}
+        for field, kind in (('bundle', 'bundle'), ('source_asset', 'source'), ('evidence_asset', 'evidence')):
+            names[field] = f'{prefix}-{kind}.tar.gz'
+        names['engine_source_asset'] = e.shared_engine_source_name(tag)
+        for field, name in names.items():
+            doc[field]['archive'] = name
+            (self.f.assets / name).write_bytes(payloads[field])
+        approval_name = f'{prefix}-approval.json'
+        approval_bytes = encoded(doc)
+        (self.f.assets / approval_name).write_bytes(approval_bytes)
+        key = f'{FAMILY}/{MODEL}/v1'
+        registry = copy.deepcopy(self.registry)
+        registry['approvals'][key].update(approve_tag=tag, approval_sha256=sha(approval_bytes))
+        remote_names = [approval_name] + list(names.values())
+        metadata = {'id': 88, 'tag_name': tag, 'target_commitish': self.f.commit,
+                    'draft': False, 'prerelease': False, 'assets': [
+                        {'id': i + 1, 'name': name, 'size': (self.f.assets / name).stat().st_size,
+                         'digest': 'sha256:' + e.sha256_file(self.f.assets / name)}
+                        for i, name in enumerate(remote_names)]}
+        metadata['assets'].append({'id': 99, 'name': 'unrelated-v9-bundle.tar.gz', 'size': 4,
+                                   'digest': 'sha256:' + sha(b'junk')})
+
+        def download(*args, **kwargs):
+            dest = Path(args[args.index('-D') + 1])
+            selected = [args[i + 1] for i, arg in enumerate(args) if arg == '-p']
+            self.assertTrue(selected)
+            for name in selected:
+                shutil.copyfile(self.f.assets / name, dest / name)
+            return result()
+
+        with patch.object(p, 'release_metadata', return_value=metadata), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), patch.object(p, 'gh', side_effect=download):
+            got = p.download_release(tag, Path(self.tmp.name) / 'unified', registry=registry,
+                                     approved_templates=self.f.approved, key=key,
+                                     cache=p.ReleaseAssetCache(Path(self.tmp.name) / 'shared'))
+        self.assertEqual(got.name, 'approval.json')
+        self.assertEqual(got.read_bytes(), approval_bytes)
+        self.assertFalse((got.parent / 'unrelated-v9-bundle.tar.gz').exists())
+        for name in names.values():
+            self.assertTrue((got.parent / name).is_file())
 
     def test_registry_key_for_tag(self):
         self.assertEqual(p.registry_key_for_tag('approve-synthetic-demo-1', p.DEV_REPO), 'synthetic-demo/v1')

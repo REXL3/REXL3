@@ -7,8 +7,9 @@ name: verify
 #     as the only import path;
 #   - the workflow token is read-only; one secret (DEV_ASSETS_TOKEN, read access to the dev repo's contents) is used by one step.
 # A change to this file, to tools/ or to runtimes/templates/ cannot approve itself: it is read only after
-# it has been merged, and CODEOWNERS (two maintainers) must approve the merge. A pull request that adds
-# a runtime tree is verified against the registry on the base, so the registry entry is merged first.
+# it has been merged, and CODEOWNERS (two maintainers) must approve the merge.
+# Unchanged trees are anchored by the base registry and skipped; changed trees use schema-validated
+# candidate registry data, whose sealed approval hashes and dev assets are still verified by base tools.
 # Nothing in this repository merges a pull request; a maintainer does, by hand.
 on:
   pull_request_target:
@@ -24,11 +25,6 @@ concurrency:
 defaults:
   run:
     shell: bash
-env:
-  # sha256 of runtimes/templates/APPROVALS.json on the protected base. The verifier refuses a registry
-  # whose bytes differ, so changing the registry means changing this line in the same reviewed commit.
-  # tools/test_verify_mutations.py fails if the two disagree.
-  TRUSTED_APPROVALS_SHA256: 7c8dcf966b91d534899e9ca8e3b1aaaae1ac08f4721bce369470f353d42d7745
 jobs:
   verify:
     name: verify
@@ -64,12 +60,14 @@ jobs:
           set -uo pipefail
           umask 022
           mkdir -p "$ASSETS_DIR"
+          FULL=()
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then FULL=(--full); fi
           python3 -B -E -s base/tools/fetch_dev_assets.py \
             --root candidate \
+            --base base \
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
-            --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256"  \
-            --assets-dir "$ASSETS_DIR"
+            --assets-dir "$ASSETS_DIR" "${FULL[@]}"
       # Every tree under runtimes/<family>/<model>/ must match an anchor in the protected registry
       # (key <family>/<model>/v<N>, runtime_id), and MODEL.json (schema rexl3.prod-model.v1) must agree
       # with the sealed approval. The old flat runtimes/<runtime-id>/v<N> layout is refused.
@@ -80,15 +78,17 @@ jobs:
           set -uo pipefail
           umask 022
           mkdir -p "$ASSETS_DIR"
+          FULL=()
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then FULL=(--full); fi
           python3 -B -E -s base/tools/verify_runtime_tree.py \
             --root candidate \
+            --base base \
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
-            --trusted-approvals-sha256 "$TRUSTED_APPROVALS_SHA256" \
-            --assets-dir "$ASSETS_DIR"
+            --assets-dir "$ASSETS_DIR" "${FULL[@]}"
           status=$?
           if [ "$status" -ne 0 ]; then
-            echo "::error::Verification failed (exit $status). A tree that is not in runtimes/templates/APPROVALS.json on the base, or whose dev release assets differ from the registry, is refused by design. See docs/PROMOTION.md."
+            echo "::error::Verification failed (exit $status). A changed tree needs a valid candidate registry anchor and matching dev assets; an unchanged tree must equal its protected base bytes. See docs/PROMOTION.md."
           fi
           exit "$status"
       # The verifier's own tests and the mutation tests, from the protected base only.

@@ -1248,23 +1248,66 @@ def validate_asset(asset):
         validate_record(item)
 
 
+def is_engine_tag(value):
+    return isinstance(value, str) and ENGINE_TAG.fullmatch(value) is not None
+
+
+def unified_asset_prefix(approval):
+    return f"{approval.get('runtime_id')}-v{approval.get('version')}"
+
+
+def shared_engine_source_name(tag):
+    """The one corresponding-source archive shared by an engine-v<X.Y.Z>-<8hex> release."""
+    if not is_engine_tag(tag):
+        return None
+    match = re.fullmatch(r'engine-v([0-9]+\.[0-9]+\.[0-9]+)-([0-9a-f]{8})', tag)
+    require(match is not None, 'invalid unified engine tag')
+    return f'rexl3-engine-source-{match[1]}-{match[2]}.tar.gz'
+
+
+def validate_approval_asset_names(approval):
+    """Bind unified-release asset names to validated runtime/version/tag slugs.
+
+    Legacy per-model releases keep their historical generic archive names. Unified
+    releases use prefixed model assets and may share exactly one engine-source archive.
+    """
+    tag = approval.get('approve_tag')
+    if not is_engine_tag(tag):
+        return
+    prefix = unified_asset_prefix(approval)
+    expected = {
+        'bundle': f'{prefix}-bundle.tar.gz',
+        'source_asset': f'{prefix}-source.tar.gz',
+        'evidence_asset': f'{prefix}-evidence.tar.gz',
+    }
+    for field, name in expected.items():
+        require(approval[field]['archive'] == name, 'unified release asset name mismatch: ' + field)
+    engine_source = approval['engine_source_asset']['archive']
+    require(engine_source in (f'{prefix}-engine-source.tar.gz', shared_engine_source_name(tag)),
+            'unified engine-source asset name mismatch')
+
+
 def approval_assets(approval):
     """Every transport record, with four mandatory distinct v2 asset roles."""
     require(all(key in approval for key in ('bundle', 'source_asset', 'engine_source_asset', 'evidence_asset')),
             'missing release asset (engine corresponding source is mandatory)')
     assets = [value for key, value in approval.items() if key == 'bundle' or key.endswith('_asset')]
-    names = {'approval.json', '.dev-download-identity.json'}
+    prefix = unified_asset_prefix(approval)
+    names = {'approval.json', f'{prefix}-approval.json', '.dev-download-identity.json'}
     for asset in assets:
         validate_asset(asset)
         require(asset['archive'] not in names, 'release asset collision')
         names.add(asset['archive'])
-    require(approval['evidence_asset']['archive'] == 'evidence.tar.gz', 'bound evidence transport required')
+    require(approval['evidence_asset']['archive'] in ('evidence.tar.gz', f'{prefix}-evidence.tar.gz'),
+            'bound evidence transport required')
+    validate_approval_asset_names(approval)
     return assets
 
 
 def receipt_files(approval, root):
     paths = set()
-    forbidden = {'approval.json', 'evidence.tar.gz', '.dev-download-identity.json'} | {
+    forbidden = {'approval.json', f"{unified_asset_prefix(approval)}-approval.json",
+                 'evidence.tar.gz', '.dev-download-identity.json'} | {
         asset['archive'] for key, asset in approval.items() if key == 'bundle' or key.endswith('_asset')}
     for selected in approval['profiles'].values():
         rel = relative_path(selected['receipt']['path'])
@@ -1362,7 +1405,9 @@ def git_file(repo, commit, name):
 def validate_request(runtime_id, approve_tag, version):
     require(isinstance(runtime_id, str) and ID.fullmatch(runtime_id), 'invalid runtime id')
     require(type(version) is int and version > 0, 'positive version required')
-    require(approve_tag == f'approve-{runtime_id}-{version}', 'runtime/tag/version mismatch')
+    legacy_tag = f'approve-{runtime_id}-{version}'
+    require(approve_tag == legacy_tag or is_engine_tag(approve_tag), 'runtime/tag/version mismatch')
+    return approve_tag
 
 
 def context_argument(argv):
@@ -1499,7 +1544,8 @@ def engine_binary_files(engine, engine_dir, machine):
 
 
 def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template, version,
-                    engine_binaries=None, engine_dir=None, inventory=None, source_inventory=None):
+                    engine_binaries=None, engine_dir=None, inventory=None, source_inventory=None,
+                    approve_tag=None):
     """Identity of a bundle. With ``engine_binaries`` the native executables are not in the archive: the approval
     names the engine release assets that supply them and ``engine_dir`` holds those files.
 
@@ -1547,6 +1593,16 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     require(isinstance(arch, str) and re.fullmatch(r'[1-9][0-9]*\.[0-9]+', arch), 'native GPU architecture required')
     require(native['cuda_arch'] in (arch.replace('.', ''), 'sm_' + arch.replace('.', ''), 'compute_' + arch.replace('.', '')), 'native architecture mismatch')
     require({name for name in full if name.startswith('bin/')} <= set(ENGINE_PATHS), 'unexpected native executable')
+    engine_tag = 'engine-v%s-%s' % (native['version'], commit[:8])
+    if is_engine_tag(approve_tag):
+        # A unified model-approval tag is not merely a release-name convention: it
+        # authenticates the exact native version and full source commit sealed below.
+        require('-' not in native['version'], 'pre-release native engine version refused for engine release')
+        require(approve_tag == engine_tag,
+                'unified approve_tag does not name the native engine version and source commit')
+        if engine_binaries is not None:
+            require({item['release_tag'] for item in engine_binaries.values()} == {approve_tag},
+                    'engine binary release tag differs from unified approve_tag')
     if engine_binaries is None:
         with tarfile.open(archive, 'r:*') as tar:
             for name in inv:
@@ -1558,7 +1614,7 @@ def bundle_identity(archive, source_asset, *, runtime_id, commit, tree, template
     else:
         # The tag names the engine, never a model: engine version and the first eight hex digits of its commit.
         require('-' not in native['version'], 'pre-release native engine version refused for engine release')
-        require({item['release_tag'] for item in engine_binaries.values()} == {'engine-v%s-%s' % (native['version'], commit[:8])},
+        require({item['release_tag'] for item in engine_binaries.values()} == {engine_tag},
                 'engine release tag does not name the native engine version and commit')
         engine_binary_files(engine_binaries, engine_dir, platform['machine'])
     source_inv = {k: v for k, v in inv.items() if not k.startswith('bin/') and k != 'release.lock.json'}
@@ -1617,6 +1673,8 @@ def trusted_entry(approval_path, registry, *, allow_legacy=False, key=None):
     for field in ('source_commit', 'source_tree'):
         full_hash(approval.get(field), HEX40)
         require(approval[field] == entry.get(field), 'trusted source identity mismatch')
+    if entry.get('approve_tag') is not None or is_engine_tag(approval.get('approve_tag')):
+        require(entry.get('approve_tag') == approval.get('approve_tag'), 'trusted approve_tag mismatch')
     return approval
 
 
@@ -1638,7 +1696,8 @@ def template_approved(approved_templates, version, digest):
     return digest in listed
 
 
-def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None, key=None, precomputed=None):
+def verify_assets(approval_path, *, registry, approved_templates, engine_dir=None, key=None, precomputed=None,
+                  trusted_source_registry=None):
     """Authenticate approval, then every archive and receipt, including engine source.
 
     ``key`` is the family/model registry key (``<family>/<model>/v<N>``) when verifying a prod tree;
@@ -1650,10 +1709,19 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
     inventory. A supplied inventory is honored only after this phase's fresh
     streaming digest of the compressed transport bytes equals the approval
     record; it skips only decompression/re-derivation, never the digest.
+
+    ``trusted_source_registry`` separately anchors carried-gate source receipts.
+    Diff-scoped callers pass the protected base registry here, so a newly added
+    candidate entry can authenticate its own approval but cannot authenticate a
+    carry-forward source in the same unreviewed edit.
     """
     approval_path = checked_path(approval_path)
     root = approval_path.parent
     doc = trusted_entry(approval_path, registry, key=key)
+    source_registry = registry if trusted_source_registry is None else trusted_source_registry
+    require(isinstance(source_registry, dict)
+            and source_registry.get('schema') == 'rexl3.approval-registry.v1',
+            'trusted carried-gate source registry required')
     validate_request(doc.get('runtime_id'), doc.get('approve_tag'), doc.get('version'))
     template = doc.get('template', {})
     require(isinstance(template, dict)
@@ -1686,7 +1754,7 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
     profile, identities, _, _ = bundle_identity(archive, wrapper, runtime_id=doc['runtime_id'], commit=doc['source_commit'],
         tree=doc['source_tree'], template=template, version=doc['version'], engine_binaries=engine, engine_dir=engine_dir,
         inventory=precomputed.get(doc['bundle']['archive']),
-        source_inventory=precomputed.get(doc['source_asset']['archive']))
+        source_inventory=precomputed.get(doc['source_asset']['archive']), approve_tag=doc.get('approve_tag'))
     require(identities == doc.get('identities'), 'approval bundle identities mismatch')
     profiles = doc.get('profiles')
     # The approval names the profiles it qualified. Packaged profiles it does not name (tp2 beside tp1, D38/D53)
@@ -1734,7 +1802,7 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
             # with the same commit/tree are refused. A cross-choice source (rule B1) is
             # the same receipt-pinned approval's other profile. An unsealed source bundle
             # needs no registry entry.
-            entries = (registry.get('approvals', {}) if isinstance(registry, dict) else {})
+            entries = source_registry.get('approvals', {})
             for gate, spec in carried.items():
                 require(spec['source_engine_commit'] != expected['engine_commit'],
                         'carried gate source must name an earlier engine build than the target: ' + gate)
@@ -1761,6 +1829,102 @@ def verify_assets(approval_path, *, registry, approved_templates, engine_dir=Non
     return doc, archive
 
 
-def load_registry(path, expected_sha256):
-    require(sha256_file(path) == full_hash(expected_sha256), 'trusted registry hash mismatch')
-    return load_json(path)
+def validate_registry_entry(key, entry, *, legacy=False):
+    """Schema-validate the security-relevant part of one registry anchor.
+
+    Additional carry-forward identity fields remain permitted. The caller may pass a
+    candidate registry as data, but it can never turn an entry into a URL or command.
+    """
+    require(isinstance(key, str) and isinstance(entry, dict), 'invalid approval registry entry')
+    parts = key.split('/')
+    require(len(parts) == (2 if legacy else 3) and re.fullmatch(r'v[1-9][0-9]*', parts[-1]),
+            'invalid approval registry key: ' + key)
+    require(all(ID.fullmatch(part) for part in parts[:-1]), 'invalid approval registry key: ' + key)
+    full_hash(entry.get('approval_sha256'))
+    full_hash(entry.get('source_commit'), HEX40)
+    full_hash(entry.get('source_tree'), HEX40)
+    tag = entry.get('approve_tag')
+    if tag is not None:
+        if legacy:
+            require(tag == f"approve-{parts[0]}-{parts[1][1:]}", 'legacy registry approve_tag mismatch')
+        else:
+            runtime_id = entry.get('runtime_id')
+            require(isinstance(runtime_id, str) and ID.fullmatch(runtime_id), 'invalid registry runtime_id')
+            validate_request(runtime_id, tag, int(parts[-1][1:]))
+    elif not legacy:
+        runtime_id = entry.get('runtime_id')
+        require(isinstance(runtime_id, str) and ID.fullmatch(runtime_id), 'invalid registry runtime_id')
+    return entry
+
+
+def validate_registry_transition(base, candidate, discovered_keys):
+    """Fail closed on registry tampering and unauthenticated candidate anchors.
+
+    Existing sealed entries are append-only: every protected-base entry must be
+    present as an identical entry dictionary in the candidate. Historical base
+    anchors may name retired trees, but every *new* v2 anchor must name a tree
+    discovered in this candidate and therefore authenticated in this same run.
+    New legacy anchors are not accepted in the family/model layout.
+    """
+    require(isinstance(base, dict) and isinstance(candidate, dict)
+            and base.get('schema') == candidate.get('schema') == 'rexl3.approval-registry.v1',
+            'approval registry transition requires valid base and candidate registries')
+    discovered = set(discovered_keys)
+    for section in ('approvals', 'legacy'):
+        before = base.get(section, {})
+        after = candidate.get(section, {})
+        require(isinstance(before, dict) and isinstance(after, dict),
+                'invalid approval registry section: ' + section)
+        for key, entry in before.items():
+            require(after.get(key) == entry,
+                    'protected base registry entry deleted or altered: ' + key)
+    new_keys = set(candidate.get('approvals', {})) - set(base.get('approvals', {}))
+    orphans = sorted(new_keys - discovered)
+    require(not orphans,
+            'new candidate registry anchor has no discovered runtime tree: ' + ', '.join(orphans))
+    new_legacy = set(candidate.get('legacy', {})) - set(base.get('legacy', {}))
+    require(not new_legacy, 'new legacy registry anchors are refused in the family/model layout')
+    return new_keys
+
+
+def _merge_registry_document(merged, document, source):
+    require(isinstance(document, dict) and document.get('schema') == 'rexl3.approval-registry.v1',
+            'trusted approval registry required: ' + str(source))
+    for section in ('approvals', 'legacy'):
+        entries = document.get(section, {})
+        require(isinstance(entries, dict), 'invalid approval registry section: ' + section)
+        target = merged.setdefault(section, {})
+        for key, entry in entries.items():
+            require(key not in target, 'duplicate approval registry key across registry files: ' + key)
+            validate_registry_entry(key, entry, legacy=(section == 'legacy'))
+            target[key] = entry
+
+
+def load_registry(path, expected_sha256=None):
+    """Load APPROVALS.json plus modular approvals/<family>/<model>.json files.
+
+    ``expected_sha256`` remains an optional additional pin for legacy callers and
+    authenticates only the named top-level file. Registry entries are independently
+    authenticated by their sealed approval hash; modular files are merged fail-closed
+    and duplicate keys are refused even when their values are identical.
+    """
+    path = checked_path(path)
+    if expected_sha256 is not None:
+        require(sha256_file(path) == full_hash(expected_sha256), 'trusted registry hash mismatch')
+    merged = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}
+    documents = [(path, load_json(path))]
+    approvals = path.parent / 'approvals'
+    if approvals.exists():
+        approvals = checked_path(approvals)
+        require(approvals.is_dir(), 'approval registry module root is not a directory')
+        for family in sorted(approvals.iterdir()):
+            family = checked_path(family)
+            require(family.is_dir() and ID.fullmatch(family.name), 'invalid approval registry family module')
+            for module in sorted(family.iterdir()):
+                module = checked_path(module)
+                require(module.is_file() and module.suffix == '.json' and ID.fullmatch(module.stem),
+                        'invalid approval registry model module')
+                documents.append((module, load_json(module)))
+    for source, document in documents:
+        _merge_registry_document(merged, document, source)
+    return merged

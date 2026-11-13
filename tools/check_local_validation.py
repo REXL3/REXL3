@@ -23,42 +23,57 @@ except ImportError:
 
 LOCAL_VALIDATION = 'LOCAL-VALIDATION v1'
 PASS_FIELDS = ('check_model_branch', 'assets', 'doctor', 'smoke')
-REQUIRED_FIELDS = ('pr', 'head', 'model', 'host', 'gates')
+REQUIRED_FIELDS = ('pr', 'head', 'host', 'gates')
 
 
-def parse_block(body):
-    """Return the LOCAL-VALIDATION v1 dict, or None when the body has none."""
+def parse_blocks(body):
+    """Return every well-formed LOCAL-VALIDATION v1 block in a review."""
     if not isinstance(body, str):
-        return None
+        return []
     lines = body.splitlines()
+    blocks = []
     for i, line in enumerate(lines):
         if line.strip() != LOCAL_VALIDATION:
             continue
         fields = {}
+        malformed = False
         for following in lines[i + 1:]:
             stripped = following.strip()
             if not stripped:
                 break
             if ':' not in stripped:
-                return None
+                malformed = True
+                break
             key, value = stripped.split(':', 1)
             key = key.strip()
             if key in fields:
-                return None
+                malformed = True
+                break
             fields[key] = value.strip()
-        if all(key in fields for key in REQUIRED_FIELDS):
-            return fields
-        return None
-    return None
+        if (not malformed and all(key in fields for key in REQUIRED_FIELDS)
+                and ('model' in fields) != ('models' in fields)):
+            blocks.append(fields)
+    return blocks
 
 
-def model_folder(pr_files):
+def parse_block(body):
+    """Backward-compatible single-block view used by model/<model> callers."""
+    blocks = parse_blocks(body)
+    return blocks[0] if blocks else None
+
+
+def model_folders(pr_files):
     folders = set()
     for item in pr_files:
         path = item['filename']
         parts = path.split('/')
         if len(parts) >= 4 and parts[0] == 'runtimes' and parts[1] != 'templates':
             folders.add((parts[1], parts[2]))
+    return folders
+
+
+def model_folder(pr_files):
+    folders = model_folders(pr_files)
     if len(folders) == 1:
         return next(iter(folders))
     return None
@@ -84,13 +99,15 @@ def check_local_validation(repo, pr, head_sha, token, owners, pr_files=None, pr_
     if pr_doc.get('state') != 'open':
         return ('success', 'PR is not open')
     author = pr_doc.get('user', {}).get('login')
-    folder = model_folder(pr_files)
-    if folder is None:
-        return ('success', 'not a model PR (no single model folder)')
-    family, model = folder
+    folders = model_folders(pr_files)
     branch = pr_doc.get('head', {}).get('ref', '')
+    if not folders:
+        return ('success', 'not a model PR (no model folders)')
+    if len(folders) > 1 and not branch.startswith('release/v'):
+        return ('success', 'not a single-model or release PR')
     if branch.startswith('model/') and branch.endswith('-approval'):
         return ('success', 'model approval registration PR')
+    expected = {f'{family}/{model}' for family, model in folders}
     # Reviews: only APPROVED reviews by a maintainer other than the author.
     reviews = []
     page = 1
@@ -100,24 +117,30 @@ def check_local_validation(repo, pr, head_sha, token, owners, pr_files=None, pr_
         if len(batch) < 100:
             break
         page += 1
+    covered = set()
     for review in reviews:
-        if review.get('state') != 'APPROVED':
+        if review.get('state') != 'APPROVED' or review.get('commit_id') != head_sha:
             continue
         login = review.get('user', {}).get('login')
         if login in (None, author) or login not in owners:
             continue
-        fields = parse_block(review.get('body'))
-        if fields is None:
-            continue
-        if fields['head'] != head_sha:
-            continue
-        if fields['model'] != f'{family}/{model}':
-            continue
-        if str(fields['pr']) != str(pr):
-            continue
-        if all(fields.get(f) == 'PASS' for f in PASS_FIELDS) and fields.get('gates'):
-            return ('success', 'LOCAL-VALIDATION v1 for the current head')
-    return ('failure', 'no APPROVED maintainer review with a LOCAL-VALIDATION v1 block for the current head')
+        for fields in parse_blocks(review.get('body')):
+            if fields['head'] != head_sha or str(fields['pr']) != str(pr) or not fields.get('gates'):
+                continue
+            local_pass = all(fields.get(f) == 'PASS' for f in PASS_FIELDS)
+            sealed_pass = branch.startswith('release/v') and fields.get('sealed_receipts') == 'PASS'
+            if not (local_pass or sealed_pass):
+                continue
+            if 'models' in fields:
+                declared = {name for name in fields['models'].replace(',', ' ').split() if name}
+            else:
+                declared = {fields['model']}
+            if declared <= expected:
+                covered.update(declared)
+    if covered == expected:
+        return ('success', 'LOCAL-VALIDATION v1 covers every changed model at the current head')
+    missing = ', '.join(sorted(expected - covered))
+    return ('failure', 'no APPROVED maintainer review with LOCAL-VALIDATION v1 coverage for: ' + missing)
 
 
 def set_status(repo, sha, token, state, description):

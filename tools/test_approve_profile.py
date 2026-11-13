@@ -385,6 +385,15 @@ class ApprovalTest(unittest.TestCase):
             e.verify_assets(path, registry=registry,
                             approved_templates=self.f.approved, engine_dir=None)
 
+    def test_candidate_only_source_anchor_cannot_authorize_a_carried_gate(self):
+        path, _, candidate = self._carry_seal_and_registry()
+        base = copy.deepcopy(candidate)
+        del base['approvals']['synthetic-demo/v0']
+        e.verify_assets(path, registry=candidate, approved_templates=self.f.approved)
+        with self.assertRaisesRegex(ValueError, 'not pinned in the trusted registry'):
+            e.verify_assets(path, registry=candidate, approved_templates=self.f.approved,
+                            trusted_source_registry=base)
+
     def _carry_seal_and_registry(self, approval_sha256='7' * 64, source_receipt_sha256='a' * 64):
         """Seal a carried-forward approval; return (path, doc, registry with a pinned source entry)."""
         target = [g for g in GATES if g not in ('exactness', 'prefix_cache')]

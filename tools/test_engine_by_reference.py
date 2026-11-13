@@ -195,6 +195,30 @@ class EngineByReference(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'does not name the native engine version and commit'):
                 self.seal(engine_release_tag=tag)
 
+    def test_unified_approve_tag_is_bound_to_native_identity_and_engine_records(self):
+        doc = self.seal()
+        common = dict(runtime_id='synthetic-demo', commit=self.f.commit, tree=self.f.tree,
+                      template=doc['template'], version=1)
+        e.bundle_identity(self.stripped, self.f.source_asset, engine_binaries=doc['engine_binaries'],
+                          engine_dir=self.engine_dir, approve_tag=self.tag, **common)
+        # Unified tags bind bundled-binary approvals too, not only engine-by-reference ones.
+        e.bundle_identity(self.full_archive, self.f.source_asset, approve_tag=self.tag, **common)
+        for tag in ('engine-v0.1.3-' + self.f.commit[:8], 'engine-v0.1.2-' + '0' * 8):
+            with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, 'unified approve_tag'):
+                e.bundle_identity(self.full_archive, self.f.source_asset, approve_tag=tag, **common)
+        engine = copy.deepcopy(doc['engine_binaries'])
+        engine['bin/rexl3-serve']['release_tag'] = 'engine-v0.1.2-' + '0' * 8
+        with self.assertRaisesRegex(ValueError, 'differs from unified approve_tag'):
+            e.bundle_identity(self.stripped, self.f.source_asset, engine_binaries=engine,
+                              engine_dir=self.engine_dir, approve_tag=self.tag, **common)
+
+    def test_unified_approval_requires_the_same_registry_tag(self):
+        doc = self.seal()
+        doc['approve_tag'] = self.tag
+        path, _, registry = self.publish(doc)
+        with self.assertRaisesRegex(ValueError, 'trusted approve_tag mismatch'):
+            e.trusted_entry(path, registry)
+
     def test_stable_engine_tags_are_valid_tags_and_nothing_looser_is(self):
         for tag in ('engine-v0.1.1-2067531c', 'engine-v10.20.30-00000000'):
             with self.subTest(tag=tag):

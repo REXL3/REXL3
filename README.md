@@ -25,11 +25,11 @@ Engine development, model validation and sealing happen in the development repos
 Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: v0.1.0 is released; v0.1.1 is being prepared.** The v0.1.0 models are published as
-> assets of the [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from
-> engine commit `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`. The v0.1.1 models below are sealed on
-> engine commit `75031112ba1279b6da97d5604be5160648cc9f2c` and are published as assets of the
-> v0.1.1 release when it is tagged; until then, install from v0.1.0.
+> **Status: v0.1.1 is released** (2026-11-12). The v0.1.1 models below are published as assets of
+> the [v0.1.1 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.1), built from engine
+> commit `75031112ba1279b6da97d5604be5160648cc9f2c`. The
+> [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
+> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`, holds the earlier versions.
 
 ## v0.1.1 models
 
@@ -89,11 +89,14 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0's current
   manifest holds the five already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
   GLM-5.3-Flash, Nemotron-3.5-Super-VL and DeepSeek-V4.1-Flash-1017).
-  Each model enters prod through its own `model/<model>` PR, validated
-  (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
-  only after every in-scope model PR has been validated and merged. No model gets its own release or
-  release candidate; a later release may add a single newly validated model as a new version only
-  after v0.1.0 is released.
+  The normal cut is one maintainer-opened `release/v<X.Y.Z>` PR containing the engine source, all
+  promoted model trees, their modular registry anchors and pack docs, and the release manifest,
+  notes and CHANGELOG; one sealed-receipt LOCAL-VALIDATION v1 review covers every changed model at
+  the exact PR head, and the other maintainer approves that head before merge. The legacy standalone
+  two-PR route (`model/<model>-approval`, then `model/<model>`) remains available for an individual
+  promotion. No model gets its own product release or release candidate; a patch product release
+  may contain a single newly validated model as a new version
+  ([docs/RELEASING.md](docs/RELEASING.md)).
 - Every model in a release is either sealed on the dev freeze commit, or carries forward a previously
   sealed approval whose newer engine commits do not touch its scope, or re-seals on the new engine
   build with carried gate receipts; the freeze exists only so the whole group is validated on one

@@ -9,7 +9,7 @@ size, which request switches it honours, its measured behaviour) is in that reci
 `profile.json`, `KNOWN_ISSUES.md` and `docs/` (inside the bundle you extract). Read this guide once,
 then keep the recipe's `KNOWN_ISSUES.md` beside you.
 
-> **Status: v0.1.0 is released and v0.1.1 is being prepared.** The GitHub releases page names the
+> **Status: v0.1.1 is the latest release; v0.1.0 remains available.** The GitHub releases page names the
 > exact tags; use the tag of the release that holds your model.
 
 ## 1. How the documentation fits together

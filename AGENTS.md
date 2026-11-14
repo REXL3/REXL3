@@ -14,7 +14,7 @@ If your user asked you to set up, run, benchmark, troubleshoot, or prototype a f
 
 ### 1. `v0.1.1` model map (trees, runtime IDs, profiles, ports, and pack sheets)
 
-The v0.1.1 trees are sealed on engine commit `75031112`; until the `v0.1.1` tag is published, the `v0.1.0` release (engine `afc9b5df`) holds the earlier versions of these models.
+The v0.1.1 trees are sealed on engine commit `75031112` and are published in the `v0.1.1` release; the `v0.1.0` release (engine `afc9b5df`) holds the earlier versions of these models.
 
 | Family / Model | Prod Tree | `runtime_id` | Default Profile (`--profile`) | Context | Port | Served `model` ID (`GET /v1/models`) | Pack Sheet |
 |---|---|---|---|---|---|---|---|

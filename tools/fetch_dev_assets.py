@@ -4,7 +4,9 @@
 Protected base code treats the candidate as inert data. Legacy tags are derived
 from validated registry runtime ids; unified engine-v<X.Y.Z>-<8hex> tags come only
 from a schema-validated registry approve_tag. With --base, unchanged tree bytes
-are skipped. Changed downloads run concurrently and share transport files through
+are skipped, and a new registry anchor is refused before any download unless the
+pull request is a release/v<X.Y.Z> branch of the base repository whose manifest lists
+it (--base-repo, --head-repo, --head-ref; tools/release_anchor.py). Changed downloads run concurrently and share transport files through
 a thread-safe cache, while every model is independently authenticated and verified.
 """
 import argparse
@@ -15,11 +17,13 @@ try:
     from . import release_evidence as e
     from . import promote_runtime as p
     from . import model_layout as m
+    from . import release_anchor
     from .verify_runtime_tree import discover, local_metadata_problems, tree_inventory, tree_key
 except ImportError:
     import release_evidence as e
     import promote_runtime as p
     import model_layout as m
+    import release_anchor
     from verify_runtime_tree import discover, local_metadata_problems, tree_inventory, tree_key
 
 
@@ -42,7 +46,8 @@ def unchanged_tree(tree, base):
     return previous.is_dir() and tree_inventory(previous) == tree_inventory(tree)
 
 
-def fetch(root, assets_dir, registry, approved, *, base=None, full=False, candidate_registry=None):
+def fetch(root, assets_dir, registry, approved, *, base=None, full=False, candidate_registry=None,
+          base_repo=None, head_repo=None, head_ref=None):
     jobs = []
     cache = p.ReleaseAssetCache(Path(assets_dir) / '.shared')
     rows = v2_trees(root)
@@ -65,6 +70,9 @@ def fetch(root, assets_dir, registry, approved, *, base=None, full=False, candid
         discovered = {tree_key(family, model, Path(root) / 'runtimes' / family / model / f'v{version}')
                       for family, model, version, _, _ in rows}
         new_keys = e.validate_registry_transition(base_registry, disk_candidate, discovered)
+        # Before any download: a new anchor must arrive in a release PR of this repository that lists it.
+        release_anchor.require_release_pr(new_keys, disk_candidate, root=root, base=base,
+                                          base_repo=base_repo, head_repo=head_repo, head_ref=head_ref)
         metadata = local_metadata_problems(
             [(family, model, Path(root) / 'runtimes' / family / model / f'v{version}')
              for family, model, version, _, _ in rows], active_registry)
@@ -112,6 +120,7 @@ def main(argv=None):
     parser.add_argument('--assets-dir', required=True)
     parser.add_argument('--base', help='protected base checkout for diff-scoped verification')
     parser.add_argument('--full', action='store_true', help='download every tree even when unchanged')
+    release_anchor.add_arguments(parser)
     args = parser.parse_args(argv)
     try:
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
@@ -120,7 +129,8 @@ def main(argv=None):
             candidate_registry = e.load_registry(Path(args.root) / 'runtimes/templates/APPROVALS.json')
         approved = e.load_json(args.approved)['templates']
         fetched = fetch(args.root, args.assets_dir, registry, approved,
-                        base=args.base, full=args.full, candidate_registry=candidate_registry)
+                        base=args.base, full=args.full, candidate_registry=candidate_registry,
+                        **release_anchor.context(args))
         print(f'{len(fetched)} dev release asset set(s) downloaded and verified: {", ".join(fetched) or "none needed"}')
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:

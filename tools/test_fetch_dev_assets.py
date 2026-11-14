@@ -112,11 +112,18 @@ class FetchTest(unittest.TestCase):
         tree(base, FAMILY, MODEL, 2)
         empty = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}
         candidate = registry(2)
+        release = dict(base_repo='REXL3/REXL3', head_repo='REXL3/REXL3', head_ref='release/v0.1.2')
+        write(Path(self.root), 'releases/v0.1.2/manifest.json', encoded({
+            'schema': 'rexl3.release-manifest.v1', 'version': 'v0.1.2', 'notes': 'synthetic',
+            'engine': {'dev_commit': '4208d848' * 5, 'dev_tree': 'b' * 40, 'engine_release_tag': 'engine-v0.1.2-4208d848',
+                       'artifacts': {'rexl3-serve': 'd' * 64}},
+            'models': [{'family': FAMILY, 'model': MODEL, 'version': 'v2', 'runtime_id': 'synthetic-demo',
+                        'approval_sha256': 'a' * 64}]}))
         with (patch.object(f.e, 'load_registry', side_effect=[empty, candidate]),
               patch.object(f.e, 'trusted_entry', return_value={}),
               patch.object(f, 'local_metadata_problems', return_value=[]),
               patch.object(f.p, 'download_release') as dl):
-            self.assertEqual(f.fetch(self.root, Path(self.root) / 'a', empty, {}, base=base),
+            self.assertEqual(f.fetch(self.root, Path(self.root) / 'a', empty, {}, base=base, **release),
                              ['approve-synthetic-demo-2'])
         self.assertEqual(dl.call_args.kwargs['trusted_source_registry'], empty)
 

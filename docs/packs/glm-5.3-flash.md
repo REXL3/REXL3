@@ -8,7 +8,8 @@ Checked against version 2 (dev approval `approve-glm53-flash-sage-2.25-2`, sourc
 | --- | --- | --- |
 | Runtime id | `glm53-flash-sage-2.25` (version 2); version 1 was sealed as `glm53-flash-2.25bpw-sm121` | `profile.json`, `approval.json` |
 | Versions | `v1` (v0.1.0), `v2` (latest) | `runtimes/glm-5.3/glm-5.3-flash/` |
-| Release tag | version 1 shipped in `v0.1.0`; version 2 ships in the next product release (there is no per-runtime tag) | `approval.json` |
+| Release tag | version 1 shipped in `v0.1.0`; version 2 ships in `v0.1.1` (there is no per-runtime tag) | `releases/v0.1.1/manifest.json` |
+| Release assets (version 2) | `glm53-flash-sage-2.25-v2-approval.json`, `glm53-flash-sage-2.25-v2-bundle.tar.gz`; evidence `glm53-flash-sage-2.25-v2-evidence.tar.gz` | the release page |
 | What it serves | GLM-5.3-Flash (`Glm5NextForConditionalGeneration`), EXL3 2.25 bits per weight; speculation uses the pack's own NextN layer | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw` at `b3194b87af5665bd8b1dd6316c99a48607fc137d` (the repository was renamed from `r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121`, which version 1's lock names; same revision and files) | `model.lock.json` |
 | Draft or second model | none | `model.lock.json` |
@@ -51,7 +52,7 @@ The pack's `generation_config.json` sets temperature 1.0 and top_p 0.95. The pac
 
 ## 6. Measured behaviour
 
-All figures are from version 2's qualification, recorded in `evidence.tar.gz` (the dev approval's evidence asset): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), profile `glm53-flash-single`, window 262,144, 1 slot, vision on. Seven gates ran on that binary; `context` and `quality` are carried from version 1's sealed single-node qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
+All figures are from version 2's qualification, recorded in the release asset `glm53-flash-sage-2.25-v2-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), profile `glm53-flash-single`, window 262,144, 1 slot, vision on. Seven gates ran on that binary; `context` and `quality` are carried from version 1's sealed single-node qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
 
 | Quantity | Value | Recorded in |
 | --- | --- | --- |
@@ -72,6 +73,10 @@ Only `context` and `quality` are carried; every other figure above was measured 
 ## 7. Limits of this release
 
 One slot. The window is 262,144, not the advertised 1,048,576; the two-node unit `glm-5.3/glm-5.3-flash-tp2` serves the full window. Version 2's gates ran on one GB10 and every gate in its evidence passed; speed was measured on one node only. BFCL tool-calling (hard-20) is the weakest result at 12/20. Version 2 was qualified for engine commit `75031112ba12` and its release binary; `context` and `quality` come from version 1's build under the carried-gate rule (CONTRIBUTING section 3). No 24-hour soak was run. Not supported: audio, video and constrained JSON response formats.
+
+The sealed `KNOWN_ISSUES.md` describes the frozen configuration before qualification: it lists the smoke request, the speculation counters, the prefix-cache hit proof and the vision cases as not run, and its opening sentence about the first GLM release describes v0.1.0. The qualification of version 2 is its evidence archive (section 6); where the two differ, the evidence is the record of what was measured.
+
+Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

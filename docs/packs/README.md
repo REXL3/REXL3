@@ -18,6 +18,7 @@ folder. The
 | RED-SNOW-5.3-Flash (two nodes) | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/` | [red-snow-5.3-flash-tp2.md](red-snow-5.3-flash-tp2.md) |
 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | [nemotron-3.5-super-vl.md](nemotron-3.5-super-vl.md) |
 | MiniCPM-V-4.7-35B-A3B | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/` | [minicpm-v-4.7-35b-a3b.md](minicpm-v-4.7-35b-a3b.md) |
+| Ling-3.1-Flash-1019 | `runtimes/ling-3.1/ling-3.1-flash-1019/` | [ling-3.1-flash-1019.md](ling-3.1-flash-1019.md) |
 | DeepSeek-V4.1-Flash-1017 (single node) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | [deepseek-v4.1-flash-1017.md](deepseek-v4.1-flash-1017.md) |
 | DeepSeek-V4.1-Flash-1017 (two nodes) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/` | [deepseek-v4.1-flash-1017-tp2.md](deepseek-v4.1-flash-1017-tp2.md) |
 

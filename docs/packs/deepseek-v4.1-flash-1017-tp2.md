@@ -1,6 +1,6 @@
 # Pack sheet: `dsv41-flash-1017-sage-rexl3-1.55`
 
-Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sage-rexl3-1.55-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `dsv41-flash-1017-sage-rexl3-1.55-1.tar.gz`), brought in by #130. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sage-rexl3-1.55-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `dsv41-flash-1017-sage-rexl3-1.55-1.tar.gz`), brought in by #130. This version ships in product release `v0.1.1`.
 
 ## 1. Identity
 
@@ -8,7 +8,8 @@ Checked against model version `v1` (sealed approval `approve-dsv41-flash-1017-sa
 | --- | --- | --- |
 | Runtime id | `dsv41-flash-1017-sage-rexl3-1.55` | `profile.json` |
 | Versions | `v1` (latest, and the only version in this tree) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/LATEST` |
-| Release tag | not stated (no product release contains `v1` yet) | `releases/` |
+| Release tag | `v0.1.1` | `releases/v0.1.1/manifest.json` |
+| Release assets | `dsv41-flash-1017-sage-rexl3-1.55-v1-approval.json`, `dsv41-flash-1017-sage-rexl3-1.55-v1-bundle.tar.gz`; evidence `dsv41-flash-1017-sage-rexl3-1.55-v1-evidence.tar.gz` | the release page |
 | What it serves | DeepSeek-V4.1-Flash-1017 (`DeepseekV41ForCausalLM`), EXL3 1.55 bits per weight quantized with SAGE, on two GB10 nodes (tensor parallel, 2 ranks). SAGE is our own mixed-precision quantization method for EXL3. The method is not published. | `MODEL.json`, `model.lock.json` |
 | Model repository and revision | `vcruz305/DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` at `cba79c67582950ea44a4a449b3bb85b800748a35` | `model.lock.json` |
 | Draft or second model | none | `model.lock.json` |
@@ -44,7 +45,7 @@ Keep the same `--site` for `status`, `logs` and `stop`. If `$XDG_DATA_HOME` is s
 
 **Two nodes (`dsv41-tp2-1m`)**: the two-node profile never downloads; each node needs its own complete copy. Run the same `download` on the leader and on the follower, or copy the directory (any Hugging Face client works; the two-node runtime's own one is under `~/.local/share/rexl3/dsv41-flash-1017-sage-rexl3-1.55/`), then set `nodes.leader.model_dir` and `nodes.follower.model_dir` in your two-node site file to those paths (docs/SETUP.md, "Required two-node site and pre-staged ranks"). `setup` and `verify` check both copies over SSH.
 
-New versions that pin `c40cf25c` directly will make this step unnecessary, expected with the next engine cut (v0.1.2).
+New versions that pin `c40cf25c` directly will make this step unnecessary; they are planned for a later release.
 
 ## 2. Profiles
 
@@ -83,7 +84,7 @@ A request that leaves out `temperature`, `top_p` or `top_k` gets temperature 1.0
 
 ## 6. Measured behaviour
 
-All figures are from the evidence asset `evidence.tar.gz` (the dev release asset of `approve-dsv41-flash-1017-sage-rexl3-1.55-1`) unless stated: two GB10 nodes, tensor parallel (2 ranks), profile `dsv41-tp2-1m` (1 slot, window 1,048,576, KV cache q4, speculative decoding on, vision off). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`) in one full chain; none was carried from an earlier build or pack.
+All figures are from this version's evidence archive, the release asset `dsv41-flash-1017-sage-rexl3-1.55-v1-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval) unless stated: two GB10 nodes, tensor parallel (2 ranks), profile `dsv41-tp2-1m` (1 slot, window 1,048,576, KV cache q4, speculative decoding on, vision off). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`) in one full chain; none was carried from an earlier build or pack.
 
 Realistic workload first. During the Q200 text run (180 requests, one at a time, thinking off, greedy, `max_tokens` 32,768; client on a third host, remote from the leader), the 173 requests that finished with `stop` generated a median of 56.3 tok/s each, measured as completion tokens over the client's wall time for that request including its prompt (40,906 completion tokens in 839 s of request time, 48.8 tok/s in aggregate). The 7 requests that ran to the budget are left out of this figure because their repeated text would inflate it (`tp2/quality/q200/summary.json`, `text180.e2e_throughput.stopped_rows_only`). These are different prompts and replies from the 256-token gate replies below, so the two speeds are not comparable.
 
@@ -135,6 +136,7 @@ No figure from an earlier version, build or pack is carried here.
 - The gates in section 6 are the qualification of this version; no 24-hour soak is part of them. The follower node's memory is not sampled by the gate.
 - The quality figures are one run on one cluster; a later version is held to them with a stated noise allowance, not to a fixed target.
 - The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. There is no workaround for this two-node profile in this release. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

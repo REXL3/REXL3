@@ -8,7 +8,8 @@ Checked against version 4 (dev approval `approve-qwen38-27b-dflash2-exl3-4.00-4`
 | --- | --- | --- |
 | Runtime id | `qwen38-27b-dflash2-exl3-4.00` | `profile.json` |
 | Versions | `v3` (v0.1.0), `v4` (latest) | `runtimes/qwen3.8/qwen3.8-27b/` |
-| Release tag | version 3 shipped in `v0.1.0`; version 4 ships in the next product release (there is no per-runtime tag) | `approval.json` |
+| Release tag | version 3 shipped in `v0.1.0`; version 4 ships in `v0.1.1` (there is no per-runtime tag) | `releases/v0.1.1/manifest.json` |
+| Release assets (version 4) | `qwen38-27b-dflash2-exl3-4.00-v4-approval.json`, `qwen38-27b-dflash2-exl3-4.00-v4-bundle.tar.gz`; evidence `qwen38-27b-dflash2-exl3-4.00-v4-evidence.tar.gz` | the release page |
 | What it serves | Qwen3.8-27B (`Qwen3_5ForConditionalGeneration`), EXL3 4.00 bits per weight, with a DFlash2 draft pack for speculative decoding | `MODEL.json`, `model.lock.json` |
 | Model repository and revision | `r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw` at `3f1771b8c21f83cbb8e82169559ced9f38ca04e5` | `model.lock.json` |
 | Draft or second model | `r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw` at `265b5240592907d2d55ff0dc4d5f66569692604d` | `model.lock.json` |
@@ -49,7 +50,7 @@ The pack's `generation_config.json` sets temperature 1.0, top_p 0.95 and top_k 2
 
 ## 6. Measured behaviour
 
-All figures are from version 4's qualification, recorded in `evidence.tar.gz` (the dev approval's evidence asset): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), profile `qwen38-single-262k`. Seven gates ran on that binary; `context` and `quality` are carried from version 3's sealed qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
+All figures are from version 4's qualification, recorded in the release asset `qwen38-27b-dflash2-exl3-4.00-v4-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), profile `qwen38-single-262k`. Seven gates ran on that binary; `context` and `quality` are carried from version 3's sealed qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
 
 | Quantity | Value | Recorded in |
 | --- | --- | --- |
@@ -69,6 +70,8 @@ Only `context` and `quality` are carried; every other figure above was measured 
 ## 7. Limits of this release
 
 Version 4's gates ran on one GB10 node with this profile's contract (6 slots, 262,144 tokens, vision tower loaded, prefix cache on) and every gate in its evidence passed. Speed was measured on one node only. Version 4 was qualified for engine commit `75031112ba12` and its release binary; `context` and `quality` come from version 3's build under the carried-gate rule (CONTRIBUTING section 3). The quality figures are one run at `low` reasoning effort; the BFCL tool-calling set (20 cases) is the weakest result at 75%. No 24-hour soak was run. Not supported: video, audio and constrained JSON response formats.
+
+Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

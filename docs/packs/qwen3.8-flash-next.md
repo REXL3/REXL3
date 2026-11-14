@@ -8,7 +8,8 @@ Checked against version 3 (dev approval `approve-qwen38-flash-next-exl3-3.05-3`,
 | --- | --- | --- |
 | Runtime id | `qwen38-flash-next-exl3-3.05`; the drafting choice reports `qwen38-flash-next-dflash2-exl3-3.05` | `profile.json` |
 | Versions | `v2` (v0.1.0), `v3` (latest) | `runtimes/qwen3.8/qwen3.8-flash-next/` |
-| Release tag | version 2 shipped in `v0.1.0`; version 3 ships in the next product release (there is no per-runtime tag) | `approval.json` |
+| Release tag | version 2 shipped in `v0.1.0`; version 3 ships in `v0.1.1` (there is no per-runtime tag) | `releases/v0.1.1/manifest.json` |
+| Release assets (version 3) | `qwen38-flash-next-exl3-3.05-v3-approval.json`, `qwen38-flash-next-exl3-3.05-v3-bundle.tar.gz`; evidence `qwen38-flash-next-exl3-3.05-v3-evidence.tar.gz` | the release page |
 | What it serves | Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`), EXL3 3.05 bits per weight; the default choice speculates with the pack's own MTP head, the drafting choice with a DFlash2 draft pack | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `turboderp/Qwen3.8-Flash-Next-exl3` at `69e33439ae950f17bcbe95c98f117d80f759ab6d` | `model.lock.json` |
 | Draft or second model | drafting choice only: `r0b0tlab/Qwen3.8-Flash-Next-DFlash2-EXL3-4.00bpw` at `846786415744bf40a70f6c274d1ff3a7c1fe64ee` (a 4.00 bpw quantization of `incoai/Qwen3.8-Flash-Next-DFlash2`); the default choice downloads nothing new | `model.lock.json`, `KNOWN_ISSUES.md` |
@@ -23,6 +24,8 @@ Checked against version 3 (dev approval `approve-qwen38-flash-next-exl3-3.05-3`,
 | `qwen38-flash-next-single-262k-draft` (opt-in) | single node | 262,144 tokens | 2 | 8899 | `127.0.0.1` | at most 600 s (`readiness_timeout_s`, a ceiling) after model verification |
 
 Source: `profile.json`. Served model name `default` (not a name derived from the model; `GET /v1/models` lists it). Arguments of the profile: `--slots 2`, `--max-model-len 262144`, `--spec mtp`, `--prefix-cache on`, `--prefix-cache-mib 22528`, `--queue-timeout 1500`, `--no-vision`; the profile also sets `REXL3_NGRAM_WARM=0` so the pack's n-gram table stays cold and the memory is left for full-length prefix entries (`KNOWN_ISSUES.md`). 262,144 tokens is the pack's native window (model card). The drafting choice runs the same line with `--spec auto --draft @DRAFT_DIR@` in place of `--spec mtp`; every other flag, the environment and the capabilities are the default choice's. It has no `model_dir` site field, so it is served from the packs the launcher manages (`KNOWN_ISSUES.md`, "Opt-in drafting choice"). There is no tensor-parallel or two-node profile.
+
+Both profiles are in the same bundle. Download it with the runtime id `qwen38-flash-next-exl3-3.05` (the asset prefix) and select the drafting choice with `--profile qwen38-flash-next-single-262k-draft`; the id `qwen38-flash-next-dflash2-exl3-3.05` is what that profile reports, not an asset name.
 
 ## 3. What the server accepts
 
@@ -56,7 +59,7 @@ The pack's `generation_config.json` (at the pinned revision) sets temperature 1.
 
 ## 6. Measured behaviour
 
-All figures are from version 3's qualification, recorded in `evidence.tar.gz` (the dev approval's evidence asset): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), 2 slots, window 262,144, vision off, prefix cache pinned at 22,528 MiB.
+All figures are from version 3's qualification, recorded in the release asset `qwen38-flash-next-exl3-3.05-v3-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), 2 slots, window 262,144, vision off, prefix cache pinned at 22,528 MiB.
 
 Default choice `qwen38-flash-next-single-262k`: seven gates ran on the v0.1.1 binary; `context` and `quality` are carried from version 2's sealed qualification (engine `afc9b5dfb69d`, binary `40e23e71…`), as recorded in the receipt `v011/composed/summary.json`. Drafting choice `qwen38-flash-next-single-262k-draft`: a fresh full gate chain on the v0.1.1 binary, nothing carried, receipt `draft/qualification/summary.json`.
 
@@ -94,6 +97,7 @@ Only the default choice's `context` and `quality` are carried; every other figur
 - The quality figures are one run on one node; a later release is held to them with a stated noise allowance, not to a fixed target. The tool-calling suite scored 45%.
 - Version 3 was qualified for engine commit `75031112ba12` and its release binary; a different engine build is not covered by this sheet. The default choice's `context` and `quality` come from version 2's build under the carried-gate rule (CONTRIBUTING section 3).
 - The readiness deadline is 600 s; the measured boots are in section 6.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

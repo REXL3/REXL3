@@ -14,7 +14,7 @@ If your user asked you to set up, run, benchmark, troubleshoot, or prototype a f
 
 ### 1. `v0.1.1` model map (trees, runtime IDs, profiles, ports, and pack sheets)
 
-The v0.1.1 trees are sealed on engine commit `75031112`; until the `v0.1.1` tag is published, the `v0.1.0` release (engine `afc9b5df`) holds the earlier versions of these models.
+The v0.1.1 trees are sealed on engine commit `75031112` and are published in the `v0.1.1` release; the `v0.1.0` release (engine `afc9b5df`) holds the earlier versions of these models.
 
 | Family / Model | Prod Tree | `runtime_id` | Default Profile (`--profile`) | Context | Port | Served `model` ID (`GET /v1/models`) | Pack Sheet |
 |---|---|---|---|---|---|---|---|
@@ -26,7 +26,8 @@ The v0.1.1 trees are sealed on engine commit `75031112`; until the `v0.1.1` tag 
 | `nemotron-3.5/nemotron-3.5-super-vl` | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/v2` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m` | `1,048,576` (1 node) | `9100` | `nemotron-3.5-super-vl` | [docs/packs/nemotron-3.5-super-vl.md](docs/packs/nemotron-3.5-super-vl.md) |
 | `minicpm-v-4.7/minicpm-v-4.7-35b-a3b` | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/v1` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k` | `262,144` (1 node) | `8889` | `minicpm-v-4.7-35b-a3b-exl3` | [docs/packs/minicpm-v-4.7-35b-a3b.md](docs/packs/minicpm-v-4.7-35b-a3b.md) |
 | `deepseek-v4.1/deepseek-v4.1-flash-1017-tp2` | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/v1` | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m` | `1,048,576` (2 nodes) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017-tp2.md](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
-| `deepseek-v4.1/deepseek-v4.1-flash-1017` (v0.1.0) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/v1` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` | `262,144` (1 node) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017.md](docs/packs/deepseek-v4.1-flash-1017.md) |
+| `ling-3.1/ling-3.1-flash-1019` | `runtimes/ling-3.1/ling-3.1-flash-1019/v1` | `ling31-flash-1019-sage-1.51` | `ling31-single-262k` | `262,144` (1 node) | `8889` | `Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw` | [docs/packs/ling-3.1-flash-1019.md](docs/packs/ling-3.1-flash-1019.md) |
+| `deepseek-v4.1/deepseek-v4.1-flash-1017` (in `v0.1.0` only: use `TAG=v0.1.0`) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/v1` | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k` | `262,144` (1 node) | `8940` | `DSV4.1-Flash-1017-SAGE-REXL3-1.55bpw` | [docs/packs/deepseek-v4.1-flash-1017.md](docs/packs/deepseek-v4.1-flash-1017.md) |
 
 Before running a model, read its pack sheet (`docs/packs/<model>.md`) and its `runtimes/<family>/<model>/v<N>/KNOWN_ISSUES.md`.
 

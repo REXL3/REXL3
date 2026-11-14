@@ -8,7 +8,8 @@ Checked against version 2 (dev approval `approve-nemotron35-super-vl-sage-3.85-2
 | --- | --- | --- |
 | Runtime id | `nemotron35-super-vl-sage-3.85` | `profile.json` |
 | Versions | `v1` (v0.1.0), `v2` (latest) | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` |
-| Release tag | version 1 shipped in `v0.1.0`; version 2 ships in the next product release (there is no per-runtime tag) | `approval.json` |
+| Release tag | version 1 shipped in `v0.1.0`; version 2 ships in `v0.1.1` (there is no per-runtime tag) | `releases/v0.1.1/manifest.json` |
+| Release assets (version 2) | `nemotron35-super-vl-sage-3.85-v2-approval.json`, `nemotron35-super-vl-sage-3.85-v2-bundle.tar.gz`; evidence `nemotron35-super-vl-sage-3.85-v2-evidence.tar.gz` | the release page |
 | What it serves | Nemotron-3.5-Super-VL (`NemotronH_Omni_Reasoning_V3`), EXL3 3.85 bits per weight; speculation uses the MTP head that ships in the pack | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `vcruz305/Nemotron-Super-VL-EXL3-3.85bpw` at `3963815246eda892a4c3b88e18d0d1c39288c8e0` | `model.lock.json` |
 | Draft or second model | none | `model.lock.json` |
@@ -55,7 +56,7 @@ The pack's `generation_config.json` (at the pinned revision) sets temperature 1.
 
 ## 6. Measured behaviour
 
-All figures are from version 2's qualification, recorded in `evidence.tar.gz` (the dev approval's evidence asset): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), 16 slots, window 1,048,576, vision on. Seven gates ran on that binary; `context` and `quality` are carried from version 1's sealed qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
+All figures are from version 2's qualification, recorded in the release asset `nemotron35-super-vl-sage-3.85-v2-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10 node, engine `0.1.1` at commit `75031112ba12` (binary `rexl3-serve` sha256 `4fc2cb44…5fe5`), 16 slots, window 1,048,576, vision on. Seven gates ran on that binary; `context` and `quality` are carried from version 1's sealed qualification (engine `799fa750f8eb`, binary `3e188724…`), as recorded in the receipt `v011/composed/summary.json`.
 
 | Quantity | Value | Recorded in |
 | --- | --- | --- |
@@ -91,6 +92,7 @@ Only `context` and `quality` are carried; every other figure above was measured 
 - The quality figures are one run on one node; a later release is held to them with a stated noise allowance, not to a fixed target. The IFEval score is lowered by prompts that thinking took to the budget (section 5).
 - Version 2 was qualified for engine commit `75031112ba12` and its release binary; a different engine build is not covered by this sheet. `context` and `quality` come from version 1's build under the carried-gate rule (CONTRIBUTING section 3).
 - The readiness deadline is 600 s; the measured boots are in section 6.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

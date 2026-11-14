@@ -1,6 +1,6 @@
 # Pack sheet: `glm53-flash-tp2-sage-2.25`
 
-Checked against model version `v1` (sealed approval `approve-glm53-flash-tp2-sage-2.25-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `glm53-flash-tp2-sage-2.25-1.tar.gz`), brought in by #145. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-glm53-flash-tp2-sage-2.25-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `glm53-flash-tp2-sage-2.25-1.tar.gz`), brought in by #145. This version ships in product release `v0.1.1`.
 
 ## 1. Identity
 
@@ -8,7 +8,8 @@ Checked against model version `v1` (sealed approval `approve-glm53-flash-tp2-sag
 | --- | --- | --- |
 | Runtime id | `glm53-flash-tp2-sage-2.25` | `profile.json` |
 | Versions | `v1` (latest, and the only version in this tree) | `runtimes/glm-5.3/glm-5.3-flash-tp2/LATEST` |
-| Release tag | not stated (no product release contains `v1` yet) | `releases/` |
+| Release tag | `v0.1.1` | `releases/v0.1.1/manifest.json` |
+| Release assets | `glm53-flash-tp2-sage-2.25-v1-approval.json`, `glm53-flash-tp2-sage-2.25-v1-bundle.tar.gz`; evidence `glm53-flash-tp2-sage-2.25-v1-evidence.tar.gz` | the release page |
 | What it serves | GLM-5.3-Flash (`Glm5NextForConditionalGeneration`), EXL3 2.25 bits per weight quantized with SAGE, on two GB10 nodes (tensor parallel, 2 ranks). SAGE is our own mixed-precision quantization method for EXL3. The method is not published. Speculative decoding uses the NextN layer stored in the pack. | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `r0b0tlab/GLM-5.3-Flash-EXL3-SAGE-2.25bpw` at `b3194b87af5665bd8b1dd6316c99a48607fc137d` | `model.lock.json` |
 | Draft or second model | none (the NextN layer is part of the pack) | `model.lock.json` |
@@ -58,7 +59,7 @@ The pack's `generation_config.json` (locked) sets temperature 1.0 and top_p 0.95
 
 ## 6. Measured behaviour
 
-All figures are from the evidence asset `evidence.tar.gz` (the dev release asset of `approve-glm53-flash-tp2-sage-2.25-1`): two GB10 nodes, tensor parallel (2 ranks), profile `glm53-flash-tp2-1m` (1 slot, window 1,048,576, speculative decoding on, prefix cache on, vision on). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`) in one full chain; none was carried from an earlier build.
+All figures are from this version's evidence archive, the release asset `glm53-flash-tp2-sage-2.25-v1-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): two GB10 nodes, tensor parallel (2 ranks), profile `glm53-flash-tp2-1m` (1 slot, window 1,048,576, speculative decoding on, prefix cache on, vision on). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`) in one full chain; none was carried from an earlier build.
 
 Realistic workload first. During the Q200 text run (180 requests, one at a time, non-streamed, reasoning effort `xhigh`, greedy, `max_tokens` 65,536; client on a third host, remote from the leader), the 177 requests that finished with `stop` generated a median of 64.0 tok/s each, measured as completion tokens (thinking included) over the client's wall time for that request, prompt included (279,118 completion tokens in 4,484 s of request time, 62.2 tok/s in aggregate). The 3 requests that ran to the budget are left out of this figure (`tp2/quality/q200/summary.json`, `text180.e2e_throughput.stopped_rows_only`). These are different prompts and replies from the 256-token gate replies below, so the two speeds are not comparable.
 
@@ -111,6 +112,7 @@ No figure from an earlier version, build or pack is carried here.
 - The gates in section 6 are the qualification of this version; no 24-hour soak is part of them. The follower node's memory is not sampled by the gate.
 - The quality figures are one run on one cluster; a later version is held to them with a stated noise allowance, not to a fixed target.
 - The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. There is no workaround for this two-node profile in this release. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

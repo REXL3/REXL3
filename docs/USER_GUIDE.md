@@ -9,7 +9,7 @@ size, which request switches it honours, its measured behaviour) is in that reci
 `profile.json`, `KNOWN_ISSUES.md` and `docs/` (inside the bundle you extract). Read this guide once,
 then keep the recipe's `KNOWN_ISSUES.md` beside you.
 
-> **Status: v0.1.0 is released and v0.1.1 is being prepared.** The GitHub releases page names the
+> **Status: v0.1.1 is the latest release; v0.1.0 remains available.** The GitHub releases page names the
 > exact tags; use the tag of the release that holds your model.
 
 ## 1. How the documentation fits together
@@ -44,7 +44,7 @@ such as `v0.1.0`. A line starting with `#` inside a code block is a comment.
 | Privileges | A normal user with `sudo` available **for system packages only**. Never run `./launch.sh start` or the whole launcher as root; it refuses. |
 | System services | systemd 255 or newer with cgroup v2 and a working login user manager (the installer checks). |
 | Network | Outbound HTTPS to GitHub (the release) and Hugging Face (the model), and to the Ubuntu and NVIDIA package repositories. |
-| GitHub access | While the repository is private you need an invitation and the GitHub CLI, `gh`, logged in (`gh auth login`, then `gh auth status`). Without access the release cannot be downloaded. |
+| GitHub access | The repository and its releases are public. The examples here use the GitHub CLI, `gh`, logged in (`gh auth login`, then `gh auth status`). Opening or commenting on an issue needs a tester invitation (section 11). |
 | Time | Plan for the model download (size is in the recipe docs) and a first start that verifies every model file. The launcher gives no fixed start-up time because it depends on disk and network. |
 
 ### 2.2 What the launcher will and will not do
@@ -148,10 +148,12 @@ sha256sum "$BUNDLE"; stat -c %s "$BUNDLE"
 
 The hashes and the sizes must be identical. If they differ, **stop**: do not extract or run the
 archive, download it again from the release, and if it still differs report it (section 11). The
-bundle's `README.md`, section "Download and verify before extracting", has a stricter
+bundle's `README.md`, section "Download and verify before extracting", shows a stricter
 verify-and-extract program (it rejects links, path traversal and duplicates before writing anything).
-It expects the two files under the local names `approval.json` and the approval's `bundle.archive`,
-so to use it, copy the two downloaded assets to those names in a fresh directory first.
+As sealed it cannot be used with this release, even after renaming the downloaded files: it expects
+assets named `approval.json` and the approval's `bundle.archive`, and it checks for approval schema
+version 1, while released approvals are version 2. Use the commands in this section instead; the
+[README](../README.md)'s "Install and run a recipe" has the same verify steps.
 
 ### 4.4 Extract
 
@@ -193,6 +195,9 @@ hash-pinned Python environment. It does not download a model and does not start 
 the native engine binary, whether it ships in the bundle or is placed from a release asset named by
 `approval.json`). It does **not** prove there is enough disk space, that the GPU is idle, that the port
 is free, or that inference works; those are checked later with their own error tokens (section 8).
+
+If `install-deps` or `doctor` exits 20 on the NVIDIA driver packages, read section 8 before changing
+anything on the host: it is a known issue of the release on an updated Ubuntu 24.04 host.
 
 ### 4.6 Profiles and print-command
 
@@ -361,7 +366,7 @@ Recipes that accept images take them inline, as base64 in a data URI, in a messa
 Remote image URLs are not fetched by default. The bundle's own examples use a 256 by 256 pixel image;
 much smaller test images have been misread, so do not judge image support from a tiny picture. The
 recipe's `KNOWN_ISSUES.md` says whether images are supported. A recipe started without vision refuses
-image parts. Video is not a capability of any first-release profile (`capabilities.video` is `false`
+image parts. Video is not a capability of any released profile (`capabilities.video` is `false`
 in every `profile.json`), so treat it as unsupported; audio is refused by every recipe today.
 
 ### 5.8 Concurrency
@@ -454,6 +459,7 @@ launcher prints an error **token** in capitals; the table lists the common ones 
 | --- | --- | --- |
 | `UNSUPPORTED_OS`, `UNSUPPORTED_ARCH`, `UNSUPPORTED_GPU` | Not Ubuntu 24.04 ARM64 on a GB10 | Use a supported host |
 | `RUN_AS_NORMAL_USER` | You ran `start` as root or with `sudo` | Run as your normal user; only the installer uses `sudo` |
+| `install-deps` or `doctor` exits 20 on `libnvidia-compute-580` or `nvidia-utils-580` | The recipes pin the NVIDIA driver packages at exactly `580.173.02-0ubuntu0.24.04.1`; a host whose packages have moved past that build is refused, and `setup` and `start` refuse with it | See "Known issues" in the [v0.1.1 release notes](../releases/v0.1.1/NOTES.md): they give a single-node workaround (it skips the launcher's checks and is outside the release's qualification evidence); two-node profiles have none in this release |
 | `MODEL_DOWNLOAD_APPROVAL_REQUIRED` | The model is missing and you did not consent | Review the size, then add `--accept-model-download` |
 | `INSUFFICIENT_MODEL_DISK` | Not enough free disk for the remaining download | Free space, then rerun `setup`; partial files already count |
 | `MODEL_DOWNLOAD_FAILED` | Network or access problem | Restore access, rerun `setup`: it resumes at the same pin |
@@ -478,7 +484,7 @@ launcher prints an error **token** in capitals; the table lists the common ones 
 - The two-node profiles (`glm53-flash-tp2-1m`, `redsnow-tp2-512k` and `dsv41-tp2-1m`) listen on the
   leader node's network address, not on localhost, and the server has no API key and no request log.
   Run them only on a private, trusted network, or behind a firewall or an SSH tunnel. An API key
-  option is planned for the next release.
+  option is planned for a later release.
 - Prompts and answers are held in memory and written to the server log only as the log shows; do not
   paste raw logs, prompts, environment dumps or credentials into a report. `diagnostics` is an
   allow-list for this reason, but read it before you share it.

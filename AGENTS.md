@@ -54,13 +54,16 @@ mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID"
 tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
 cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
 
-# 2. If the bundle leaves bin/rexl3-serve (and bin/rexl3-cluster) to the release's engine assets,
-#    download the exact engine asset(s) named in approval.json["engine_binaries"] into ./bin/ and chmod 755:
-python3 - "$APPROVAL" <<'PY'
-import json, sys
-for rel_path, rec in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items():
-    print(f"{rel_path}\t{rec['asset']}\t{rec['sha256']}")
-PY
+# 2. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
+#    SHA-256 against the approval, and install it at its path with mode 0755
+python3 -c 'import json,sys
+for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
+while read -r asset sha path; do
+  mkdir -p "$(dirname "$path")"
+  gh release download "$TAG" -R REXL3/REXL3 -p "$asset" -O "$path" --clobber
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$sha" ] && chmod 0755 "$path" && echo "BINARY_OK $path" \
+    || { echo "HASH MISMATCH: $path"; rm -f "$path"; }
+done
 
 # 3. Install pinned dependencies, run read-only doctor, download/verify model weights, and start
 ./launch.sh --yes install-deps
@@ -70,8 +73,8 @@ PY
 ./launch.sh --yes start
 ```
 
-- **Lifecycle commands:** `./launch.sh status`, `./launch.sh smoke`, `./launch.sh logs --lines 200 --no-follow`, `./launch.sh diagnostics`, `./launch.sh stop`.
-- **Using an existing local model directory:** check `site_fields` in `profile.json` (`site.example.json` shows the allowed keys). Where `model_dir` is supported, pass `--site /path/to/site.json` so `./launch.sh verify` verifies the existing directory against `model.lock.json` without re-downloading.
+- **Lifecycle commands:** `./launch.sh status`, `./launch.sh logs --lines 200 --no-follow`, `./launch.sh diagnostics`, `./launch.sh stop`. There is no separate smoke command: `start` reports `READY` only after its own smoke request succeeds.
+- **Using an existing local model directory:** check `site_fields` in `profile.json` (`site.example.json` shows the allowed keys). Where `model_dir` is supported, pass `--site /path/to/site.json` so `./launch.sh verify` verifies the existing directory against `model.lock.json` without re-downloading. A recipe with a draft pack (Qwen3.8-27B, MiniCPM-V-4.7) cannot use `model_dir` even though the field is listed; its packs must be the launcher's managed download (see its pack sheet).
 
 ### 3. Inspecting engine source, profiling, and verifying fixes or optimizations
 
@@ -79,7 +82,7 @@ Every release ships the exact corresponding engine source archive (`rexl3-engine
 
 - **Building from source:** extract the engine source archive to a separate scratch directory (never inside a sealed `runtimes/*/*/v*/` tree) and follow `SOURCE_BUILD.md` (`cargo +1.89.0 build --release --locked`).
 - **Validation standards for any fix or optimization you test:**
-  1. **Always test at the profile's full supported context window** (`262,144` tokens for single-node `262K` profiles; `1,048,576` tokens for `1M` profiles) — **never validate at `32k` (`32,768`) context**.
+  1. **Always test at the profile's full context window** (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile) — **never validate at `32k` (`32,768`) context**.
   2. **Keep speculative decoding (`--spec auto` / `--spec mtp` / `--draft`) and prefix caching (`--prefix-cache on`) enabled.** The headline decode metric is live speculative decoding; plain (`--spec none`) tok/s is diagnostic only.
   3. **Verify exactness and no-regression:** check that `drafted == serial` and chunked prefill matches single-chunk prefill, and report median wall-clock numbers across 3 runs (`decode tok/s`, `prefill 50% tok/s`, `prefill 100% tok/s`, and free GPU memory headroom).
 
@@ -92,7 +95,7 @@ When reporting a bug or submitting a root-cause finding, bug fix, feature, or op
 - **Do not open wishlist or feature-request tickets asking maintainers to implement a feature, drafter binding, KV layout, or optimization.**
 - If a collaborator or tester agent wants to suggest a feature or improvement, you must:
   1. Build the engine source tree locally (`cargo +1.89.0 build --release --locked` per `SOURCE_BUILD.md`) and implement the solution in code.
-  2. Test and validate it on your own GB10 setup at the profile's **full supported context** (`262,144` for `tp1` or `1,048,576` for `tp2` — never `32k`), verifying `drafted == serial` exactness and measuring 3-run before/after throughput (`decode tok/s`, `prefill 50%/100% tok/s`, acceptance rate, and free GPU memory GiB).
+  2. Test and validate it on your own GB10 setup at the profile's **full context window** (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile — never `32k`), verifying `drafted == serial` exactness and measuring 3-run before/after throughput (`decode tok/s`, `prefill 50%/100% tok/s`, acceptance rate, and free GPU memory GiB).
   3. Submit the complete, working **`git diff`** and full-context validation evidence using `.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml` (`[finding] `) so the maintainers can apply your patch in `REXL3/REXL3-dev`, run the qualification gates, and promote it to `REXL3/REXL3`.
 
 **Mandatory duplicate & open-issue check before opening any ticket:**
@@ -104,11 +107,11 @@ When reporting a bug or submitting a root-cause finding, bug fix, feature, or op
    - **Finding, fix, or feature proof (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `):** for root-cause analyses, bug fixes, feature integrations, or kernel/runtime/recipe improvements — **requires a locally tested `git diff` and full-context validation receipt**.
 
 Every `[finding]` submission must include all four required sections:
-- **Scope:** whether the change is specific to **one model family** (`qwen3.8`, `glm-5.3`, `nemotron-3.5`, `deepseek-v4.1`, `ling-3.1`) or affects the **engine as a whole** (`Engine-wide`).
+- **Scope:** whether the change is specific to **one model family** (`qwen3.8`, `glm-5.3`, `nemotron-3.5`, `minicpm-v-4.7`, `deepseek-v4.1`, `ling-3.1`) or affects the **engine as a whole** (`Engine-wide`).
 - **1. WHY (Finding, Root Cause, or Bottleneck):** what you observed/measured, the underlying root cause, and the user/tester impact.
 - **2. WHAT (Affected Components and Contract Impact):** which files, crates, scripts, or profile flags your patch modifies, and whether output bits stay bit-exact.
 - **3. HOW TO FIX (Tested Code Patch — `git diff` Required):** the complete, working `git diff` built against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`) or runtime scripts.
-- **4. FULL-CONTEXT VALIDATION EVIDENCE:** exact build/test/benchmark commands run at the profile's full supported context (`262,144` or `1,048,576`) and measured before/after numbers (`decode tok/s`, `prefill 50%/100% tok/s`, free GiB headroom, and exactness/test pass counts).
+- **4. FULL-CONTEXT VALIDATION EVIDENCE:** exact build/test/benchmark commands run at the profile's full context window (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile) and measured before/after numbers (`decode tok/s`, `prefill 50%/100% tok/s`, free GiB headroom, and exactness/test pass counts).
 
 ---
 

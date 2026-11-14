@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Use this template to submit a technical root-cause finding, a concrete bug fix, or a **coded and locally validated feature/runtime/kernel improvement** — whether it targets a **single model family** or the **REXL3 engine as a whole**.
-        **No bare feature requests or wishlist tickets:** this repository (`REXL3/REXL3`) ships the full corresponding engine source tree (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`). If you or your agent want to propose a feature, drafter binding, kernel speedup, KV/memory layout change, or runtime improvement, you must **implement it in code, build and test it on your own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`), and include the working `git diff` plus measured validation output below** so the maintainers can pull your patch into `REXL3/REXL3-dev`, run the qualification gates, and promote it to `REXL3/REXL3`.
+        **No bare feature requests or wishlist tickets:** this repository (`REXL3/REXL3`) ships the full corresponding engine source tree (`crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, `SOURCE_BUILD.md`). If you or your agent want to propose a feature, drafter binding, kernel speedup, KV/memory layout change, or runtime improvement, you must **implement it in code, build and test it on your own setup at the profile's full context window (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile), and include the working `git diff` plus measured validation output below** so the maintainers can pull your patch into `REXL3/REXL3-dev`, run the qualification gates, and promote it to `REXL3/REXL3`.
         Before opening a new issue, search existing open and closed issues (`gh issue list -R REXL3/REXL3 --state all`) and read any related open issue in full (`gh issue view <N> -R REXL3/REXL3 --comments`) — if an open issue already tracks the same bug or bottleneck, post your root-cause analysis and tested `git diff` as a comment on that issue instead of opening a duplicate.
         If submitting via `gh issue create`, you must still prefix the title with `[finding] ` and include every section below verbatim.
         This repository is public: anyone can read issues, and only invited testers and the maintainers can open or comment on them. Testers submit code via a `git diff` in this issue and do not open pull requests.
@@ -28,9 +28,11 @@ body:
         - "qwen3.8 / qwen3.8-27b (single-node 262K, DFlash2)"
         - "qwen3.8 / qwen3.8-flash-next (single-node 262K, MTP)"
         - "glm-5.3 / glm-5.3-flash (single-node 262K or two-node tp2 1M)"
+        - "glm-5.3 / red-snow-5.3-flash-tp2 (two-node 512K)"
         - "nemotron-3.5 / nemotron-3.5-super-vl (single-node 1M, VL + MTP)"
+        - "minicpm-v-4.7 / minicpm-v-4.7-35b-a3b (single-node 262K, vision, draft pack)"
         - "deepseek-v4.1 / deepseek-v4.1-flash-1017 (single-node tp1 262K or two-node tp2 1M)"
-        - "ling-3.1 / ling-3.1-flash-1019"
+        - "ling-3.1 / ling-3.1-flash-1019 (single-node 262K, MTP, text only)"
     validations:
       required: true
   - type: dropdown
@@ -52,7 +54,7 @@ body:
     id: release-and-profile
     attributes:
       label: Release tag, engine commit, runtime bundle, and profile tested
-      description: "For example: v0.1.0 (engine commit afc9b5df), dsv41-flash-1017-sage-1.55-v1-bundle.tar.gz, profile dsv41-single-262k (262,144 context)."
+      description: "For example: v0.1.1 (engine commit 75031112), qwen38-27b-dflash2-exl3-4.00-v4-bundle.tar.gz, profile qwen38-single-262k (262,144 context)."
     validations:
       required: true
   - type: textarea
@@ -91,7 +93,7 @@ body:
       label: "4. FULL-CONTEXT VALIDATION EVIDENCE — Commands, exactness, and before/after measurements"
       description: |
         Paste the exact commands and real outputs proving your patch was tested and validated on your setup:
-        - Exact build and test/benchmark commands run at the profile's **full supported context** (`262,144` for `tp1` or `1,048,576` for `tp2` — never `32k`).
+        - Exact build and test/benchmark commands run at the profile's **full context window** (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile — never `32k`).
         - Exactness proof (`drafted == serial`, `chunked == whole`, unit/integration test pass counts).
         - Measured before vs after numbers across 3 runs (live speculative decode tok/s, prefill 50%/100% tok/s, draft acceptance rate, and free GPU memory GiB headroom).
     validations:
@@ -103,7 +105,7 @@ body:
       options:
         - label: I searched existing open and closed issues (and KNOWN_ISSUES.md) and confirmed no open issue already covers this finding or fix.
           required: true
-        - label: I implemented, built, and validated the attached code patch (git diff) on my own setup at the profile's full supported context (262,144 or 1,048,576) and included the measured before/after evidence above.
+        - label: "I implemented, built, and validated the attached code patch (git diff) on my own setup at the profile's full context window (--max-model-len in its sealed profile.json: 262,144, 524,288 or 1,048,576 depending on the profile) and included the measured before/after evidence above."
           required: true
         - label: This submission contains no credentials, tokens, private prompts, or proprietary data.
           required: true

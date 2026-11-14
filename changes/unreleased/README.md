@@ -6,7 +6,9 @@ template `docs/templates/RELEASE_NOTES.md` (docs/RELEASING.md).
 
 ## When a fragment is required
 
-- `model/*` PRs: always — `changes/unreleased/<model>.md`.
+- `model/*` PRs (the legacy single-model route): always — `changes/unreleased/<model>.md`.
+- `release/v<X.Y.Z>` PRs: none to add. The release cut consumes the fragments: it assembles them
+  into the release notes and deletes them (docs/RELEASING.md).
 - `engine/*` PRs that change behavior (tools, workflows): yes — `changes/unreleased/<slug>.md`.
 - DOCS-only PRs: no.
 

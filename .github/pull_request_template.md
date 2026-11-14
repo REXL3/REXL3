@@ -12,14 +12,14 @@ Run on this head commit (SHA: ), with `umask 022`; paste the output:
 
 - [ ] `git diff --check`
 - [ ] `python3 -m unittest discover -s tools -p 'test_*.py'`
-- [ ] `python3 -B -E -s tools/verify_runtime_tree.py --root . --approved runtimes/templates/APPROVED.json --trusted-approvals runtimes/templates/APPROVALS.json --trusted-approvals-sha256 "$(sed -n 's/^ *TRUSTED_APPROVALS_SHA256: *//p' .github/workflows/verify.yml)" --assets-dir "$(mktemp -d)"` (the command in CONTRIBUTING.md section 6)
+- [ ] `python3 -B -E -s tools/verify_runtime_tree.py --root . --base "$BASE" --approved "$BASE/runtimes/templates/APPROVED.json" --trusted-approvals "$BASE/runtimes/templates/APPROVALS.json" --assets-dir "$(mktemp -d)"`, where `$BASE` is a clean checkout of `origin/main` (for example `BASE="$(mktemp -d)" && git worktree add --detach "$BASE" origin/main`) and both checkouts were made under `umask 022`; expected last line on a PR that changes no runtime tree: `N tree(s), 0 problem(s); N unchanged/skipped`
 - [ ] Rebased on `origin/main` (commit: ); one commit; the subject equals the PR title
 
 ## Contracts
 
 - [ ] The title, branch name and changed paths match the branch type's scope (CONTRIBUTING.md section 3)
 - [ ] No file under `runtimes/*/*/v*/` is edited
-- [ ] Policy files (`runtimes/templates/APPROVALS.json`, the `TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml`) change only in a PR whose purpose is that change; the pin equals the sha256 of the registry
+- [ ] Registry files (`runtimes/templates/APPROVALS.json`, `runtimes/templates/approvals/<family>/<model>.json`) change only in a PR whose purpose is that change
 - [ ] No test, gate or check was weakened in this PR
 - [ ] Workflow changes keep the security model: code and policy read from the protected base, nothing executes PR-head code, read-only permissions unless a narrow write is justified, actions pinned by full commit SHA
 - [ ] No secrets, tokens, personal email addresses, internal project names or quantization-method internals

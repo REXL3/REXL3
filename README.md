@@ -297,7 +297,7 @@ Image input is inline base64 in a data URI (`image_url` part). Remote HTTPS imag
 under an owner vision exception; see the capability contract below); `--max-image-tokens` bounds image tokens. Towers exist for Qwen, GLM
 (glm5_next, 24-layer), MiniCPM-V-4.7 and Nemotron Omni; the Nemotron engine also accepts video as a
 frame list (`--max-video-frames`, `--max-video-tokens`, `--video-pruning-rate`, `--video-evs-strict`,
-`--no-video`), but no first-release profile declares video (`capabilities.video` is `false` in every
+`--no-video`), but no released profile declares video (`capabilities.video` is `false` in every
 profile). Audio is refused by every family.
 
 ### Reasoning controls
@@ -382,7 +382,8 @@ Always use the structured templates in `.github/ISSUE_TEMPLATE/` (including when
   **no bare feature requests.** Because this repository ships the complete engine source tree (`crates/`,
   `Cargo.toml`, `SOURCE_BUILD.md`), any proposed feature, drafter integration, kernel optimization, or
   runtime improvement must include a **working `git diff` that you built, tested, and validated on your
-  own setup at the profile's full supported context (`262,144` for `tp1` / `1,048,576` for `tp2`)**,
+  own setup at the profile's full context window (`--max-model-len` in its sealed `profile.json`:
+  262,144, 524,288 or 1,048,576 depending on the profile)**,
   together with exactness checks (`drafted == serial`) and measured before/after numbers so the
   maintainers can test it in `REXL3/REXL3-dev`, validate it, and promote it to `REXL3/REXL3`.
 

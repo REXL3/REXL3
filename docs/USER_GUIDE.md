@@ -16,7 +16,7 @@ then keep the recipe's `KNOWN_ISSUES.md` beside you.
 
 | Document | What it is for | Authority |
 | --- | --- | --- |
-| [README](../README.md) | Front page: what REXL3 is, the first-release models, the shortest path | What the project is |
+| [README](../README.md) | Front page: what REXL3 is, the released models, the shortest path | What the project is |
 | This guide | The whole journey: install, API cookbook, operations, troubleshooting | How to run any recipe |
 | [docs/PROMOTION.md](PROMOTION.md) | How a recipe is sealed and promoted into this repository | Maintainers |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Rules for changing this repository | Contributors |
@@ -26,11 +26,11 @@ then keep the recipe's `KNOWN_ISSUES.md` beside you.
 | [SECURITY](../SECURITY.md) | Reporting a vulnerability, the threat model | Security |
 
 If this guide and the bundle disagree, follow the bundle and tell the maintainers (section 11).
-While this repository is private, the release must be downloaded with the GitHub CLI (`gh`), not with
-`curl`; the bundle's own examples may show `curl` against the public release URL.
+The examples in this guide download with the GitHub CLI (`gh`); the bundle's own examples use `curl`
+against the public release URL.
 
 Conventions: commands are for Bash on the GB10 host unless said otherwise. `$TAG` is a release tag
-such as `v0.1.0`. A line starting with `#` inside a code block is a comment.
+such as `v0.1.1`. A line starting with `#` inside a code block is a comment.
 
 ## 2. Before you start
 
@@ -110,7 +110,7 @@ If a recipe has more than one profile, add `--profile <name>` to `setup`, `start
 
 ### 4.1 Choose a release tag
 
-The [README](../README.md) lists the first-release models and their status. The GitHub releases page
+The [README](../README.md) lists the released models and their status. The GitHub releases page
 has the exact tags; the first was `v0.1.0`. Releases are immutable: a fix is a new version, never
 an edit. Pick the version a maintainer told you to test.
 
@@ -224,7 +224,8 @@ the site format. Do not edit a sealed profile to change its flags.
 model, which is why `--accept-model-download` is separate. `setup` shows the remaining bytes and the
 destination, fetches only the locked repository revision and files, and verifies every file's size and
 hash. An interrupted download resumes at the same pin. Models live under
-`${XDG_DATA_HOME:-$HOME/.local/share}/rexl3/models/`; nothing is stored in the bundle. If you already
+`${XDG_DATA_HOME:-$HOME/.local/share}/rexl3/<runtime-id>/models/<role>/<revision>/` (`<role>` is `target`
+or `draft`); nothing is stored in the bundle. If you already
 have the model files, a single-node profile may allow an existing directory through a site file (see
 the bundle's `docs/SETUP.md`); the launcher then verifies it read-only and never repairs or downloads
 into it.
@@ -522,7 +523,7 @@ tracked belongs in an issue. A report needs:
    `finish_reason`.
 6. What you checked and what you could not check on your machine.
 
-If you are proposing a fix, new feature, drafter binding, kernel speedup, or runtime improvement rather than reporting a failure, use the **Tester finding, fix, or feature proof** template (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `). **Do not open bare feature requests:** build your change against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`), validate it on your own setup at the profile's full supported context (`262,144` for `tp1` or `1,048,576` for `tp2`), and include the complete `git diff` plus measured before/after validation evidence so the maintainers can test it in `REXL3/REXL3-dev` and promote it to `REXL3/REXL3`.
+If you are proposing a fix, new feature, drafter binding, kernel speedup, or runtime improvement rather than reporting a failure, use the **Tester finding, fix, or feature proof** template (`.github/ISSUE_TEMPLATE/tester-fix-or-improvement.yml`, title prefix `[finding] `). **Do not open bare feature requests:** build your change against this repository's engine source tree (`crates/`, `Cargo.toml`, `SOURCE_BUILD.md`), validate it on your own setup at the profile's full context window (`--max-model-len` in its sealed `profile.json`: 262,144, 524,288 or 1,048,576 depending on the profile), and include the complete `git diff` plus measured before/after validation evidence so the maintainers can test it in `REXL3/REXL3-dev` and promote it to `REXL3/REXL3`.
 
 Do not include raw logs, prompts or responses you do not want shared, credentials, or SSH keys. For a
 security problem follow [SECURITY](../SECURITY.md) instead: never an issue and never a chat channel.
@@ -532,7 +533,7 @@ security problem follow [SECURITY](../SECURITY.md) instead: never an issue and n
 | Term | Meaning |
 | --- | --- |
 | Recipe | A sealed, hash-pinned runtime for one model under `runtimes/<family>/<model>/`: profile, launcher, locks, approval |
-| Bundle | The runnable archive of a recipe, including the native binaries (a release asset) |
+| Bundle | The runnable archive of a recipe (a release asset). It ships without the engine binaries, which are separate assets of the same release named in the approval's `engine_binaries` (section 4.4) |
 | Model folder | The `runtimes/<family>/<model>/` tree; `<model>` never carries a quantization format or bit width |
 | Profile | One approved way to run the recipe: window, slots, topology, flags |
 | Slot | One request being processed at the same time |

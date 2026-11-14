@@ -1,5 +1,17 @@
-"""Release manifest schema (rexl3.release-manifest.v1) shared by notes assembly and cut_release."""
+"""Release manifest schema (rexl3.release-manifest.v1) shared by notes assembly and cut_release.
+
+    python3 tools/release_manifest.py --repo-root PATH --version vX.Y.Z --source-archives
+
+prints the optional `engine.source_archives` block for the models the manifest lists: one shared
+engine corresponding-source archive per distinct sealed digest (docs/RELEASING.md). Read-only.
+"""
 from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import re
+import sys
 
 try:
     from . import release_evidence as e
@@ -20,6 +32,13 @@ ENGINE_KEYS = ('dev_commit', 'dev_tree', 'engine_release_tag', 'artifacts')
 # engine release tag must be the exact dev engine release the carried approval was sealed against.
 QUALIFICATION_TIERS = ('T0',)
 CARRY_FORWARD_KEYS = ('qualified_engine_release_tag', 'qualification_tier', 'scope_diff_base')
+# Optional `engine.source_archives`: {shared asset name: {sha256, bytes}}. A manifest that carries it
+# publishes each named engine corresponding-source archive once, in place of one copy per model.
+# Every model's sealed approval must then name an engine source with exactly one entry's digest and
+# size. A manifest without the key keeps the per-model engine-source assets (v0.1.0, v0.1.1).
+SOURCE_ARCHIVES = 'source_archives'
+# The name release_evidence.shared_engine_source_name gives an engine-v<X.Y.Z>-<8hex> release.
+SOURCE_ARCHIVE_NAME = re.compile(r'rexl3-engine-source-[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\.tar\.gz')
 
 
 def validate_manifest(doc, version):
@@ -38,6 +57,19 @@ def validate_manifest(doc, version):
     for name, digest in artifacts.items():
         e.relative_path(name)
         e.full_hash(digest)
+    if SOURCE_ARCHIVES in engine:
+        sources = engine[SOURCE_ARCHIVES]
+        e.require(isinstance(sources, dict) and sources, 'engine source archives must be a non-empty object')
+        digests = set()
+        for name, record in sources.items():
+            e.require(isinstance(name, str) and SOURCE_ARCHIVE_NAME.fullmatch(name) and name not in artifacts,
+                      'invalid shared engine-source asset name')
+            e.require(isinstance(record, dict) and set(record) == {'sha256', 'bytes'},
+                      'invalid engine source archive record: ' + name)
+            e.full_hash(record['sha256'])
+            e.require(type(record['bytes']) is int and record['bytes'] > 0, 'invalid engine source archive size: ' + name)
+            e.require(record['sha256'] not in digests, 'engine source archives repeat a digest: ' + name)
+            digests.add(record['sha256'])
     # The primary engine release tag names the engine dev commit: its eight-hex commit
     # suffix must be exactly the dev_commit prefix, so the tag cannot name a different
     # commit than the manifest's engine source.
@@ -78,3 +110,88 @@ def manifest_models(manifest):
     for item in manifest['models']:
         by_version.setdefault(item['version'], {})[item['model']] = item
     return by_version
+
+
+def approval_engine_tag(approval):
+    """The dev engine release a sealed approval was built on: its unified tag, or the one its engine binaries name."""
+    tag = approval.get('approve_tag')
+    if not e.is_engine_tag(tag):
+        engine = approval.get('engine_binaries')
+        e.require(engine is not None, 'approval names no engine release, so its engine source cannot be shared')
+        tag = next(iter(e.validate_engine_binaries(engine).values()))['release_tag']
+    e.full_hash(approval.get('source_commit'), e.HEX40)
+    e.require(tag.endswith('-' + approval['source_commit'][:8]), 'engine release tag does not name the approval commit')
+    return tag
+
+
+def shared_source_record(approval):
+    """(shared asset name, {sha256, bytes}) of one sealed approval's engine corresponding source."""
+    asset = approval['engine_source_asset']
+    e.full_hash(asset.get('sha256'))
+    e.require(type(asset.get('bytes')) is int and asset['bytes'] > 0, 'invalid engine source size')
+    return e.shared_engine_source_name(approval_engine_tag(approval)), {'sha256': asset['sha256'], 'bytes': asset['bytes']}
+
+
+def shared_source_name(approval, sources):
+    """The manifest's shared archive for one approval: same engine release name, same digest, same size."""
+    name, record = shared_source_record(approval)
+    e.require(sources.get(name) == record, 'engine source differs from the shared archive the manifest names: ' + name)
+    return name
+
+
+def _manifest_approvals(manifest, repo_root):
+    root = Path(repo_root)
+    for item in manifest['models']:
+        path = root / 'runtimes' / item['family'] / item['model'] / item['version'] / 'approval.json'
+        # The manifest pins the approval bytes; a different local file must not choose the asset set.
+        e.require(e.sha256_file(path) == item['approval_sha256'],
+                  f"local approval bytes differ from the manifest: {item['family']}/{item['model']} {item['version']}")
+        approval = e.load_json(path)
+        e.approval_assets(approval)
+        yield (item['family'], item['model'], item['version']), approval
+
+
+def shared_engine_sources(manifest, repo_root):
+    """{(family, model, version): shared asset name}; empty for a manifest without `engine.source_archives`.
+
+    With the key, every model must map to one entry by digest and size, and every entry must be used.
+    """
+    sources = manifest['engine'].get(SOURCE_ARCHIVES)
+    if sources is None:
+        return {}
+    e.require(repo_root is not None, 'shared engine source archives need the production tree')
+    mapped = {key: shared_source_name(approval, sources) for key, approval in _manifest_approvals(manifest, repo_root)}
+    unused = set(sources) - set(mapped.values())
+    e.require(not unused, 'manifest names an engine source archive no model was sealed from: ' + ', '.join(sorted(unused)))
+    return mapped
+
+
+def derive_source_archives(manifest, repo_root):
+    """The `engine.source_archives` block for the manifest's models: one entry per distinct sealed digest."""
+    sources = {}
+    for _, approval in _manifest_approvals(manifest, repo_root):
+        name, record = shared_source_record(approval)
+        e.require(sources.setdefault(name, record) == record,
+                  'approvals name the same engine source archive with different bytes: ' + name)
+    return sources
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo-root', default='.')
+    parser.add_argument('--version', required=True)
+    parser.add_argument('--source-archives', action='store_true', required=True,
+                        help='print the engine.source_archives block derived from the sealed approvals')
+    args = parser.parse_args(argv)
+    try:
+        path = Path(args.repo_root) / 'releases' / args.version / 'manifest.json'
+        manifest = validate_manifest(e.load_json(path), args.version)
+        print(json.dumps({SOURCE_ARCHIVES: derive_source_archives(manifest, args.repo_root)}, indent=2, sort_keys=True))
+        return 0
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        print('MANIFEST_REFUSED: ' + str(error), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

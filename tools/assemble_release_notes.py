@@ -95,6 +95,9 @@ def assets_section(manifest):
     lines = []
     for name, digest in manifest['engine']['artifacts'].items():
         lines.append(f'- `{name}` sha256 `{digest}`')
+    for name, record in sorted((manifest['engine'].get('source_archives') or {}).items()):
+        lines.append(f"- `{name}` sha256 `{record['sha256']}` ({record['bytes']} bytes): engine corresponding source, "
+                     'published once for every model whose sealed approval names this digest')
     for item in manifest['models']:
         lines.append(f"- {item['family']}/{item['model']} {item['version']}: approval sha256 `{item['approval_sha256']}`")
     return '\n'.join(lines) or 'None.'

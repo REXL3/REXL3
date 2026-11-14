@@ -338,6 +338,15 @@ python3 tools/cut_release.py --version vX.Y.Z --publish    # tag + draft release
 python3 tools/cut_release.py --version vX.Y.Z --verify      # confirm published release matches manifest
 ```
 
+**`tools/release_manifest.py`** — read-only; prints the optional `engine.source_archives` manifest
+block (one shared engine-source archive per distinct sealed digest, docs/RELEASING.md) for the
+models `releases/v<X.Y.Z>/manifest.json` lists. `--repo-root` defaults to `.`. Refusals print
+`MANIFEST_REFUSED: ...` on stderr and exit 2:
+
+```bash
+python3 tools/release_manifest.py --repo-root PATH --version vX.Y.Z --source-archives
+```
+
 ## 7. Agent protocol (binding)
 
 Agents (AI coding assistants) working in this repository must follow this file, `AGENTS.md` and the

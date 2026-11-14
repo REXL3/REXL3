@@ -74,7 +74,7 @@ PY
 
 ### 3. Inspecting engine source, profiling, and verifying fixes or optimizations
 
-Every release ships the exact corresponding engine source archive (`rexl3-engine-*-source.tar.gz` / `<runtime-id>-v<N>-engine-source.tar.gz`) containing `crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, and `SOURCE_BUILD.md`:
+Every release ships the exact corresponding engine source archive (`rexl3-engine-*-source.tar.gz` / `<runtime-id>-v<N>-engine-source.tar.gz`, or one shared `rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz` for all models of a release that lists it under "Assets and checksums") containing `crates/`, `Cargo.toml`, `Cargo.lock`, `third_party/`, and `SOURCE_BUILD.md`:
 
 - **Building from source:** extract the engine source archive to a separate scratch directory (never inside a sealed `runtimes/*/*/v*/` tree) and follow `SOURCE_BUILD.md` (`cargo +1.89.0 build --release --locked`).
 - **Validation standards for any fix or optimization you test:**

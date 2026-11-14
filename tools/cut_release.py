@@ -26,11 +26,11 @@ import urllib.request
 try:
     from . import release_evidence as e
     from . import model_layout as m
-    from .release_manifest import validate_manifest
+    from .release_manifest import validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES
 except ImportError:
     import release_evidence as e
     import model_layout as m
-    from release_manifest import validate_manifest
+    from release_manifest import validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES
 
 DEV_REPO = 'REXL3/REXL3-dev'
 API = 'https://api.github.com'
@@ -246,15 +246,20 @@ def asset_prefix(item):
 
 
 def model_assets(manifest, repo_root=None):
-    """Expected release asset names: five per model (approval + four archives) plus engine artifacts.
+    """Expected release asset names: per-model approval and archives plus engine artifacts.
 
     Every carried-forward model's engine binaries (the assets its sealed approval names in
     ``engine_binaries``) are also release assets: they are staged from that model's qualified
     engine release, so a mixed-engine release publishes each model's own engine build. The
     carried engine assets are read from the local prod tree when ``repo_root`` is given.
+
+    A manifest with ``engine.source_archives`` publishes each named engine corresponding-source
+    archive once: every model maps to one of them by its sealed digest and size, and no model
+    keeps a per-model engine-source asset. A manifest without the key is unchanged.
     """
     names = set(manifest['engine']['artifacts'])
-    shared_sources = {}
+    shared_sources = dict(shared_engine_sources(manifest, repo_root))
+    names.update(shared_sources.values())
     if repo_root is not None:
         root = Path(repo_root)
         for item in manifest['models']:
@@ -352,6 +357,7 @@ def download_dev_assets(api, manifest, repo_root):
     work = Path(tempfile.mkdtemp(prefix='.cut-release-'))
     release_cache = {}
     byte_cache = {}
+    source_archives = manifest['engine'].get(SOURCE_ARCHIVES)
     original_api = api
 
     class DownloadCache:
@@ -459,11 +465,21 @@ def download_dev_assets(api, manifest, repo_root):
             shared = archive == e.shared_engine_source_name(tag)
             target = work / (archive if shared else f'{prefix}-{kind}.tar.gz')
             data = (dest / archive).read_bytes()
+            if kind == 'engine-source' and source_archives is not None:
+                # One shared archive per sealed digest: the approval still names its own digest and
+                # size, and the bytes just verified against it must be the manifest's bytes.
+                shared = True
+                target = work / shared_source_name(doc, source_archives)
+                record = source_archives[target.name]
+                e.require(len(data) == record['bytes'] and hashlib_hex(data) == record['sha256'],
+                          'engine source bytes differ from the manifest: ' + target.name)
             if target.exists():
                 e.require(shared and e.sha256_file(target) == e.sha256_file(dest / archive),
                           'release asset collision: ' + target.name)
             else:
                 target.write_bytes(data)
+    for name in source_archives or {}:
+        e.require((work / name).is_file(), 'manifest names an engine source archive no model was sealed from: ' + name)
     # Engine artifacts named by the manifest come from the dev engine release.
     engine_tag = manifest['engine']['engine_release_tag']
     engine_release = original_api.get(f'/repos/{DEV_REPO}/releases/tags/{urllib.parse.quote(engine_tag, safe="")}')
@@ -527,6 +543,10 @@ def verify_published(api, repo, version, merge_commit, manifest, *, draft_ok=Fal
             raise ValueError('asset not uploaded: ' + name)
         if asset.get('digest') and not re.fullmatch(r'sha256:[0-9a-f]{64}', asset['digest']):
             raise ValueError('unexpected asset digest format: ' + name)
+    for name, record in (manifest['engine'].get(SOURCE_ARCHIVES) or {}).items():
+        asset = assets[name]
+        if asset.get('size') != record['bytes'] or asset.get('digest') not in (None, 'sha256:' + record['sha256']):
+            raise ValueError('published engine source differs from the manifest: ' + name)
     return release
 
 

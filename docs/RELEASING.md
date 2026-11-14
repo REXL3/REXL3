@@ -132,6 +132,53 @@ verification; carried-gate sources must be pinned by the protected base registry
   unknown headings, empty fragments and duplicate slugs are refused (`NOTES_REFUSED: ...` on stderr,
   exit 2).
 
+## Shared engine source archive
+
+Every sealed approval names its own engine corresponding-source archive (`engine_source_asset`, with
+its sha256 and size). When several models are sealed from one engine build those archives are the
+same bytes, and a release that lists them per model publishes the same archive once per model.
+
+A manifest may carry the optional key `engine.source_archives` to publish each distinct archive once:
+
+```json
+"source_archives": {
+  "rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz": {"sha256": "<64 hex>", "bytes": <size>}
+}
+```
+
+- The name is the unified engine-source name of the dev engine release the approval was built on
+  (`engine-v<X.Y.Z>-<8hex>`: the approval's unified tag, or the release its `engine_binaries` name).
+  A later unified seal on the same engine release names the same asset.
+- Print the block for the models a manifest lists (read-only; it reads the sealed approvals on the
+  checkout and refuses two approvals that give one name different bytes):
+
+  ```bash
+  python3 tools/release_manifest.py --repo-root PATH --version vX.Y.Z --source-archives
+  ```
+
+- With the key, `tools/cut_release.py` requires every model's sealed `engine_source_asset` sha256
+  and size to equal exactly one entry, and every entry to be used. The approval is not changed: it
+  still names its own digest, and the tool maps it to the shared asset by that digest. `--publish`
+  downloads each model's archive from its dev release, verifies it against the approval as before,
+  and writes the shared asset once; a second archive for the same name with other bytes, or bytes
+  that differ from the manifest, is refused. `--verify` also compares the published asset's size and
+  digest with the manifest. An approval sealed with its own bundled executables and a legacy tag
+  names no engine release and cannot share; a manifest that lists such a model omits the key.
+- The expected asset set is then four assets per model (approval, bundle, wrapper source, evidence),
+  one shared engine-source asset per distinct digest, and the engine artifacts.
+- Without the key nothing changes: `v0.1.0` and `v0.1.1` keep their per-model
+  `<runtime-id>-v<N>-engine-source.tar.gz` assets and verify as published. To verify an older
+  release, run `--verify` with `--repo-root` at an export of that release's tag when main has since
+  moved a model's `MODEL.json` on.
+- `tools/assemble_release_notes.py` lists each shared archive with its sha256 and size under "Assets
+  and checksums".
+
+A release that ships already-sealed approvals again on the same engine build (a packaging release)
+lists the same models, versions and approval hashes, and the same `engine` block, plus
+`engine.source_archives`. Its models are not `carried_forward` (that names an earlier engine release
+than the manifest's). Its release PR changes only `releases/v<X.Y.Z>/`, `CHANGELOG.md` and the
+consumed fragments: no tree and no registry anchor changes, so nothing is resealed or requalified.
+
 ## The cut_release ceremony (maintainers only)
 
 No GitHub App. The ceremony is run by a maintainer personally on their own machine with an
@@ -190,6 +237,8 @@ At the release PR:
 - [ ] The single PR contains every promoted tree, its modular registry anchor and pack doc, and the
       corresponding engine source; diff-scoped verification fully authenticated every new/changed tree.
 - [ ] The manifest lists the agreed release group (all in-scope models; no model outside the group).
+- [ ] If the manifest carries `engine.source_archives`, the block equals the output of
+      `tools/release_manifest.py --source-archives` for this manifest.
 - [ ] `releases/v<X.Y.Z>/NOTES.md` assembled from fragments via
       `tools/assemble_release_notes.py`; `CHANGELOG.md` entry added; consumed
       `changes/unreleased/*.md` fragments deleted.

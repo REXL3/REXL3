@@ -26,9 +26,10 @@ DeepSeek-V4.1-Flash-1017.
   promoted model trees, their modular registry anchors and pack docs, and the release manifest,
   notes and CHANGELOG. One sealed-receipt LOCAL-VALIDATION v1 review covers every changed model at
   the exact PR head, and the other maintainer approves that head before merge.
-- The legacy standalone two-PR route (`model/<model>-approval`, then `model/<model>`) remains
-  available for an individual promotion. Each model PR is validated and approved by the maintainer
-  who did NOT submit it; the release is cut only after every in-scope standalone model PR merges.
+- The legacy standalone two-PR route (`model/<model>-approval`, then `model/<model>`) cannot add a
+  new version today: `verify` refuses a new anchor whose tree is not in the same run. A single-model
+  hotfix that needs a new anchor is a one-model `release/v<X.Y.Z>` patch release PR
+  (docs/PROMOTION.md).
 - No model gets its own product release or release candidate. A patch product release may contain a
   single newly validated model as a new version; it is still a normal `v<X.Y.Z>` product release.
 - Change-scoped qualification tiers:
@@ -104,6 +105,21 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
   unified `engine-v<X.Y.Z>-<8hex>` dev release.
 - It deletes the consumed `changes/unreleased/*.md` fragments. `runtimes/templates/APPROVED.json`
   and unrelated tool/workflow changes are outside release scope.
+
+### Tester credit in the release PR
+
+A tester whose fix or finding ships in the cut is credited in the release PR itself:
+
+- the commit that brings their change in carries `Co-authored-by: Name <id+login@users.noreply.github.com>`.
+  For a promoted model, pass `--co-author "Name <id+login@users.noreply.github.com>"` (repeatable) to
+  `tools/promote_runtime.py`, which adds the trailer to that model's promotion commit. For engine
+  source or other release content, add the trailer to the commit that carries it, or to a dedicated
+  commit on `release/v<X.Y.Z>`;
+- the PR body credits them and links the issue they reported;
+- the PR is squash-merged with the commits' messages kept (the repository's squash setting uses the
+  commit messages), so the trailers reach main. Check the merged commit before cutting.
+
+Only GitHub noreply addresses are used (CONTRIBUTING.md section 8).
 
 Diff-scoped verification compares the candidate with the protected base. A byte-identical,
 already-anchored tree may skip its remote archive download, but never its `MODEL.json`, `LATEST`,

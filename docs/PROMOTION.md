@@ -17,8 +17,11 @@ only if all of these hold:
    duplicate keys, and treats every reviewed entry as an independent anchor.
 2. Existing base anchors in either `APPROVALS.json` or `runtimes/templates/approvals/<family>/<model>.json`
    are append-only: deleting or mutating an existing base anchor is refused. A newly added modular anchor
-   is reviewed in the same `release/v<X.Y.Z>` PR as its tree and must be downloaded and 9-gate verified in
-   that same run (`TRUSTED_APPROVALS_SHA256` in `verify.yml` is retired to eliminate multi-model rebase conflicts).
+   is reviewed in the same `release/v<X.Y.Z>` PR as its tree and must be downloaded and fully verified
+   (approval bytes, every asset and the strict receipt rules of item 4) in that same run
+   (`TRUSTED_APPROVALS_SHA256` in `verify.yml` is retired to eliminate multi-model rebase conflicts). A
+   module holds only `schema` and a non-empty `approvals` section whose keys all name its own
+   `<family>/<model>`; a misfiled key, an empty module or another section is refused.
 3. The verifier, the registry and the template allow-list (`runtimes/templates/APPROVED.json`) are
    read from the protected base revision of `main`, never from the pull request. A pull request cannot
    change the rules it is judged by. `.github/CODEOWNERS` makes `@am423` and `@vcruz305` owners of
@@ -79,8 +82,11 @@ approval's full `source_commit`. Each model has prefixed approval, bundle, sourc
 shares the release's bound `rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz` archive. Older `approve-<runtime_id>-<N>`
 approvals remain valid for legacy and T0 carried-forward entries.
 
-*(Emergency single-model hotfix only: the standalone `model/<model>-approval` -> `model/<model>` path remains
-accepted by the verifier if an out-of-band single-model hotfix is ever explicitly requested.)*
+*(Single-model hotfix: the standalone `model/<model>-approval` -> `model/<model>` path cannot add a new
+version today. `verify` refuses a new anchor whose tree is not in the same run (`new candidate registry
+anchor has no discovered runtime tree`), and a `model/<model>` PR may not touch the registry. A hotfix
+that needs a new anchor is a one-model `release/v<X.Y.Z>` patch release PR. A `model/<model>` PR still
+works for a tree whose anchor is already on the base, in either registry form.)*
 
 There are no separate LATEST or pack-sheet PRs, no separate publish step, and no `prod/<runtime>/v<N>`
 release. `LATEST` is part of the tree addition. When a later version of a model already on `main` is
@@ -102,9 +108,39 @@ python3 tools/promote_runtime.py \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
+  [--new-anchor "$ANCHORS/<model>.json"] [--co-author "Name <id+login@users.noreply.github.com>" ...] \
   [--dry-run] [--display-name "Display Name" --engine-family <module> \
    --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
 ```
+
+**A new anchor.** The clean checkout cannot hold the anchor of a version it is about to promote
+(the tool refuses a dirty checkout), so without help the first promotion of a cut refuses with
+`approval not in independently trusted registry: <family>/<model>/v<N>`. The maintainer writes that
+one anchor in a file **outside the checkout** and passes it with `--new-anchor` (accepted only with
+`--release-branch`). The file has exactly the form of the module the promotion commits:
+
+```json
+{"schema": "rexl3.approval-registry.v1",
+ "approvals": {"<family>/<model>/v<N>": {
+   "approval_sha256": "<the approval_sha256= line the dev seal printed>",
+   "source_commit": "<40-hex>", "source_tree": "<40-hex>", "runtime_id": "<runtime_id>",
+   "approve_tag": "engine-v<X.Y.Z>-<8hex>"}}}
+```
+
+`approve_tag` is required for a unified `engine-v*` tag. `binary_sha256` and the per-profile receipt
+pins are optional, as for any entry (CONTRIBUTING.md section 2). The file must hold exactly the promoted
+key, the registry must not already hold it, and the entry passes the same schema check as every
+registry entry. The downloaded approval is then authenticated against it exactly as against an anchor
+already on main: its bytes must hash to `approval_sha256`, and its source commit, source tree,
+runtime id and tag must match. Carried-gate sources still resolve only against the checkout's
+registry, never against the new anchor. The promotion commits the entry as
+`runtimes/templates/approvals/<family>/<model>.json`, and the release PR review is where the
+maintainers authorise it.
+
+**Tester credit.** Each `--co-author "Name <id+login@users.noreply.github.com>"` adds a
+`Co-authored-by:` trailer to the promotion commit (GitHub noreply addresses only; one line each;
+duplicates refused). The subject stays `FEAT: Promoted <model> v<N>`. docs/RELEASING.md says where
+credit goes in a release cut.
 
 `--download` validates release and asset ids, sizes, the tag commit, every byte and all evidence and
 caches the verified files in `<assets-dir>/<family>/<model>/v<N>/` (with the engine release's executables in
@@ -112,8 +148,10 @@ its `engine/`), the directory the promotion then reads. The tool then writes `MO
 derived metadata; a mismatch is a hard refusal, never an overwrite, except a reviewed runtime rename:
 MODEL.json moves to the runtime's current id, and a reviewed pack-repo rename, only when nothing else changes and
 every sealed tree in the folder still matches it), extracts the tree, writes
-`LATEST`, verifies against the base registry, commits branch `model/<model>` and opens a PR titled
-`FEAT: Promoted <model> v<N>`. `--dry-run` verifies and prints without writing.
+`LATEST`, verifies against the registry, and commits `FEAT: Promoted <model> v<N>`. With
+`--release-branch` it commits locally on `release/v<X.Y.Z>`, together with the new module anchor
+when there is one, and never pushes. Without it, it commits branch `model/<model>` and opens a PR
+with that title. `--dry-run` verifies and prints without writing.
 
 ## The model-branch completeness checker
 

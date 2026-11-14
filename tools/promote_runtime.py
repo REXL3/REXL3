@@ -548,14 +548,57 @@ def model_assets_dir(assets_dir, family, model, version):
     return Path(assets_dir) / family / model / f'v{version}'
 
 
+CO_AUTHOR_RE = re.compile(r'[^<>\x00-\x1f\x7f]*[^<>\s\x00-\x1f\x7f] '
+                          r'<(?:[0-9]+\+)?[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?@users\.noreply\.github\.com>')
+
+
+def co_author_trailers(co_authors):
+    """`Co-authored-by:` trailer lines for tester credit, one per `Name <noreply>` value.
+
+    Only single-line GitHub noreply identities are accepted (CONTRIBUTING.md section 8: no personal
+    email addresses in commits); duplicates are refused.
+    """
+    lines = []
+    for value in co_authors or ():
+        e.require(isinstance(value, str) and CO_AUTHOR_RE.fullmatch(value),
+                  'co-author must be one line of the form "Name <id+login@users.noreply.github.com>"')
+        line = 'Co-authored-by: ' + value
+        e.require(line not in lines, 'duplicate co-author: ' + value)
+        lines.append(line)
+    return lines
+
+
+def load_new_anchor(path, key, approve_tag):
+    """The maintainer-written registry anchor for a version the trusted registry does not hold yet.
+
+    The file has the form of the approvals/<family>/<model>.json module the promotion writes:
+    schema plus exactly one approvals entry, keyed by the promoted <family>/<model>/v<N>. It is the
+    maintainer's independent statement of which sealed approval to trust; the downloaded approval is
+    then authenticated against it exactly as against any other registry entry.
+    """
+    doc = e.load_json(path)
+    e.require(isinstance(doc, dict) and doc.get('schema') == 'rexl3.approval-registry.v1'
+              and set(doc) <= {'schema', 'approvals'}, 'new anchor file must be one approval registry module')
+    entries = doc.get('approvals')
+    e.require(isinstance(entries, dict) and list(entries) == [key],
+              'new anchor file must hold exactly the promoted registry key: ' + key)
+    entry = e.validate_registry_entry(key, entries[key])
+    if e.is_engine_tag(approve_tag):
+        e.require(entry.get('approve_tag') == approve_tag,
+                  'new anchor for a unified engine release must name its approve_tag')
+    return entry
+
+
 def prepare_promotion(family, model, version, *, approve_tag, target_commit, prod_checkout, assets_dir,
-                      registry, approved_templates, meta, dry_run=False, release_branch=None):
+                      registry, approved_templates, meta, dry_run=False, release_branch=None,
+                      trusted_source_registry=None, co_authors=()):
     key = m.registry_key(family, model, version)
     entry = registry.get('approvals', {}).get(key)
     e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
     runtime_id = entry.get('runtime_id')
     validate_request(runtime_id, approve_tag, version)
     e.full_hash(target_commit, e.HEX40)
+    trailers = co_author_trailers(co_authors)
     # `assets_dir` is the cache root. This model's verified dev assets live in <family>/<model>/v<N>/ beneath it:
     # where --download writes them (main) and where verify_tree reads them, as in CI's fetch_dev_assets layout.
     release_dir = model_assets_dir(assets_dir, family, model, version)
@@ -563,7 +606,8 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     precomputed = precomputed_for_assets(e.load_json(approval_path), release_dir)
     approval, archive = verify_approval(approval_path, approved_templates, registry,
                                         engine_dir=release_dir / 'engine', key=key,
-                                        precomputed=precomputed)
+                                        precomputed=precomputed,
+                                        trusted_source_registry=trusted_source_registry)
     e.require((approval['runtime_id'], approval['version'], approval['approve_tag']) ==
               (runtime_id, version, approve_tag), 'promotion identity mismatch')
     root = e.checked_path(prod_checkout)
@@ -584,7 +628,7 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     if tree.exists():
         problems = verify_tree(tree, approved_templates, trusted_approvals=registry,
                                assets_dir=assets_dir, family=family, model=model,
-                               precomputed=precomputed)
+                               precomputed=precomputed, trusted_source_registry=trusted_source_registry)
         e.require(not problems, 'existing version mismatch: ' + '; '.join(problems))
         print('VERIFIED_TREE_NOOP; model branch unchanged')
         return 0
@@ -607,7 +651,7 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     write_latest(model_dir / 'LATEST', version)
     problems = verify_tree(tree, approved_templates, trusted_approvals=registry,
                            assets_dir=assets_dir, family=family, model=model,
-                           precomputed=precomputed)
+                           precomputed=precomputed, trusted_source_registry=trusted_source_registry)
     e.require(not problems, '; '.join(problems))
     registry_path = None
     if release_branch is not None:
@@ -616,7 +660,10 @@ def prepare_promotion(family, model, version, *, approve_tag, target_commit, pro
     if registry_path is not None:
         paths.append(str(registry_path.relative_to(root)))
     git('add', '--', *paths, cwd=root)
-    git('commit', '-m', f'FEAT: Promoted {model} v{version}', cwd=root)
+    message = f'FEAT: Promoted {model} v{version}'
+    if trailers:
+        message += '\n\n' + '\n'.join(trailers)
+    git('commit', '-m', message, cwd=root)
     if release_branch is not None:
         print(f'VERIFIED_RELEASE_BRANCH {branch}; promoted {family}/{model}/v{version} locally')
         return 0
@@ -648,6 +695,12 @@ def main(argv=None):
     parser.add_argument('--trusted-approvals', required=True)
     parser.add_argument('--trusted-approvals-sha256')
     parser.add_argument('--release-branch', help='local release/v<X.Y.Z> branch; never pushes or creates a PR')
+    parser.add_argument('--new-anchor', metavar='FILE',
+                        help='with --release-branch: maintainer-written approvals module (outside the checkout) '
+                             'holding exactly the new <family>/<model>/v<N> anchor; the promotion commits it')
+    parser.add_argument('--co-author', action='append', default=[], metavar='"NAME <NOREPLY>"',
+                        help='credit a tester: adds a Co-authored-by trailer to the promotion commit (repeatable; '
+                             'GitHub noreply addresses only)')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--display-name', help='human display name (required when MODEL.json is new)')
     parser.add_argument('--engine-family', help='dev engine module name (required when MODEL.json is new)')
@@ -672,6 +725,16 @@ def main(argv=None):
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
         approved = e.load_json(args.approved)['templates']
         key = m.registry_key(args.family, args.model, args.version)
+        co_author_trailers(args.co_author)
+        # Carried-gate sources resolve only against the registry the checkout already holds, never
+        # against the new anchor (as verify resolves them against the protected base only).
+        source_registry = registry
+        if args.new_anchor is not None:
+            e.require(args.release_branch is not None, '--new-anchor requires --release-branch')
+            e.require(key not in registry.get('approvals', {}),
+                      'registry already anchors ' + key + '; drop --new-anchor')
+            new_entry = load_new_anchor(args.new_anchor, key, args.approve_tag)
+            registry = dict(registry, approvals=dict(registry.get('approvals', {}), **{key: new_entry}))
         entry = registry.get('approvals', {}).get(key)
         e.require(isinstance(entry, dict), 'approval not in independently trusted registry: ' + key)
         runtime_id = entry.get('runtime_id')
@@ -682,11 +745,13 @@ def main(argv=None):
         if args.download:
             validate_request(runtime_id, args.approve_tag, args.version)
             download_release(args.approve_tag, model_assets_dir(args.assets_dir, args.family, args.model, args.version),
-                             registry=registry, approved_templates=approved, key=key)
+                             registry=registry, approved_templates=approved, key=key,
+                             trusted_source_registry=source_registry)
         return prepare_promotion(args.family, args.model, args.version, approve_tag=args.approve_tag,
             target_commit=args.target_commit, prod_checkout=args.prod_checkout, assets_dir=args.assets_dir,
             registry=registry, approved_templates=approved, meta=meta, dry_run=args.dry_run,
-            release_branch=args.release_branch)
+            release_branch=args.release_branch, trusted_source_registry=source_registry,
+            co_authors=args.co_author)
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
         print('PROMOTION_REFUSED: ' + str(error), file=sys.stderr)
         return 2

@@ -246,6 +246,46 @@ class CheckModelBranchTest(unittest.TestCase):
         self.assertEqual(code, 0, '\n'.join(lines))
         self.assertEqual([line for line in lines if line.startswith('FAIL')], [])
 
+    def move_anchor_to_module(self, fx, module=None):
+        """Base registry: the model's anchor lives only in its approvals/<family>/<model>.json module."""
+        key = f'{FAMILY}/{MODEL}/v1'
+        top = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}
+        write(fx.repo, 'runtimes/templates/APPROVALS.json', encoded(top))
+        write(fx.repo, module or f'runtimes/templates/approvals/{FAMILY}/{MODEL}.json', encoded({
+            'schema': 'rexl3.approval-registry.v1', 'approvals': {key: fx.registry['approvals'][key]}}))
+        pin = sha(fx.registry_path.read_bytes())
+        write(fx.repo, '.github/workflows/verify.yml',
+              ('name: verify\non:\n  pull_request_target:\n    branches: [main]\nenv:\n'
+               f'  TRUSTED_APPROVALS_SHA256: {pin}\n').encode())
+
+    def test_model_branch_reads_a_modular_base_anchor(self):
+        # A model/<model> PR whose anchor is in the base's modular registry file (not the top-level
+        # APPROVALS.json) is verified against it, from git objects and from --base-tree-dir alike.
+        fx = self.fixture('modular-base')
+        self.move_anchor_to_module(fx)
+        fx.init()
+        base_dir = Path(self.tmp.name) / 'modular-base-export'
+        shutil.copytree(fx.repo, base_dir, ignore=shutil.ignore_patterns('.git'))
+        fx.add_model()
+        fx.commit('model')
+        code, lines = self.captured(lambda: self.run_check(fx))
+        self.assertEqual(code, 0, '\n'.join(lines))
+        self.assertIn('PASS tree', lines)
+        code, lines = self.captured(lambda: self.run_check(fx, '--base-tree-dir', str(base_dir),
+                                                           '--tree-dir', str(fx.repo)))
+        self.assertEqual(code, 0, '\n'.join(lines))
+        self.assertIn('PASS tree', lines)
+
+    def test_model_branch_refuses_a_misfiled_base_module(self):
+        fx = self.fixture('misfiled-base')
+        self.move_anchor_to_module(fx, module=f'runtimes/templates/approvals/{FAMILY}/other-model.json')
+        fx.init()
+        fx.add_model()
+        fx.commit('model')
+        code, lines = self.captured(lambda: self.run_check(fx))
+        self.assertEqual(code, 1, '\n'.join(lines))
+        self.assertTrue(any(line.startswith('FAIL tree') and 'another model' in line for line in lines), lines)
+
     def test_release_checks_every_changed_model_with_merged_candidate_registry(self):
         fx = self.fixture('release-batch')
         fx.init()

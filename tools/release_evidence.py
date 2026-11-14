@@ -1924,7 +1924,28 @@ def load_registry(path, expected_sha256=None):
                 module = checked_path(module)
                 require(module.is_file() and module.suffix == '.json' and ID.fullmatch(module.stem),
                         'invalid approval registry model module')
-                documents.append((module, load_json(module)))
+                document = load_json(module)
+                _check_registry_module(document, family.name, module.stem)
+                documents.append((module, document))
     for source, document in documents:
         _merge_registry_document(merged, document, source)
     return merged
+
+
+def _check_registry_module(document, family, model):
+    """Bind approvals/<family>/<model>.json to its own keys.
+
+    A module holds only the schema and a non-empty ``approvals`` section, and every key in it names
+    that module's own model (``<family>/<model>/v<N>``). Without this a module's path (which the
+    pull-request scope rules read) could anchor a different model, and an empty or misfiled module
+    would be accepted silently.
+    """
+    module = f'approvals/{family}/{model}.json'
+    require(isinstance(document, dict) and set(document) <= {'schema', 'approvals'},
+            'approval registry module may hold only schema and approvals: ' + module)
+    entries = document.get('approvals')
+    require(isinstance(entries, dict) and entries, 'empty approval registry module: ' + module)
+    prefix = f'{family}/{model}/'
+    for key in entries:
+        require(isinstance(key, str) and key.startswith(prefix) and '/' not in key[len(prefix):],
+                'approval registry module holds a key for another model: ' + module)

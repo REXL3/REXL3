@@ -99,8 +99,12 @@ The loader merges both forms and refuses duplicate keys. Each entry keeps `appro
 `binary_sha256` and each profile's sealed receipt digest under `profiles/<profile>/receipt/sha256`
 (the latter two pin carried-gate sources to the actual approval identity; omitted for approvals that
 predate carry-forward). Existing base entries are append-only; deleting or mutating one is refused.
-The `TRUSTED_APPROVALS_SHA256` pin authenticates only the top-level file and changes with that file.
-A modular anchor is reviewed with its tree and fully authenticated in the same run. Tools derive
+The `TRUSTED_APPROVALS_SHA256` pin in `verify.yml` is retired; `--trusted-approvals-sha256` remains an
+optional extra pin of the top-level file for callers that pass one. A module
+`approvals/<family>/<model>.json` holds only `schema` and a non-empty `approvals` section, and every
+key in it is `<family>/<model>/v<N>` for that same family and model; a misfiled key, an empty module
+or any other section is refused. A modular anchor is reviewed with its tree and fully authenticated
+in the same run. Tools derive
 legacy dev tags from `runtime_id` (MODEL.json and the sealed approval must agree), never folder names.
 Unified fresh-model dev tags are `engine-v<X.Y.Z>-<8hex>`: native engine version plus the first eight
 lowercase hex digits of the full sealed source commit; referenced engine binaries name the same tag.
@@ -112,7 +116,7 @@ keyed by current id and a profile choice that tree seals); any other mismatch is
 
 | Branch | Purpose | May touch only |
 |---|---|---|
-| `model/<model>-approval` | legacy standalone registration of one dev approval (merges first) | `runtimes/templates/approvals/<family>/<model>.json`, `runtimes/templates/APPROVALS.json`, the pin line in `.github/workflows/verify.yml` |
+| `model/<model>-approval` | legacy standalone registration of one dev approval (merges first; see the note below) | `runtimes/templates/approvals/<family>/<model>.json`, `runtimes/templates/APPROVALS.json` |
 | `model/<model>` | bring one validated model into prod; no registry edits | `runtimes/<family>/<model>/**`, `docs/packs/<model>.md`, `changes/unreleased/<model>.md` |
 | `engine/<topic>` | universal production changes: tools, workflows, policy, docs, templates | anything except `runtimes/*/*/v*/**`, `runtimes/templates/APPROVALS.json` and `runtimes/templates/approvals/**` |
 | `release/v<X.Y.Z>` | single-PR product cut, opened by a maintainer only | release manifest/notes, `CHANGELOG.md`, consumed fragment deletions, promoted `runtimes/<family>/<model>/**`, modular/top-level anchors, `docs/packs/**`, and the corresponding engine source under `crates/`, `testdata/` and the listed source-metadata files |
@@ -121,8 +125,12 @@ keyed by current id and a profile choice that tree seals); any other mismatch is
   current manifest holds the five already-sealed models (section 2). The normal cut is one
   `release/v<X.Y.Z>` PR containing engine source, model trees, modular anchors, pack docs and release
   metadata. A patch release may contain one newly validated model as a new version, but no model gets
-  its own product release or release candidate. The legacy two-PR standalone model route remains
-  available. Change-scoped qualification: a model whose family/kernel scope is untouched by
+  its own product release or release candidate. The legacy two-PR standalone model route does not
+  currently work for a new version: `verify` refuses an anchor whose tree is not in the same run
+  (`new candidate registry anchor has no discovered runtime tree`), and a `model/<model>` PR may not
+  add one. An out-of-band single-model hotfix is therefore a one-model `release/v<X.Y.Z>` patch
+  release PR. A `model/<model>` PR still verifies against an anchor already on the base, in either
+  registry form. Change-scoped qualification: a model whose family/kernel scope is untouched by
   the newer engine commits carries forward its prior sealed approval (T0, `carried_forward: true`
   in the manifest); T1/T2 re-run the required gates on the new engine binary, carry forward
   unaffected gate receipts (`carried_gates`) and seal a new approval on the new engine build; only
@@ -177,6 +185,18 @@ Rules: `head` equals the PR head at evaluation time; the review API's `commit_id
 equal that same head (editing a stale review body is insufficient); `model` equals the PR's model
 folder; the four PASS fields are exactly `PASS`; the reviewer is a CODEOWNERS maintainer and not the
 PR author. Release-cut reviews paginate every GitHub review page and apply the same head binding.
+
+A `release/v<X.Y.Z>` PR is covered model by model: every changed `runtimes/<family>/<model>/` folder
+must be named by some qualifying block, and a block may name only folders the PR changes. Two
+release-only forms apply (`tools/check_local_validation.py`):
+
+- `models: <family>/<model>, <family>/<model> ...` (comma or space separated) replaces `model:` so one
+  block covers several models; a block carries exactly one of `model` and `models`.
+- `sealed_receipts: PASS` replaces the four local PASS fields (`check_model_branch`, `assets`,
+  `doctor`, `smoke`). This is a deliberate waiver for release cuts only: the reviewer re-reads the
+  sealed GB10 qualification receipts that `verify` authenticates instead of re-running doctor and
+  smoke on a local host, and says so in `gates`. It is never accepted on a `model/<model>` PR, and the
+  value must be exactly `PASS`.
 
 ## 5. PR types, titles and required checks
 
@@ -269,7 +289,7 @@ defaults to reading base files from git objects; `--assets-dir` defaults to `$RE
 and digest-checks the dev assets via `tools/fetch_dev_assets.py`.
 
 **`tools/check_pr_rules.py`** — title, branch, path scope and fragment rules (check names:
-`branch`, `title`, `scope`, `verify pin only` for `model/*-approval`, `fragment`). Requires
+`branch`, `title`, `scope`, `fragment`). Requires
 `--repo`, `--pr`, `--title`, `--head-ref`, `--token` (or the environment `REXL3_REPO`,
 `REXL3_PR_NUMBER`, `REXL3_TITLE`, `REXL3_HEAD_REF`, `GH_TOKEN`):
 
@@ -300,7 +320,10 @@ python3 tools/governance_audit.py --repo-root PATH --repo OWNER/REPO --token TOK
 (`docs/PROMOTION.md`). `--version` is an integer `<N>`; `--target-commit` is the exact production base
 commit; `--assets-dir` is the root of a durable, verified dev-asset cache, one model version per
 `<family>/<model>/v<N>/` (the directory `--download` fills and the promotion reads); `--approved`,
-`--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and pin;
+`--trusted-approvals` and `--trusted-approvals-sha256` are the template allow-list, registry and an
+optional pin of its top-level file; `--new-anchor FILE` (with `--release-branch` only) supplies the
+maintainer-written anchor for a version the registry does not hold yet (docs/PROMOTION.md);
+`--co-author "Name <noreply>"` (repeatable) adds a `Co-authored-by:` trailer for a credited tester;
 `--download` validates and caches the dev release assets; `--dry-run` verifies and prints without
 writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,
 `--architecture` (repeatable) and `--pack KEY=VALUE` (repeatable) supply the metadata:
@@ -314,6 +337,7 @@ python3 tools/promote_runtime.py \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \
+  [--new-anchor <file-outside-the-checkout>] [--co-author "Name <id+login@users.noreply.github.com>" ...] \
   [--dry-run] [--display-name "Display Name" --engine-family <module> \
    --pack-format exl3 --architecture <HFClass> [--pack KEY=VALUE ...]]
 ```
@@ -370,7 +394,8 @@ branch, review and check rules above.
 ### Always
 
 1. **Use the right branch type** (section 3): `model/<model>` brings one validated model into
-   production, `model/<model>-approval` is the legacy standalone registry step and merges first,
+   production when its anchor is already on the base, `model/<model>-approval` is the legacy standalone
+   registry step (it cannot add a new anchor on its own today; section 3),
    `engine/<topic>` is any universal production change except sealed trees and either registry form.
    A maintainer-opened `release/v<X.Y.Z>` is the single-PR product cut for engine source, models,
    modular anchors and release metadata; agents never open one.

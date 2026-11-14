@@ -277,11 +277,68 @@ class ModularRegistryTest(unittest.TestCase):
                 'approvals': {'qwen3.8/two/v2': self.entry('two')}}))
             merged = e.load_registry(main)
             self.assertEqual(set(merged['approvals']), {'qwen3.8/one/v1', 'qwen3.8/two/v2'})
-            write(root, 'approvals/qwen3.8/duplicate.json', encoded({
+            write(root, 'approvals/qwen3.8/one.json', encoded({
                 'schema': 'rexl3.approval-registry.v1',
                 'approvals': {'qwen3.8/one/v1': self.entry('one')}}))
             with self.assertRaisesRegex(ValueError, 'duplicate approval registry key'):
                 e.load_registry(main)
+
+    def module_root(self, tmp, module, document):
+        root = Path(tmp)
+        main = write(root, 'APPROVALS.json', encoded({
+            'schema': 'rexl3.approval-registry.v1',
+            'approvals': {'qwen3.8/one/v1': self.entry('one')}}))
+        write(root, module, encoded(document))
+        return main
+
+    def test_module_path_is_bound_to_its_keys(self):
+        # A module may anchor only its own model; a key for another model or family, a deeper or
+        # shorter key, or a key whose model merely shares the module name as a prefix is refused.
+        for key in ('qwen3.8/other/v1', 'glm-5.3/two/v1', 'qwen3.8/two-extra/v1', 'qwen3.8/two/v1/x'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                main = self.module_root(tmp, 'approvals/qwen3.8/two.json', {
+                    'schema': 'rexl3.approval-registry.v1', 'approvals': {key: self.entry('two')}})
+                with self.assertRaisesRegex(ValueError, 'key for another model'):
+                    e.load_registry(main)
+
+    def test_empty_or_extra_section_modules_are_refused(self):
+        cases = {
+            'empty': ({'schema': 'rexl3.approval-registry.v1', 'approvals': {}}, 'empty approval registry module'),
+            'no approvals': ({'schema': 'rexl3.approval-registry.v1'}, 'empty approval registry module'),
+            'legacy section': ({'schema': 'rexl3.approval-registry.v1',
+                                'approvals': {'qwen3.8/two/v1': self.entry('two')},
+                                'legacy': {}}, 'only schema and approvals'),
+            'not an object': ([], 'JSON object required'),
+        }
+        for label, (document, message) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                main = self.module_root(tmp, 'approvals/qwen3.8/two.json', document)
+                with self.assertRaisesRegex(ValueError, message):
+                    e.load_registry(main)
+
+    def test_misfiled_base_key_and_orphan_module_are_refused(self):
+        # The review proof of concept: an existing base key moved into a module named for another
+        # model, plus an empty module, used to pass load_registry and the base->candidate transition.
+        base = {'schema': 'rexl3.approval-registry.v1',
+                'approvals': {'deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/v1': self.entry('dsv41')}}
+        for module, document in (
+                ('approvals/qwen3.8/not-this-model.json', base),
+                ('approvals/zzz/orphan.json', {'schema': 'rexl3.approval-registry.v1', 'approvals': {}})):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                main = write(root, 'APPROVALS.json', encoded({
+                    'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}))
+                write(root, module, encoded(document))
+                with self.assertRaises(ValueError):
+                    e.load_registry(main)
+
+    def test_bound_module_keeps_several_versions_of_its_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = self.module_root(tmp, 'approvals/qwen3.8/two.json', {
+                'schema': 'rexl3.approval-registry.v1',
+                'approvals': {'qwen3.8/two/v1': self.entry('two'), 'qwen3.8/two/v2': self.entry('two')}})
+            self.assertEqual(set(e.load_registry(main)['approvals']),
+                             {'qwen3.8/one/v1', 'qwen3.8/two/v1', 'qwen3.8/two/v2'})
 
     def test_legacy_anchors_are_immutable_and_new_legacy_anchors_are_refused(self):
         base = {'schema': 'rexl3.approval-registry.v1', 'approvals': {},

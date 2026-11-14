@@ -4,7 +4,7 @@
 
 ## What and why
 
-<!-- Which dev approval (release `approve-<runtime_id>-<N>`), which model entry, which registry change. Scope: `runtimes/templates/APPROVALS.json` and the `TRUSTED_APPROVALS_SHA256` pin in `.github/workflows/verify.yml` (CONTRIBUTING.md section 3). This PR merges before the model PR. -->
+<!-- Which dev approval (release `approve-<runtime_id>-<N>`), which model entry, which registry change. Scope: `runtimes/templates/approvals/<family>/<model>.json` or `runtimes/templates/APPROVALS.json` only; `.github/workflows/verify.yml` is out of scope (CONTRIBUTING.md section 3). Note: `verify` refuses a new anchor whose tree is not in the same run, so this route cannot add a new version on its own; a hotfix with a new anchor is a one-model `release/v<X.Y.Z>` PR. -->
 
 ## How it was checked
 
@@ -12,14 +12,13 @@ Run on this head commit (SHA: ), with `umask 022`; paste the output:
 
 - [ ] `git diff --check`
 - [ ] `python3 -m unittest discover -s tools -p 'test_*.py'`
-- [ ] The pin in `.github/workflows/verify.yml` equals the sha256 of the new registry: `shasum -a 256 runtimes/templates/APPROVALS.json`
 - [ ] Rebased on `origin/main` (commit: ); one commit; the subject equals the PR title
 
 ## Contracts
 
 - [ ] The registry entry is keyed `<family>/<model>/v<N>` and carries `approval_sha256`, `source_commit`, `source_tree`, `runtime_id`
 - [ ] `runtime_id` matches the dev release tag `approve-<runtime_id>-<N>` and the model's `MODEL.json`
-- [ ] The pin matches the registry bytes; both change in this same commit
+- [ ] A module file holds only `schema` and `approvals`, and every key in it is this module's own `<family>/<model>/v<N>`
 - [ ] No file under `runtimes/*/*/v*/` is edited; no other policy file changes
 - [ ] No secrets, tokens, personal email addresses, internal project names or quantization-method internals
 

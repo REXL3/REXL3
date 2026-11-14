@@ -3,7 +3,9 @@
 Covers the family/model layout: registry keys <family>/<model>/v<N> carrying runtime_id, dev tags
 derived from runtime_id, MODEL.json write/validate, and the model/<model> branch flow.
 """
+import contextlib
 import copy
+import io
 import json
 import os
 import shutil
@@ -309,6 +311,117 @@ class PromotionTest(unittest.TestCase):
         current = subprocess.run(['git', '-C', str(root), 'rev-parse', '--abbrev-ref', 'HEAD'],
                                  capture_output=True, text=True, check=True).stdout.strip()
         self.assertEqual(current, 'model/qwen3.8-27b')
+
+    def release_checkout(self):
+        """A clean production checkout whose registry does not hold the promoted key yet."""
+        root, _ = self.make_prod_bare()
+        write(root, 'runtimes/templates/APPROVALS.json',
+              e.json_bytes({'schema': 'rexl3.approval-registry.v1', 'approvals': {}, 'legacy': {}}))
+        write(root, 'runtimes/templates/APPROVED.json',
+              e.json_bytes({'schema': 'rexl3.approved-templates.v1', 'templates': self.f.approved}))
+        p.git('add', '.', cwd=root)
+        p.git('commit', '-m', 'TEST: Added the production policy', cwd=root)
+        commit = p.git('rev-parse', 'HEAD', cwd=root).stdout.strip()
+        p.git('update-ref', 'refs/remotes/origin/main', commit, cwd=root)
+        return root, commit
+
+    def anchor_file(self, approvals):
+        path = Path(self.tmp.name) / 'anchors' / f'{MODEL}.json'
+        write(path.parent, path.name, e.json_bytes({'schema': 'rexl3.approval-registry.v1', 'approvals': approvals}))
+        return path
+
+    def release_argv(self, root, commit, cache, tag='approve-synthetic-demo-1'):
+        # The command docs/PROMOTION.md documents, with the policy read from the clean checkout itself.
+        return ['--family', FAMILY, '--model', MODEL, '--version', '1', '--approve-tag', tag,
+                '--release-branch', 'release/v0.1.2', '--target-commit', commit, '--prod-checkout', str(root),
+                '--assets-dir', str(cache), '--download',
+                '--approved', str(root / 'runtimes/templates/APPROVED.json'),
+                '--trusted-approvals', str(root / 'runtimes/templates/APPROVALS.json'),
+                '--display-name', 'Synthetic Demo', '--engine-family', 'synthetic', '--pack-format', 'exl3',
+                '--architecture', 'SyntheticForConditionalGeneration', '--pack', 'bits=4.00']
+
+    def run_main(self, argv, root, tag='approve-synthetic-demo-1'):
+        stderr = io.StringIO()
+        with patch.object(p, 'release_metadata', return_value=self.metadata(tag)), \
+             patch.object(p, 'tag_commit', return_value=self.f.commit), \
+             patch.object(p, 'gh', side_effect=self.cli_gh(root, tag)), \
+             patch.object(p, 'git', side_effect=self.cli_git(root)), contextlib.redirect_stderr(stderr):
+            code = p.main(argv)
+        return code, stderr.getvalue()
+
+    def test_documented_release_command_adds_a_new_anchor_through_main(self):
+        # The first promotion of a cut names a key the clean checkout cannot hold yet. Through main()
+        # and the real load_registry it used to refuse ("approval not in independently trusted
+        # registry"); with --new-anchor the maintainer-written entry is authenticated and committed.
+        root, commit = self.release_checkout()
+        cache = Path(self.tmp.name) / 'cache'
+        key = f'{FAMILY}/{MODEL}/v1'
+        argv = self.release_argv(root, commit, cache)
+        code, err = self.run_main(argv, root)
+        self.assertEqual(code, 2)
+        self.assertIn('approval not in independently trusted registry: ' + key, err)
+        anchor = self.anchor_file({key: self.registry['approvals'][key]})
+        tester = 'Synthetic Tester <12345+synthetic-tester@users.noreply.github.com>'
+        code, err = self.run_main(argv + ['--new-anchor', str(anchor), '--co-author', tester], root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(p.git('branch', '--show-current', cwd=root).stdout.strip(), 'release/v0.1.2')
+        module = root / 'runtimes/templates/approvals' / FAMILY / f'{MODEL}.json'
+        self.assertEqual(e.load_json(module)['approvals'], {key: self.registry['approvals'][key]})
+        self.assertEqual(e.load_registry(root / 'runtimes/templates/APPROVALS.json')['approvals'][key],
+                         self.registry['approvals'][key])
+        message = p.git('log', '-1', '--format=%B', cwd=root).stdout
+        self.assertEqual(message.splitlines()[0], f'FEAT: Promoted {MODEL} v1')
+        self.assertIn('Co-authored-by: ' + tester, message.splitlines())
+        self.assertEqual(p.git('status', '--porcelain', cwd=root).stdout.strip(), '')
+
+    def test_new_anchor_is_refused_unless_it_is_exactly_the_promoted_key(self):
+        root, commit = self.release_checkout()
+        cache = Path(self.tmp.name) / 'cache'
+        key = f'{FAMILY}/{MODEL}/v1'
+        entry = self.registry['approvals'][key]
+        argv = self.release_argv(root, commit, cache)
+        cases = {
+            'other version': ({f'{FAMILY}/{MODEL}/v2': entry}, 'exactly the promoted registry key'),
+            'extra key': ({key: entry, f'{FAMILY}/other/v1': entry}, 'exactly the promoted registry key'),
+            'bad entry': ({key: dict(entry, approval_sha256='x')}, ''),
+        }
+        for label, (approvals, message) in cases.items():
+            with self.subTest(label=label):
+                code, err = self.run_main(argv + ['--new-anchor', str(self.anchor_file(approvals))], root)
+                self.assertEqual(code, 2)
+                self.assertIn(message, err)
+        # Without --release-branch (the model/<model> route) the flag is refused.
+        anchor = self.anchor_file({key: entry})
+        model_argv = [arg for arg in argv if arg not in ('--release-branch', 'release/v0.1.2')]
+        code, err = self.run_main(model_argv + ['--new-anchor', str(anchor)], root)
+        self.assertEqual(code, 2)
+        self.assertIn('--new-anchor requires --release-branch', err)
+        # A key the registry already anchors cannot be re-anchored from a file.
+        approved, registry, _pin = self.cli_policy()
+        anchored = argv[:argv.index('--trusted-approvals') + 1] + [str(registry)] + argv[argv.index('--trusted-approvals') + 2:]
+        code, err = self.run_main(anchored + ['--new-anchor', str(anchor)], root)
+        self.assertEqual(code, 2)
+        self.assertIn('registry already anchors', err)
+        self.assertFalse((root / 'runtimes' / FAMILY).exists(), 'nothing is promoted on a refusal')
+
+    def test_new_anchor_for_a_unified_tag_must_name_its_approve_tag(self):
+        key = f'{FAMILY}/{MODEL}/v1'
+        entry = dict(self.registry['approvals'][key])
+        path = self.anchor_file({key: entry})
+        with self.assertRaisesRegex(ValueError, 'must name its approve_tag'):
+            p.load_new_anchor(path, key, 'engine-v0.1.2-4208d848')
+        self.assertEqual(p.load_new_anchor(path, key, 'approve-synthetic-demo-1'), entry)
+
+    def test_co_author_trailers_accept_only_single_line_noreply_identities(self):
+        ok = ['Tester <76774064+Tester@users.noreply.github.com>', 'Two Words <legacy-login@users.noreply.github.com>']
+        self.assertEqual(p.co_author_trailers(ok), ['Co-authored-by: ' + value for value in ok])
+        for bad in ('Tester <tester@example.com>', 'Tester', '<1+t@users.noreply.github.com>',
+                    'Tester <1+t@users.noreply.github.com>\nSigned-off-by: x <y@z>',
+                    'Tester <1+t@users.noreply.github.com.evil>', ' <1+t@users.noreply.github.com>'):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                p.co_author_trailers([bad])
+        with self.assertRaisesRegex(ValueError, 'duplicate co-author'):
+            p.co_author_trailers([ok[0], ok[0]])
 
     def test_metadata_flags_are_checked_with_the_registry_runtime_id_before_any_download(self):
         approved, registry, pin = self.cli_policy()

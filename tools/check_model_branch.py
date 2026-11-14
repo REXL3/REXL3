@@ -218,10 +218,9 @@ def run_checks(root, base, head, *, branch, rc_commit, local, assets_dir, tree_d
             if release_scope:
                 registry_raw = e.load_registry(Path(tree_dir) / 'runtimes/templates/APPROVALS.json')
             else:
-                registry_raw = e.loads(base_bytes('runtimes/templates/APPROVALS.json'))
                 pin_line = base_bytes('.github/workflows/verify.yml').decode()
                 match = re.search(r'^\s*TRUSTED_APPROVALS_SHA256:\s*"?([0-9a-f]{64})"?\s*$', pin_line, re.M)
-                e.load_registry(_write_temp(e.json_bytes(registry_raw)), match[1] if match else None)
+                registry_raw = base_registry(root, base, base_tree_dir, match[1] if match else None)
             approved_raw = e.loads(base_bytes('runtimes/templates/APPROVED.json'))['templates']
             version = int(tree_path.rsplit('/', 1)[1][1:])
             entry = registry_raw.get('approvals', {}).get(m.registry_key(family, model, version))
@@ -426,10 +425,36 @@ def resolve_vision_off(problems, profile, vision_exceptions):
     return rest
 
 
-def _write_temp(data):
-    path = Path(tempfile.mkdtemp(prefix='.check-model-registry-')) / 'registry.json'
-    path.write_bytes(data)
-    return path
+def base_registry(root, base, base_tree_dir=None, expected_sha256=None):
+    """The protected base registry: APPROVALS.json merged with its approvals/<family>/<model>.json modules.
+
+    Read from --base-tree-dir when given, otherwise from the base commit's git objects (materialised
+    into a private temporary directory so release_evidence.load_registry applies the same module
+    rules as verify). Only regular .json blobs exactly two levels below approvals/ are accepted.
+    """
+    if base_tree_dir is not None:
+        return e.load_registry(Path(base_tree_dir) / 'runtimes/templates/APPROVALS.json', expected_sha256)
+    prefix = 'runtimes/templates/'
+    with tempfile.TemporaryDirectory(prefix='.check-model-registry-') as tmp:
+        templates = Path(tmp) / 'templates'
+        templates.mkdir()
+        (templates / 'APPROVALS.json').write_bytes(git_bytes(root, base, prefix + 'APPROVALS.json'))
+        listing = git(root, 'ls-tree', '-r', '-z', '--full-tree', base, '--', prefix + 'approvals')
+        for record in listing.split(b'\0'):
+            if not record:
+                continue
+            meta, _, raw_path = record.partition(b'\t')
+            mode, kind = meta.split()[:2]
+            path = raw_path.decode('utf-8', 'surrogateescape')
+            parts = path[len(prefix):].split('/') if path.startswith(prefix) else []
+            if (kind != b'blob' or mode != b'100644' or len(parts) != 3 or parts[0] != 'approvals'
+                    or not e.ID.fullmatch(parts[1]) or not parts[2].endswith('.json')
+                    or not e.ID.fullmatch(parts[2][:-len('.json')])):
+                raise CheckError('unexpected file in the base approval registry modules: ' + path)
+            target = templates.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(git_bytes(root, base, path))
+        return e.load_registry(templates / 'APPROVALS.json', expected_sha256)
 
 
 def main(argv=None):

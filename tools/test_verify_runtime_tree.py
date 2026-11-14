@@ -205,11 +205,11 @@ class VerifyTest(unittest.TestCase):
             write(root, 'runtimes/templates/APPROVED.json', encoded({'templates': self.f.approved}))
         return candidate, base
 
-    def run_diff(self, candidate, base, assets=None):
+    def run_diff(self, candidate, base, assets=None, context=()):
         return v.main(['--root', str(candidate), '--base', str(base),
                        '--approved', str(base / 'runtimes/templates/APPROVED.json'),
                        '--trusted-approvals', str(base / 'runtimes/templates/APPROVALS.json'),
-                       '--assets-dir', str(assets or Path(self.tmp.name) / 'no-downloads')])
+                       '--assets-dir', str(assets or Path(self.tmp.name) / 'no-downloads'), *context])
 
     def test_unchanged_tree_still_refuses_registry_and_local_metadata_tampering(self):
         key = f'{FAMILY}/{MODEL}/v1'
@@ -258,7 +258,18 @@ class VerifyTest(unittest.TestCase):
         path = base / 'runtimes/templates/APPROVALS.json'
         write(path.parent, path.name, encoded(empty))
         self.assertNotEqual(self.run_diff(candidate, base), 0)
-        self.assertEqual(self.run_diff(candidate, base, self.assets), 0)
+        # A new anchor also needs its release PR context and manifest (tools/test_release_anchor.py).
+        self.assertNotEqual(self.run_diff(candidate, base, self.assets), 0)
+        entry = self.registry['approvals'][f'{FAMILY}/{MODEL}/v1']
+        write(candidate, 'releases/v0.1.2/manifest.json', encoded({
+            'schema': 'rexl3.release-manifest.v1', 'version': 'v0.1.2', 'notes': 'synthetic',
+            'engine': {'dev_commit': '4208d848' * 5, 'dev_tree': 'b' * 40, 'engine_release_tag': 'engine-v0.1.2-4208d848',
+                       'artifacts': {'rexl3-serve': 'd' * 64}},
+            'models': [{'family': FAMILY, 'model': MODEL, 'version': 'v1', 'runtime_id': entry['runtime_id'],
+                        'approval_sha256': entry['approval_sha256']}]}))
+        context = ('--base-repo=REXL3/REXL3', '--head-repo=REXL3/REXL3', '--head-ref=release/v0.1.2')
+        self.assertNotEqual(self.run_diff(candidate, base, context=context), 0)
+        self.assertEqual(self.run_diff(candidate, base, self.assets, context), 0)
 
 
 class ModularRegistryTest(unittest.TestCase):

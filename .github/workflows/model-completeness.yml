@@ -42,6 +42,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DEV_ASSETS_TOKEN }}
           ASSETS_DIR: ${{ runner.temp }}/model-assets
+          # Pull-request context for the new-anchor rule (tools/release_anchor.py); untrusted, env only.
+          REXL3_BASE_REPO: ${{ github.repository }}
+          REXL3_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -uo pipefail
           umask 022
@@ -51,7 +55,8 @@ jobs:
             --base base \
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
-            --assets-dir "$ASSETS_DIR"
+            --assets-dir "$ASSETS_DIR" \
+            --base-repo="$REXL3_BASE_REPO" --head-repo="$REXL3_HEAD_REPO" --head-ref="$REXL3_HEAD_REF"
       - name: Run the model-branch completeness check
         env:
           ASSETS_DIR: ${{ runner.temp }}/model-assets

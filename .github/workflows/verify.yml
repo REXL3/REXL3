@@ -7,9 +7,14 @@ name: verify
 #     as the only import path;
 #   - the workflow token is read-only; one secret (DEV_ASSETS_TOKEN, read access to the dev repo's contents) is used by one step.
 # A change to this file, to tools/ or to runtimes/templates/ cannot approve itself: it is read only after
-# it has been merged, and CODEOWNERS (two maintainers) must approve the merge.
+# it has been merged, and a CODEOWNERS maintainer other than the author must approve the merge.
 # Unchanged trees are anchored by the base registry and skipped; changed trees use schema-validated
 # candidate registry data, whose sealed approval hashes and dev assets are still verified by base tools.
+# Trust model for a NEW registry anchor: this job proves that the tree equals a published dev seal byte
+# for byte. It does not decide that the seal should be released. That decision is the maintainers' review
+# of a release pull request, so a new anchor is refused (before any dev asset is downloaded) unless the
+# head is a release/v<X.Y.Z> branch of this repository, not a fork, and that release's manifest in the
+# candidate lists the anchor with the same approval hash (tools/release_anchor.py, docs/PROMOTION.md).
 # Nothing in this repository merges a pull request; a maintainer does, by hand.
 on:
   pull_request_target:
@@ -49,13 +54,19 @@ jobs:
       # A v2 tree is checked against its authenticated dev release (<assets>/<runtime-id>/v<N>/approval.json and the
       # four archives). Those live in the private REXL3-dev repository, so one step downloads them with
       # DEV_ASSETS_TOKEN, a fine-grained token that can read that one repository's contents and nothing else. The step
-      # runs only base code (tools/fetch_dev_assets.py), takes the runtime id and version from directory names, derives
-      # the release tag from them, and promote_runtime.download_release refuses any archive the pinned registry does not
-      # name. The secret is set on this step alone; the verification step below has no secret.
+      # runs only base code (tools/fetch_dev_assets.py), takes the release tag from a schema-validated registry entry
+      # (base entries are append-only; a new entry needs the release pull request described at the top of this file),
+      # and promote_runtime.download_release refuses any archive the sealed approval does not name. The secret is set
+      # on this step alone; the verification step below has no secret.
       - name: Download the authenticated dev release assets for v2 trees
         env:
           GH_TOKEN: ${{ secrets.DEV_ASSETS_TOKEN }}
           ASSETS_DIR: ${{ runner.temp }}/dev-assets
+          # Pull-request context for the new-anchor rule (tools/release_anchor.py). The head values are
+          # untrusted: they arrive only through env and are only compared in base code. Empty on a push.
+          REXL3_BASE_REPO: ${{ github.repository }}
+          REXL3_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -uo pipefail
           umask 022
@@ -67,13 +78,19 @@ jobs:
             --base base \
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
-            --assets-dir "$ASSETS_DIR" "${FULL[@]}"
+            --assets-dir "$ASSETS_DIR" "${FULL[@]}" \
+            --base-repo="$REXL3_BASE_REPO" --head-repo="$REXL3_HEAD_REPO" --head-ref="$REXL3_HEAD_REF"
       # Every tree under runtimes/<family>/<model>/ must match an anchor in the protected registry
       # (key <family>/<model>/v<N>, runtime_id), and MODEL.json (schema rexl3.prod-model.v1) must agree
       # with the sealed approval. The old flat runtimes/<runtime-id>/v<N> layout is refused.
       - name: Verify every runtime tree against the protected registry
         env:
           ASSETS_DIR: ${{ runner.temp }}/dev-assets
+          # Pull-request context for the new-anchor rule (tools/release_anchor.py). The head values are
+          # untrusted: they arrive only through env and are only compared in base code. Empty on a push.
+          REXL3_BASE_REPO: ${{ github.repository }}
+          REXL3_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REXL3_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -uo pipefail
           umask 022
@@ -85,7 +102,8 @@ jobs:
             --base base \
             --approved base/runtimes/templates/APPROVED.json \
             --trusted-approvals base/runtimes/templates/APPROVALS.json \
-            --assets-dir "$ASSETS_DIR" "${FULL[@]}"
+            --assets-dir "$ASSETS_DIR" "${FULL[@]}" \
+            --base-repo="$REXL3_BASE_REPO" --head-repo="$REXL3_HEAD_REPO" --head-ref="$REXL3_HEAD_REF"
           status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::Verification failed (exit $status). A changed tree needs a valid candidate registry anchor and matching dev assets; an unchanged tree must equal its protected base bytes. See docs/PROMOTION.md."

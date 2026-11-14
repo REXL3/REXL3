@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Verify production trees using protected code and independently anchored dev assets.
 
-The candidate's manifest cannot authenticate itself. --trusted-approvals-sha256
-must come from a maintainer-reviewed immutable mapping/protected workflow input.
+The candidate cannot authenticate itself. Without --base every tree must match an
+anchor in the trusted registry. With --base (the protected base checkout), existing
+anchors are append-only and a new anchor is accepted only when its tree equals a
+published dev seal and the pull request is a release/v<X.Y.Z> branch of the base
+repository whose manifest lists it (--base-repo, --head-repo, --head-ref).
 Layout is family/model: runtimes/<family>/<model>/v<N> with MODEL.json
 (schema rexl3.prod-model.v1). The old flat runtimes/<runtime-id>/v<N> layout is
 rejected; the registry key is <family>/<model>/v<N> and carries runtime_id.
@@ -15,9 +18,11 @@ import sys
 try:
     from . import release_evidence as e
     from . import model_layout as m
+    from . import release_anchor
 except ImportError:
     import release_evidence as e
     import model_layout as m
+    import release_anchor
 
 SCHEMA = e.SCHEMA
 sha256_file = e.sha256_file
@@ -159,6 +164,7 @@ def main(argv=None):
     parser.add_argument('--assets-dir', required=True, help='asset root containing <family>/<model>/v<N>/approval.json')
     parser.add_argument('--base', help='protected base checkout; unchanged trees need no dev download')
     parser.add_argument('--full', action='store_true', help='verify every tree against authenticated dev assets')
+    release_anchor.add_arguments(parser)
     args = parser.parse_args(argv)
     try:
         registry = e.load_registry(args.trusted_approvals, args.trusted_approvals_sha256)
@@ -172,6 +178,10 @@ def main(argv=None):
                       'trusted approval registry differs from the protected base checkout')
             candidate_registry = e.load_registry(Path(args.root) / 'runtimes/templates/APPROVALS.json')
             new_keys = e.validate_registry_transition(base_registry, candidate_registry, discovered_keys)
+            # A matching dev seal proves the bytes, not the decision to release them: a new anchor
+            # must arrive in a release PR of this repository whose manifest lists it.
+            release_anchor.require_release_pr(new_keys, candidate_registry, root=args.root, base=args.base,
+                                              **release_anchor.context(args))
             # The candidate's allow-list is not a trust input (the protected one is
             # used below), but deleting it still corrupts the proposed checkout.
             candidate_templates = e.load_json(Path(args.root) / 'runtimes/templates/APPROVED.json').get('templates')

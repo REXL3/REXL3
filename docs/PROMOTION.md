@@ -34,6 +34,24 @@ only if all of these hold:
    `MODEL.json`, `LATEST`, `v<N>/approval.json` and registry binding. Every newly added anchor must
    name a discovered tree that is downloaded and fully verified in that same run; orphan anchors and
    candidate-only carried-gate source anchors are refused. `--full` disables the transport skip.
+7. A new anchor is authorized by the maintainers' review of a release PR, not by `verify`. Since the
+   workflow registry pin was retired, `verify` judges a new anchor from the candidate: it proves that
+   the tree's bytes equal a published dev seal (points 4 and 5). Any published dev seal passes that
+   proof, including one the maintainers did not choose to release, so the proof alone is not an
+   authorization. `verify` therefore refuses a new anchor, before any dev asset is downloaded, unless
+   - the pull request's head repository is this repository (a fork is refused), and
+   - its head branch is `release/v<X.Y.Z>`, and
+   - `releases/v<X.Y.Z>/manifest.json` in the candidate is a valid manifest for that version, is not
+     yet on the base, and lists the anchor's `<family>/<model>/v<N>` with the same `approval_sha256`
+     and `runtime_id`.
+
+   Only someone with push access to this repository can create that branch, and the merge still
+   needs the other maintainer's approval of the exact head. What the reviewers of a release PR
+   approve is therefore the list of anchors in its manifest; `verify` shows that each listed anchor
+   is a real dev seal and that no anchor is added outside the list. A pull request that adds no
+   anchor is not affected. To run the diff-scoped tools by hand on a release branch, pass the same
+   context: `--base-repo=REXL3/REXL3 --head-repo=REXL3/REXL3 --head-ref=release/v<X.Y.Z>` to
+   `tools/fetch_dev_assets.py` and `tools/verify_runtime_tree.py` (with `--base`).
 
 One secret, `DEV_ASSETS_TOKEN`, lets `verify` read the private dev release (see "What CI checks").
 There is no auto-merge anywhere.
@@ -170,7 +188,9 @@ workflow-level path or branch filters):
 
 - `verify` — the tree verifier plus unit tests, from the protected base revision. With `--base`,
   unchanged trees use the diff-scoped transport skip described above; changed or newly anchored v2
-  trees still require the authenticated `DEV_ASSETS_TOKEN` download and full verification.
+  trees still require the authenticated `DEV_ASSETS_TOKEN` download and full verification. A new
+  anchor outside a `release/v<X.Y.Z>` branch of this repository, or not listed in that release's
+  manifest, is refused first (Trust boundary, point 7).
 - `pr-rules` — title, branch name, path scope per branch type, `changes/unreleased/` fragment presence.
 - `model-completeness` — runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success
   otherwise.

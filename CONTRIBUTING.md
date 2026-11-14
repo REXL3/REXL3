@@ -202,6 +202,11 @@ no-op, never workflow-level path or branch filters):
 - `verify` (existing tree verifier; keep its trust model). Diff-scoped `--base` verification skips
   only authenticated transport/archive work for unchanged trees; `MODEL.json`, `LATEST`, approval
   and registry checks always run, and new/changed anchors require full downloads in the same run.
+  A new anchor is accepted only from a `release/v<X.Y.Z>` head branch of this repository (never a
+  fork) whose `releases/v<X.Y.Z>/manifest.json` lists it with the same approval hash and runtime id;
+  the check runs before any dev asset is downloaded (`tools/release_anchor.py`). A green `verify`
+  proves the bytes equal a published dev seal. It does not authorize the anchor: the maintainers'
+  review of the release PR does (docs/PROMOTION.md, "Trust boundary").
 - `pr-rules`: title (above), branch name, path scope per branch type, `changes/unreleased/` fragment
   present for `model/*` and for `engine/*` PRs that change behavior (tools/workflows), not for DOCS-only.
 - `model-completeness`: runs `tools/check_model_branch.py` for `model/<model>` PRs; no-op success otherwise.

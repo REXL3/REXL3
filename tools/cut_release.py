@@ -149,8 +149,11 @@ def immutable_releases(api, repo):
         doc = json.loads(raw.decode('utf-8'))
     except (ValueError, UnicodeError):
         raise ValueError('immutable releases setting returned an unreadable response') from None
-    if not isinstance(doc, dict) or doc.get('enabled') is False:
-        raise ValueError('immutable releases are disabled')
+    # Fail closed: only an explicit JSON `true` confirms the setting. A missing key, `null`, `false` or any
+    # other value (an API shape change, a proxy answering `{}`) refuses the cut.
+    enabled = doc.get('enabled') if isinstance(doc, dict) else None
+    if enabled is not True:
+        raise ValueError('immutable releases are not confirmed enabled (enabled=' + json.dumps(enabled)[:40] + ')')
     return True
 
 

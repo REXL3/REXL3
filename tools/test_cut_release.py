@@ -74,11 +74,13 @@ def manifest(approval_hash):
 
 
 class FakeApi(c.Api):
-    def __init__(self, fixtures, reviews, merged=True, immutable=True, existing_tags=()):
+    def __init__(self, fixtures, reviews, merged=True, immutable=True, existing_tags=(),
+                 immutable_body=b'{"enabled": true}'):
         self.fixtures = fixtures
         self.reviews = reviews
         self.merged = merged
         self.immutable = immutable
+        self.immutable_body = immutable_body
         self.existing_tags = set(existing_tags)
         self.created_refs = {}
         self.releases = {}
@@ -111,7 +113,7 @@ class FakeApi(c.Api):
         if '/immutable-releases' in path:
             if not self.immutable:
                 raise ValueError('GitHub API 403')
-            return b'{"enabled": true}'
+            return self.immutable_body
         if '/compare/' in path:
             return {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0}
         raise AssertionError('unexpected GET ' + path)
@@ -262,6 +264,22 @@ class DryRunTest(CutFixture):
     def test_immutable_disabled_refuses(self):
         with self.assertRaises(ValueError):
             self.cut(self.api(immutable=False))
+
+    def test_immutable_setting_must_be_explicitly_true(self):
+        # Only a JSON object whose `enabled` is the boolean true confirms the setting; a missing key,
+        # null, false, a truthy non-boolean or a non-object body refuses the cut before any write.
+        for body in (b'{}', b'{"enabled": null}', b'{"enabled": false}', b'{"enabled": "true"}',
+                     b'{"enabled": 1}', b'{"enforced_by_owner": true}', b'[]', b'null', b'true'):
+            with self.subTest(body=body):
+                api = self.api(immutable_body=body)
+                with self.assertRaisesRegex(ValueError, 'immutable releases'):
+                    self.cut(api)
+                self.assertEqual(api.created_refs, {})
+                self.assertEqual(api.releases, {})
+
+    def test_immutable_setting_enabled_passes_with_extra_fields(self):
+        api = self.api(immutable_body=b'{"enabled": true, "enforced_by_owner": false}')
+        self.assertEqual(self.cut(api), 0)
 
     def test_manifest_missing_refuses(self):
         (self.root / f'releases/{VERSION}/manifest.json').unlink()

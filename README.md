@@ -43,6 +43,7 @@ Rules for contributing are in
 | Nemotron-3.5-Super-VL | v2 | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on | [nemotron-3.5-super-vl](docs/packs/nemotron-3.5-super-vl.md) |
 | MiniCPM-V-4.7-35B-A3B | v1 | `minicpmv4_7` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k`: 262,144 tokens, one node, port 8889 | on | [minicpm-v-4.7-35b-a3b](docs/packs/minicpm-v-4.7-35b-a3b.md) |
 | DeepSeek-V4.1-Flash-1017, two nodes | v1 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off | [deepseek-v4.1-flash-1017-tp2](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
+| Ling-3.1-Flash-1019 | v1 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-262k`: 262,144 tokens, one node, port 8889 | off | [ling-3.1-flash-1019](docs/packs/ling-3.1-flash-1019.md) |
 
 ## First release (v0.1.0) models
 
@@ -67,8 +68,8 @@ or port can differ from the table above. A recipe with vision off says so in its
 **The `tp2` two-node profiles** (GLM-5.3-Flash's `glm53-flash-tp2-1m`, RED-SNOW-5.3-Flash's
 `redsnow-tp2-512k` and DeepSeek-V4.1-Flash-1017's `dsv41-tp2-1m`) listen on the leader node's network
 address, not on localhost, and the server has no API key and no request log. Run them only on a
-private, trusted network, or behind a firewall or an SSH tunnel. An API key option is planned for the
-next release.
+private, trusted network, or behind a firewall or an SSH tunnel. An API key option is planned for a
+later release.
 
 ## Supported hardware
 
@@ -89,14 +90,11 @@ per runtime. Versioning is SemVer 0.x; the first release is **v0.1.0**.
 - Releases are cut from an agreed group of models listed in the release manifest; v0.1.0's current
   manifest holds the five already-sealed models (Qwen3.8-27B, Qwen3.8-Flash-Next,
   GLM-5.3-Flash, Nemotron-3.5-Super-VL and DeepSeek-V4.1-Flash-1017).
-  The normal cut is one maintainer-opened `release/v<X.Y.Z>` PR containing the engine source, all
-  promoted model trees, their modular registry anchors and pack docs, and the release manifest,
-  notes and CHANGELOG; one sealed-receipt LOCAL-VALIDATION v1 review covers every changed model at
-  the exact PR head, and the other maintainer approves that head before merge. The legacy standalone
-  two-PR route (`model/<model>-approval`, then `model/<model>`) remains available for an individual
-  promotion. No model gets its own product release or release candidate; a patch product release
-  may contain a single newly validated model as a new version
-  ([docs/RELEASING.md](docs/RELEASING.md)).
+  Each model enters prod through its own `model/<model>` PR, validated
+  (LOCAL-VALIDATION v1) and approved by the maintainer who did not submit it; the release is cut
+  only after every in-scope model PR has been validated and merged. No model gets its own release or
+  release candidate; a later release may add a single newly validated model as a new version only
+  after v0.1.0 is released.
 - Every model in a release is either sealed on the dev freeze commit, or carries forward a previously
   sealed approval whose newer engine commits do not touch its scope, or re-seals on the new engine
   build with carried gate receipts; the freeze exists only so the whole group is validated on one
@@ -155,6 +153,12 @@ done
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the pinned model
 ./launch.sh --yes start                       # foreground; verified READY before serving
 ```
+
+If `install-deps` or `doctor` exits 20 on the NVIDIA driver packages, the host's packages have moved
+past the build the recipes pin (`580.173.02-0ubuntu0.24.04.1`). This is a known issue of the release:
+see "Known issues" in the [v0.1.1 release notes](releases/v0.1.1/NOTES.md) and section 8 of the
+[user guide](docs/USER_GUIDE.md). The notes give a single-node workaround; two-node profiles have none
+in this release.
 
 Run the launcher as your normal user, never with `sudo`. `--yes` approves routine package
 installation only; the model download needs the separate `--accept-model-download` consent. From a

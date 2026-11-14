@@ -1,6 +1,6 @@
 # Pack sheet: `ling31-flash-1019-sage-1.51`
 
-Checked against model version `v1` (sealed approval `approve-ling31-flash-1019-sage-1.51-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `ling31-flash-1019-sage-1.51-1.tar.gz`), brought in by #153. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-ling31-flash-1019-sage-1.51-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `ling31-flash-1019-sage-1.51-1.tar.gz`), brought in by #153. This version ships in product release `v0.1.1`.
 
 ## 1. Identity
 
@@ -8,7 +8,8 @@ Checked against model version `v1` (sealed approval `approve-ling31-flash-1019-s
 | --- | --- | --- |
 | Runtime id | `ling31-flash-1019-sage-1.51` | `profile.json` |
 | Versions | `v1` (latest, and the only version in this tree) | `runtimes/ling-3.1/ling-3.1-flash-1019/LATEST` |
-| Release tag | not stated (no product release contains `v1` yet) | `releases/` |
+| Release tag | `v0.1.1` | `releases/v0.1.1/manifest.json` |
+| Release assets | `ling31-flash-1019-sage-1.51-v1-approval.json`, `ling31-flash-1019-sage-1.51-v1-bundle.tar.gz`; evidence `ling31-flash-1019-sage-1.51-v1-evidence.tar.gz` | the release page |
 | What it serves | Ling-3.1-Flash-1019 (`BailingMoeV3ForCausalLM`), EXL3 1.51 bits per weight quantized with SAGE, on one GB10. SAGE is our own mixed-precision quantization method for EXL3. The method is not published. Speculative decoding uses the MTP head stored in the pack. Text only: the model has no vision tower. | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `vcruz305/Ling-3.1-flash-1019-EXL3-SAGE-1.51bpw` at `437b03e6ddcc8b1ed653619aa8f266bbeeecd084` | `model.lock.json` |
 | Draft or second model | none (the MTP head is part of the pack) | `model.lock.json` |
@@ -46,7 +47,7 @@ The pack ships no `generation_config.json` (the lock lists none), so a request t
 ## 5. Behaviour to expect
 
 - With `chat_template_kwargs.enable_thinking` false, the model still writes reasoning text and a stray `</think>` into the answer (model behaviour; maintainer-granted thinking exception, expires 2026-12-31). Workaround: keep thinking on, or strip everything up to the last `</think>` from the content. The release qualifier's context, prefix-cache, tool, speculation and smoke checks ran with thinking on under that exception.
-- `launch.sh start` re-hashes the ~107 GiB pack just before boot; the page cache this leaves can make the engine plan its KV cache below the 262,144-token window and refuse to start. Workaround: free the file cache before start (for example `sync; echo 1 | sudo tee /proc/sys/vm/drop_caches`). A launcher fix ships in v0.1.2.
+- `launch.sh start` re-hashes the ~107 GiB pack just before boot; the page cache this leaves can make the engine plan its KV cache below the 262,144-token window and refuse to start. Workaround: free the file cache before start (for example `sync; echo 1 | sudo tee /proc/sys/vm/drop_caches`). A launcher fix is planned for a later release; until then use the workaround.
 - **Thinking is off unless the request asks for it** (section 3). Send `chat_template_kwargs: {"enable_thinking": true}` for the behaviour the quality figures in section 6 describe.
 - **Little memory is left at the full window.** During the baseline runs the lowest free memory the gate sampled was 3.1 to 3.5 GiB, and swap grew by 0.64 GiB in one of the three runs (section 6). Do not run other large jobs on the same GB10. The engine refuses a window it cannot hold rather than starting with a smaller one.
 - **A full-window prompt is slow to its first token.** A cold prompt of 260,148 tokens took about 1,165 s (about 19.5 minutes) to prefill in the baseline gate; one of 131,109 tokens took about 383 s. One slot: a request sent meanwhile waits behind it.
@@ -56,7 +57,7 @@ The pack ships no `generation_config.json` (the lock lists none), so a request t
 
 ## 6. Measured behaviour
 
-All figures are from the evidence asset `evidence.tar.gz` (the dev release asset of `approve-ling31-flash-1019-sage-1.51-1`): one GB10, profile `ling31-single-262k` (1 slot, window 262,144, speculative decoding on, prefix cache on, no vision). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`, `rexl3-serve` sha256 `4fc2cb44…5fe5`); none was carried from an earlier build. `launch.sh doctor` and the smoke check ran on a second GB10 with NVIDIA driver 580.173.02 (`q148-release-notes.md` in the same asset); the gates below ran on the qualification host.
+All figures are from this version's evidence archive, the release asset `ling31-flash-1019-sage-1.51-v1-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10, profile `ling31-single-262k` (1 slot, window 262,144, speculative decoding on, prefix cache on, no vision). Every gate ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`, `rexl3-serve` sha256 `4fc2cb44…5fe5`); none was carried from an earlier build. `launch.sh doctor` and the smoke check ran on a second GB10 with NVIDIA driver 580.173.02 (`q148-release-notes.md` in the same asset); the gates below ran on the qualification host.
 
 Realistic workload first. During the Q200 text run (180 requests, one at a time, non-streamed, thinking on with `reasoning_effort` `on`, temperature 0, `max_tokens` 32,768; client on the same host as the server), the 172 requests that finished with `stop` generated a median of 31.5 tok/s each, measured as completion tokens (thinking included) over the client's wall time for that request, prompt included (216,364 completion tokens in 7,285 s of request time, 29.7 tok/s in aggregate). The 8 requests that ran to the budget are left out of this figure (`quality/q200/summary.json`, `text180.e2e_throughput.stopped_rows_only`). These are different prompts and replies from the 256-token gate replies below, so the two speeds are not comparable.
 
@@ -110,6 +111,7 @@ No figure from an earlier version, build or pack is carried here.
 - The gates in section 6 are the qualification of this version; no 24-hour soak is part of them.
 - The quality figures are one run on one GB10; a later version is held to them with a stated noise allowance, not to a fixed target.
 - The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

@@ -1,6 +1,6 @@
 # Pack sheet: `dsv41-flash-1017-sage-1.55`
 
-Checked against release `v0.1.0`. This runtime was sealed on the release engine, commit `afc9b5dfb69d` (the v0.1.0 freeze plus two DeepSeek fixes); its sealed approval is `approve-dsv41-flash-1017-sage-1.55-1`. The approval covers the single-node profile only (section 2).
+Checked against release `v0.1.0`. This runtime was sealed on the release engine, commit `afc9b5dfb69d` (the v0.1.0 freeze plus two DeepSeek fixes); its sealed approval is `approve-dsv41-flash-1017-sage-1.55-1`. The approval covers the single-node profile only (section 2). The `v0.1.1` release does not contain this single-node unit; download it from `v0.1.0`.
 
 ## 1. Identity
 
@@ -40,7 +40,7 @@ python3 -c 'import json,os,sys;f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O
 
 Keep the same `--site` for `status`, `logs` and `stop`. If `$XDG_DATA_HOME` is set, the environment file is under `$XDG_DATA_HOME/rexl3/` instead.
 
-New versions that pin `c40cf25c` directly will make this step unnecessary, expected with the next engine cut (v0.1.2).
+New versions that pin `c40cf25c` directly will make this step unnecessary; they are planned for a later release.
 
 ## 2. Profiles
 
@@ -109,6 +109,7 @@ No figure from an earlier version, build or pack is carried here.
 - The gates are the qualification of this release; no 24-hour soak was run.
 - The quality figures are one run on one node. The hard_reasoning result is below its regression bar by one case and is accepted by the maintainer (section 6); greedy loops are a known behaviour of the model (section 5).
 - The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

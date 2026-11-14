@@ -14,7 +14,7 @@ Checked against model version `v<N>` in release `v<X.Y.Z>` (source commit `<12 h
 | Runtime id | `<runtime-id>` | `profile.json` |
 | Versions | `<vN>` (latest), `<vM>` ... | `runtimes/<family>/<model>/LATEST` |
 | Release tag | `v<X.Y.Z>` (the product release that contains `v<N>`) | `releases/v<X.Y.Z>/manifest.json` |
-| Release assets | `<runtime-id>-v<N>-approval.json`, `<runtime-id>-v<N>-bundle.tar.gz` | the release page |
+| Release assets | `<runtime-id>-v<N>-approval.json`, `<runtime-id>-v<N>-bundle.tar.gz`; evidence `<runtime-id>-v<N>-evidence.tar.gz` | the release page |
 | What it serves | `<model family and size, quantization format and bit rate as published>` | `model.lock.json` |
 | Model repository and revision | `<owner/repo>` at `<full revision>` | `model.lock.json` |
 | Draft or second model | `<repository and revision, or "none">` | `model.lock.json` |

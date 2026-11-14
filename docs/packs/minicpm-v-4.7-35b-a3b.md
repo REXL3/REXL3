@@ -1,6 +1,6 @@
 # Pack sheet: `minicpmv47-35b-a3b-rexl3-sage-6.08`
 
-Checked against model version `v1` (sealed approval `approve-minicpmv47-35b-a3b-rexl3-sage-6.08-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `minicpmv47-35b-a3b-rexl3-sage-6.08-1.tar.gz`), brought in by #126. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-minicpmv47-35b-a3b-rexl3-sage-6.08-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `minicpmv47-35b-a3b-rexl3-sage-6.08-1.tar.gz`), brought in by #126. This version ships in product release `v0.1.1`.
 
 ## 1. Identity
 
@@ -8,7 +8,8 @@ Checked against model version `v1` (sealed approval `approve-minicpmv47-35b-a3b-
 | --- | --- | --- |
 | Runtime id | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `profile.json` |
 | Versions | `v1` (latest, and the only version in this tree) | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/LATEST` |
-| Release tag | not stated (no product release contains `v1` yet) | `releases/` |
+| Release tag | `v0.1.1` | `releases/v0.1.1/manifest.json` |
+| Release assets | `minicpmv47-35b-a3b-rexl3-sage-6.08-v1-approval.json`, `minicpmv47-35b-a3b-rexl3-sage-6.08-v1-bundle.tar.gz`; evidence `minicpmv47-35b-a3b-rexl3-sage-6.08-v1-evidence.tar.gz` | the release page |
 | What it serves | MiniCPM-V-4.7-35B-A3B (`MiniCPMV4_7ForConditionalGeneration`), EXL3 6.08 bits per weight quantized with SAGE, with a DSpark draft pack (EXL3 6.00 bits per weight) for speculative decoding. SAGE is our own mixed-precision quantization method for EXL3. The method is not published. | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `r0b0tlab/MiniCPM-V-4.7-35B-A3B-EXL3-6.08bpw-REXL3-SAGE` at `25b7aa3361dd8e319c7503ebc002947ceb1fd290` | `model.lock.json` |
 | Draft or second model | `r0b0tlab/MiniCPM-V-4.7-35B-A3B-DSpark-EXL3-6.00bpw` at `e1ea1a3045277ea69a108b4d477983affae0f3c1` | `model.lock.json` |
@@ -54,7 +55,7 @@ The pack's `generation_config.json` sets temperature 1.0, top_p 0.95 and top_k 2
 
 ## 6. Measured behaviour
 
-All figures are from this version's own qualification, recorded in `evidence.tar.gz` (the dev release asset of `approve-minicpmv47-35b-a3b-rexl3-sage-6.08-1`): one GB10 node, engine `0.1.1` at commit `75031112ba12`, profile `minicpmv47-single-262k` (4 slots, window 262,144, DSpark draft on, vision on).
+All figures are from this version's own qualification, recorded in the release asset `minicpmv47-35b-a3b-rexl3-sage-6.08-v1-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): one GB10 node, engine `0.1.1` at commit `75031112ba12`, profile `minicpmv47-single-262k` (4 slots, window 262,144, DSpark draft on, vision on).
 
 Realistic workload first. During the Q200 text run (180 requests, at most two at a time, thinking on, greedy, `max_tokens` 8,192; client on the same host), one request generated a median of 113.3 tok/s, measured as completion tokens over the client's wall time for that request including its prompt (152,463 completion tokens in 1,410 s of request time; `quality/q200/summary.json`, `text180.e2e_throughput`).
 
@@ -103,6 +104,7 @@ All 180 text rows finished with `stop`; none was cut by the token budget. No fig
 - The gates in section 6 are the qualification of this version; no 24-hour soak is part of them.
 - The quality figures are one run on one node; a later version is held to them with a stated noise allowance, not to a fixed target.
 - The engine was qualified for this exact commit and binary; a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. The release notes give a single-node workaround; it skips the launcher's checks and is outside the release's qualification evidence. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

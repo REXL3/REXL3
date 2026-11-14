@@ -1,6 +1,6 @@
 # Pack sheet: `redsnow-5.3-flash-tp2-sage-4.91`
 
-Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-tp2-sage-4.91-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `redsnow-5.3-flash-tp2-sage-4.91-1.tar.gz`), brought in by #127. This version is not yet part of a product release; the release tag is set when a release manifest names it.
+Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-tp2-sage-4.91-1`, source commit `75031112ba12`, engine `0.1.1`, bundle archive `redsnow-5.3-flash-tp2-sage-4.91-1.tar.gz`), brought in by #127. This version ships in product release `v0.1.1`.
 
 ## 1. Identity
 
@@ -8,7 +8,8 @@ Checked against model version `v1` (sealed approval `approve-redsnow-5.3-flash-t
 | --- | --- | --- |
 | Runtime id | `redsnow-5.3-flash-tp2-sage-4.91` | `profile.json` |
 | Versions | `v1` (latest, and the only version in this tree) | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/LATEST` |
-| Release tag | not stated (no product release contains `v1` yet) | `releases/` |
+| Release tag | `v0.1.1` | `releases/v0.1.1/manifest.json` |
+| Release assets | `redsnow-5.3-flash-tp2-sage-4.91-v1-approval.json`, `redsnow-5.3-flash-tp2-sage-4.91-v1-bundle.tar.gz`; evidence `redsnow-5.3-flash-tp2-sage-4.91-v1-evidence.tar.gz` | the release page |
 | What it serves | RED-SNOW-5.3-Flash (`Glm5NextForConditionalGeneration`, a GLM-5.3-Flash derivative), EXL3 4.91 bits per weight quantized with SAGE, on two GB10 nodes (tensor parallel, 2 ranks). SAGE is our own mixed-precision quantization method for EXL3. The method is not published. The pack card describes the model as one for authorized offensive-security work and states its limits; read it before deployment. | `MODEL.json`, `model.lock.json`, `KNOWN_ISSUES.md` |
 | Model repository and revision | `vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw` at `f6b8963784254095a54944f2963b2925fcf4b199` | `model.lock.json` |
 | Draft or second model | none (speculative decoding uses the MTP layer stored in the pack) | `model.lock.json` |
@@ -54,10 +55,11 @@ The pack's card and its `generation_config.json` give temperature 0.7 and top_p 
 - The pack card says the vision components are packaged but not quality-tested by the publisher; the qualification here checks colour images and an image-plus-text request only (section 6).
 - The dependency set is the GLM-5.3-Flash two-node lock and has not been rehearsed on a clean host for this runtime (`KNOWN_ISSUES.md`, "Unverified boundaries").
 - The sealed `profile.json` still records `qualification.state: unverified`, and `KNOWN_ISSUES.md` describes the frozen configuration before qualification (its reference figures are from a development build, not the receipt). The two tool behaviours above were found in the qualification and are not in the sealed `KNOWN_ISSUES.md`. The qualification of this version is the evidence asset `evidence.tar.gz` (section 6); where the two differ, the evidence is the record of what was measured.
+- The sealed `site.example.json` is a generic two-node example: its `http_port` (8940) and model directories are not this profile's values. Set `http_port` (the profile default is 8952) and each node's directories for your site.
 
 ## 6. Measured behaviour
 
-All figures are from the evidence asset `evidence.tar.gz` (the dev release asset of `approve-redsnow-5.3-flash-tp2-sage-4.91-1`): two GB10 nodes, tensor parallel (2 ranks), profile `redsnow-tp2-512k` (1 slot, window 524,288, MTP drafting on, vision on).
+All figures are from this version's evidence archive, the release asset `redsnow-5.3-flash-tp2-sage-4.91-v1-evidence.tar.gz` (named `evidence.tar.gz` inside the sealed approval): two GB10 nodes, tensor parallel (2 ranks), profile `redsnow-tp2-512k` (1 slot, window 524,288, MTP drafting on, vision on).
 
 What ran where. Capability, boundary, doctor, exactness, lifecycle, performance, prefix cache and vision ran fresh on the release binary (engine `0.1.1`, commit `75031112ba12`). Context and quality were carried from a complete, all-pass qualification of the previous engine build (commit `2067531c80ec`, same pack and profile) under a bit-identity record (`bits/bit-identity.json`): 51 greedy and seeded requests replayed on both builds with the profile's arguments and environment gave token-identical outputs. The 51 are 32 reply captures, 15 chunked-prefill requests (up to 522,912 prompt tokens), one full-window request of 523,135 prompt tokens, one image, one reasoning and one tool request.
 
@@ -111,6 +113,7 @@ All 180 text rows finished with `stop`; none was cut by the token budget. The to
 - The gates in section 6 are the qualification of this version; no 24-hour soak is part of them.
 - The quality figures are one run on one cluster; a later version is held to them with a stated noise allowance, not to a fixed target.
 - The engine was qualified for this exact commit and binary (quality and context through the bit-identity record above); a different engine build is not covered by this sheet.
+- Install on an updated host: this recipe pins the NVIDIA driver packages `libnvidia-compute-580` and `nvidia-utils-580` at exactly `580.173.02-0ubuntu0.24.04.1` (`dependencies.lock.json`). On an Ubuntu 24.04 arm64 host whose packages have moved past that build, `./launch.sh install-deps` and `./launch.sh doctor` refuse with exit 20. There is no workaround for this two-node profile in this release. See "Known issues" in the [v0.1.1 release notes](../../releases/v0.1.1/NOTES.md).
 
 ## 8. Where to look next
 

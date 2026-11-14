@@ -18,14 +18,14 @@ folder. The
 | RED-SNOW-5.3-Flash (two nodes) | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/` | [red-snow-5.3-flash-tp2.md](red-snow-5.3-flash-tp2.md) |
 | Nemotron-3.5-Super-VL | `runtimes/nemotron-3.5/nemotron-3.5-super-vl/` | [nemotron-3.5-super-vl.md](nemotron-3.5-super-vl.md) |
 | MiniCPM-V-4.7-35B-A3B | `runtimes/minicpm-v-4.7/minicpm-v-4.7-35b-a3b/` | [minicpm-v-4.7-35b-a3b.md](minicpm-v-4.7-35b-a3b.md) |
+| Ling-3.1-Flash-1019 | `runtimes/ling-3.1/ling-3.1-flash-1019/` | [ling-3.1-flash-1019.md](ling-3.1-flash-1019.md) |
 | DeepSeek-V4.1-Flash-1017 (single node) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017/` | [deepseek-v4.1-flash-1017.md](deepseek-v4.1-flash-1017.md) |
 | DeepSeek-V4.1-Flash-1017 (two nodes) | `runtimes/deepseek-v4.1/deepseek-v4.1-flash-1017-tp2/` | [deepseek-v4.1-flash-1017-tp2.md](deepseek-v4.1-flash-1017-tp2.md) |
 
 ## Rules for a sheet
 
-1. **A sheet describes a sealed version, never a plan.** It is added in the `release/v<X.Y.Z>` pull request
-   that brings that version in (or in the legacy `model/<model>` pull request, where
-   `tools/check_model_branch.py` requires `docs/packs/<model>.md`), from the
+1. **A sheet describes a sealed version, never a plan.** It is added in the `model/<model>` pull request
+   that brings that version in (`tools/check_model_branch.py` requires `docs/packs/<model>.md`), from the
    sealed files in that pull request. Do not describe a model that has no
    `runtimes/<family>/<model>/v<N>/` tree.
 2. **Every fact has a source.** Copy values from the release itself, not from memory: the sealed
@@ -40,7 +40,7 @@ folder. The
 4. **No measured number without its context.** A speed or memory figure names the hardware, the release it
    was measured on and where it is recorded. Do not carry a figure from one version to another.
 5. **One version history.** A new promoted version updates the sheet's version row and any value that
-   changed, in that version's `release/v<X.Y.Z>` (or legacy `model/<model>`) pull request; the old version stays listed with its
+   changed, in that version's `model/<model>` pull request; the old version stays listed with its
    differences until it is withdrawn (`docs/PROMOTION.md`).
 6. **No internal project names, personal email addresses, credentials or quantization-method internals.**
    These rules are in [CONTRIBUTING](../../CONTRIBUTING.md) section 1.
@@ -51,7 +51,6 @@ folder. The
 2. Fill every section from the sealed files, as rule 2 says; delete none (write "not stated" instead).
 3. Add its row to the table above and to the README's released-packs table, and update the README's
    "Run" command variables if the quick start changes.
-4. Commit it in the `release/v<X.Y.Z>` pull request, or in the legacy `model/<model>` pull request
-   (CONTRIBUTING section 3). A later correction to a
+4. Commit it in the `model/<model>` pull request (CONTRIBUTING section 3). A later correction to a
    sheet is a `DOCS:` pull request on an `engine/<topic>` branch; its description names the release tag
    and the head commit the sheet was checked against.

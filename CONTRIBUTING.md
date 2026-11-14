@@ -380,8 +380,11 @@ branch, review and check rules above.
    checks pass.
 3. **Never change repository settings**: rulesets, branch or tag protection, environments, secrets,
    variables, collaborators, teams, webhooks, deploy keys, Actions permissions or release settings.
-4. **Never work with admin credentials.** If the token you were given can administer this repository,
-   stop and tell the maintainer you work for.
+4. **Never use admin capability.** The token you were given may carry admin rights on this repository;
+   that alone does not stop ordinary work (pushing a branch, opening a pull request, requesting review,
+   commenting when that is approved). You never use what admin adds (settings, rulesets, bypass merges,
+   protected refs, releases, tags) unless the repository owner you work for explicitly instructs that
+   action and confirms the exact action first (Always 9).
 5. **Never push to `main`, never force-push, and never delete a `model/*` branch.** Never bypass hooks
    or checks.
 6. **Never edit a sealed tree** (`runtimes/*/*/v*/`) **or the engine source snapshot** (`crates/`, `third_party/`, `testdata/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `SOURCE_BUILD.md` and `SOURCE_IDENTITY.json`). A sealed tree is data with a hash-pinned

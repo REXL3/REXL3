@@ -305,12 +305,19 @@ commit; `--assets-dir` is the root of a durable, verified dev-asset cache, one m
 writing; when `MODEL.json` is new, `--display-name`, `--engine-family`, `--pack-format`,
 `--architecture` (repeatable) and `--pack KEY=VALUE` (repeatable) supply the metadata:
 
+Record the protected main base once before the first promotion. Reuse the same immutable
+`BASE_COMMIT` on the first and every later promotion; after the first commit, the release branch's
+`HEAD` is no longer an ancestor of `origin/main` and is not a valid replacement:
+
 ```bash
+git fetch origin main
+BASE_COMMIT="$(git rev-parse origin/main)"
+
 python3 tools/promote_runtime.py \
   --family <family> --model <model> --version <N> \
   --approve-tag engine-v<X.Y.Z>-<8hex> \
   --release-branch release/v<X.Y.Z> \
-  --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
+  --target-commit "$BASE_COMMIT" --prod-checkout "$PWD" \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \

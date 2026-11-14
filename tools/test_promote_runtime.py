@@ -172,6 +172,57 @@ class PromotionTest(unittest.TestCase):
         self.assertIn(f'{FAMILY}/{MODEL}/v1', merged['approvals'])
         self.assertIn(f'{FAMILY}/sibling-model/v2', merged['approvals'])
 
+    def test_two_release_promotions_reuse_the_original_main_target(self):
+        """The second promotion must keep the protected base, not use the first promotion's HEAD."""
+        root, _ = self.make_prod_bare()
+        empty = {'schema': 'rexl3.approval-registry.v1', 'approvals': {}}
+        write(root, 'runtimes/templates/APPROVALS.json', e.json_bytes(empty))
+        p.git('add', '.', cwd=root)
+        p.git('commit', '-m', 'TEST: Added empty registry', cwd=root)
+        base_commit = p.git('rev-parse', 'HEAD', cwd=root).stdout.strip()
+        p.git('update-ref', 'refs/remotes/origin/main', base_commit, cwd=root)
+
+        second_model = 'qwen3.8-27b-next'
+        second_key = f'{FAMILY}/{second_model}/v1'
+        registry = copy.deepcopy(self.registry)
+        registry['approvals'][second_key] = copy.deepcopy(registry['approvals'][f'{FAMILY}/{MODEL}/v1'])
+        from tools.test_release_evidence import stage_assets
+        stage_assets(Path(self.assets) / FAMILY / second_model / 'v1', self.f, self.doc)
+        meta = dict(display_name='Synthetic Demo', engine_family='synthetic',
+                    architectures=['SyntheticForConditionalGeneration'], pack={'format': 'exl3'})
+        original_git = p.git
+        with patch.object(p, 'gh', side_effect=AssertionError('release branch must not call GitHub')), \
+             patch.object(p, 'git') as git_mock:
+            def local_git(*args, **kwargs):
+                if args[0] in ('push', 'fetch', 'ls-remote'):
+                    raise AssertionError('release branch must stay local: ' + repr(args))
+                return original_git(*args, **kwargs)
+            git_mock.side_effect = local_git
+            for model in (MODEL, second_model):
+                code = p.prepare_promotion(
+                    FAMILY, model, 1, approve_tag='approve-synthetic-demo-1', target_commit=base_commit,
+                    prod_checkout=root, assets_dir=self.assets, registry=registry,
+                    approved_templates=self.f.approved, release_branch='release/v0.1.2', meta=meta)
+                self.assertEqual(code, 0)
+                if model == MODEL:
+                    first_head = p.git('rev-parse', 'HEAD', cwd=root).stdout.strip()
+                    self.assertNotEqual(first_head, base_commit)
+                    # This is the old documented second command. It must fail before writing model two.
+                    with self.assertRaises(ValueError):
+                        p.prepare_promotion(
+                            FAMILY, second_model, 1, approve_tag='approve-synthetic-demo-1',
+                            target_commit=first_head, prod_checkout=root, assets_dir=self.assets,
+                            registry=registry, approved_templates=self.f.approved,
+                            release_branch='release/v0.1.2', meta=meta)
+
+        self.assertEqual(p.git('rev-list', '--count', base_commit + '..HEAD', cwd=root).stdout.strip(), '2')
+        self.assertEqual(p.git('rev-parse', 'origin/main', cwd=root).stdout.strip(), base_commit)
+        self.assertEqual(p.git('branch', '--show-current', cwd=root).stdout.strip(), 'release/v0.1.2')
+        merged = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
+        self.assertEqual(set(merged['approvals']), {f'{FAMILY}/{MODEL}/v1', second_key})
+        for model in (MODEL, second_model):
+            self.assertTrue((root / 'runtimes' / FAMILY / model / 'v1/approval.json').is_file())
+
     def test_prepare_creates_model_branch_with_tree_model_json_and_latest(self):
         root, commit = self.make_prod_bare()
         calls = []

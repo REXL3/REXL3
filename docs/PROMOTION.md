@@ -91,14 +91,19 @@ promoted, the tool moves `LATEST` forward from the earlier `v<M>` to the new `v<
 `tools/promote_runtime.py` stages each sealed tree at `runtimes/<family>/<model>/v<N>` and its modular
 anchor `runtimes/templates/approvals/<family>/<model>.json` onto `release/v<X.Y.Z>` from the unified
 `engine-v<X.Y.Z>-<8hex>` dev release. It runs on a maintainer's machine with an authenticated `gh`,
-never in CI:
+never in CI. Record the protected main base once before the first promotion, then reuse that exact
+immutable commit for the first and every later promotion onto the same release branch (do not replace
+it with the release branch's moving `HEAD`):
 
 ```bash
+git fetch origin main
+BASE_COMMIT="$(git rev-parse origin/main)"
+
 python3 tools/promote_runtime.py \
   --family <family> --model <model> --version <N> \
   --approve-tag engine-v<X.Y.Z>-<8hex> \
   --release-branch release/v<X.Y.Z> \
-  --target-commit "$(git rev-parse HEAD)" --prod-checkout "$PWD" \
+  --target-commit "$BASE_COMMIT" --prod-checkout "$PWD" \
   --assets-dir <durable-dev-assets> [--download] \
   --approved runtimes/templates/APPROVED.json \
   --trusted-approvals runtimes/templates/APPROVALS.json \

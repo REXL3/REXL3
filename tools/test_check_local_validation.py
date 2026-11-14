@@ -140,6 +140,29 @@ class CheckTest(unittest.TestCase):
         state, _ = self.run_check(files, pr_doc(ref='release/v0.1.2'), reviews=[review('am423', body=body)])
         self.assertEqual(state, 'success')
 
+    def sealed_only_block(self, model='qwen3.8/qwen3.8-27b', sealed='PASS'):
+        # The release-cut form: no local doctor/smoke/assets/check_model_branch PASS lines at all.
+        fields = {'pr': str(PR), 'head': HEAD, 'model': model, 'host': 'gb10-1',
+                  'sealed_receipts': sealed, 'gates': 'sealed qualification receipts re-read'}
+        return 'LOCAL-VALIDATION v1\n' + '\n'.join(f'{k}: {v}' for k, v in fields.items())
+
+    def test_sealed_receipts_waiver_applies_only_to_release_branches(self):
+        files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'}]
+        reviews = [review('am423', body=self.sealed_only_block())]
+        state, _ = self.run_check(files, pr_doc(ref='release/v0.1.2'), reviews=reviews)
+        self.assertEqual(state, 'success')
+        # A model/<model> PR never gets the waiver: it needs the four local PASS fields.
+        state, _ = self.run_check(files, pr_doc(ref='model/qwen3.8-27b'), reviews=reviews)
+        self.assertEqual(state, 'failure')
+
+    def test_sealed_receipts_waiver_needs_exactly_pass(self):
+        files = [{'filename': 'runtimes/qwen3.8/qwen3.8-27b/v1/approval.json'}]
+        for value in ('FAIL', 'pass', 'PASS (partial)', ''):
+            with self.subTest(value=value):
+                reviews = [review('am423', body=self.sealed_only_block(sealed=value))]
+                state, _ = self.run_check(files, pr_doc(ref='release/v0.1.2'), reviews=reviews)
+                self.assertEqual(state, 'failure')
+
     def test_status_attaches_to_the_head_sha(self):
         posted = []
 

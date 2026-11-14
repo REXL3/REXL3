@@ -13,7 +13,6 @@ from pathlib import Path
 import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 try:
@@ -59,50 +58,6 @@ def changed_files(repo, pr, token):
         if len(batch) < 100:
             return files
         page += 1
-
-
-def file_at(repo, path, ref, token):
-    try:
-        raw = api(f'/repos/{repo}/contents/{path}?ref={urllib.parse.quote(ref, safe="")}',
-                  token, accept='application/vnd.github.raw')
-    except ValueError:
-        return None
-    return raw.decode('utf-8')
-
-
-def verify_yml_diff_ok(files, repo, pr, token, head_ref=None, base_sha=None):
-    """For model/*-approval: verify.yml may only change its TRUSTED_APPROVALS_SHA256 line.
-
-    The GitHub files API normally includes a unified ``patch``; it is omitted for very large
-    files, in which case the base and head file contents are compared line-by-line. The base
-    content is read at the PR's base commit and the head content at the branch head — never at
-    the same ref.
-    """
-    for item in files:
-        if item['filename'] != '.github/workflows/verify.yml':
-            continue
-        patch = item.get('patch')
-        if patch:
-            lines = [line for line in patch.splitlines()
-                     if line.startswith(('+', '-')) and not line.startswith(('+++', '---'))]
-        else:
-            if base_sha is None or head_ref is None:
-                doc = api_json(f'/repos/{repo}/pulls/{pr}', token)
-                base_sha = base_sha or doc.get('base', {}).get('sha')
-                head_ref = head_ref or doc.get('head', {}).get('ref')
-            base = file_at(repo, item['filename'], base_sha, token)
-            head = file_at(repo, item['filename'], head_ref, token)
-            if head is None:
-                return False, 'verify.yml unreadable'
-            base_lines = (base or '').splitlines()
-            head_lines = head.splitlines()
-            added = [line for line in head_lines if line not in base_lines]
-            removed = [line for line in base_lines if line not in head_lines]
-            lines = ['+' + line for line in added] + ['-' + line for line in removed]
-        for line in lines:
-            if 'TRUSTED_APPROVALS_SHA256' not in line:
-                return False, 'verify.yml changed beyond the TRUSTED_APPROVALS_SHA256 pin line'
-    return True, ''
 
 
 def classify_branch(head_ref):
@@ -189,15 +144,15 @@ def check_pr_rules(repo, pr, title, head_ref, token, files=None):
     if kind == 'model-approval':
         bad = []
         for path in sorted(names):
-            if path in {'runtimes/templates/APPROVALS.json', '.github/workflows/verify.yml'}:
+            # The TRUSTED_APPROVALS_SHA256 pin is retired, so a registry PR has no reason to touch a
+            # workflow: verify.yml (any line of it) is out of scope here like every other path.
+            if path == 'runtimes/templates/APPROVALS.json':
                 continue
             match = re.fullmatch(r'runtimes/templates/approvals/([^/]+)/([^/]+)\.json', path)
             if match and m.MODEL_NAME_RE.fullmatch(match[1]) and match[2] == model:
                 continue
             bad.append(path)
         report('scope', not bad, '' if not bad else 'out of scope: ' + ', '.join(bad))
-        ok, reason = verify_yml_diff_ok(files, repo, pr, token, head_ref=head_ref)
-        report('verify pin only', ok, reason)
         return results
 
     if kind == 'model':

@@ -1,16 +1,11 @@
 # REXL3 v0.1.2 release notes
 
-<!-- Template for tools/assemble_release_notes.py (docs/RELEASING.md). The placeholders are filled
-     from changes/unreleased/<slug>.md fragments and releases/v<X.Y.Z>/manifest.json; a fragment uses
-     only the headings it needs. Supported models, Assets and Provenance are generated from the
-     manifest. -->
-
 ## Highlights
 
-- Allowed one reviewed `release/vX.Y.Z` PR to promote multiple models with per-model approval modules and corresponding source.
-- Added unified `engine-vX.Y.Z-<sha>` dev asset selection, parallel diff-scoped downloads, and shared archive caching.
-- Removed the conflicting workflow registry pin while preserving sealed approval and immutable base-tree verification.
-- Fixed release asset uploads to use `uploads.github.com` and deduplicated shared engine corresponding source.
+- Deduplicated packaging over the nine unchanged `v0.1.1` runtime seals on engine `75031112`, reducing release assets from 47 to 39.
+- Corrected third-party license attributions and notice files across runtime templates (#164, #165, #166).
+- Unified single-PR release promotion and `uploads.github.com` asset uploads (#154, #163, #167).
+- Hardened `cut_release.py` immutable-releases enforcement (#162).
 
 ## Supported models
 
@@ -28,40 +23,18 @@
 
 ## New features and improvements
 
-- A release manifest can now list `engine.source_archives`, so the engine corresponding-source archive that several models were sealed from is published once (`rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz`) instead of once per model. Each sealed approval still names its own archive digest and size; the release tools map it to the shared asset by that digest, refuse any mismatch, and check the published asset against the manifest. Releases without the key (`v0.1.0`, `v0.1.1`) are unchanged.
-
-- `tools/promote_runtime.py --co-author "Name <id+login@users.noreply.github.com>"` (repeatable) adds
-  `Co-authored-by:` trailers to a promotion commit, so tester credit reaches main in the single-PR
-  release flow (docs/RELEASING.md) (#163).
-- The release-cut `LOCAL-VALIDATION v1` forms (`models:` and the `sealed_receipts: PASS` waiver) are
-  now documented, and tests show that the waiver never applies to a `model/<model>` PR (#163).
-- The docs no longer promise the standalone `model/<model>-approval` route for a new version: verify
-  refuses an anchor without its tree. A single-model hotfix that needs a new anchor is a one-model
-  `release/v<X.Y.Z>` patch release PR (#163).
-
-- The production `verify` and `model-completeness` checks now accept a new approval anchor only from a `release/v<X.Y.Z>` branch of this repository (never a fork) whose release manifest lists that anchor with the same approval hash, and they refuse anything else before downloading development assets. A green `verify` proves that a tree equals a published development seal; the maintainers' review of the release pull request is what authorizes a new anchor. Pull requests that add no anchor are unaffected.
+- Publish shared engine corresponding source once while retaining per-seal digest and size validation.
+- Support co-author trailers on promotion commits and document single-PR promotion and local-validation rules (#163).
+- Accept new approval anchors only from release PRs with matching manifest entries (#163).
+- Correct third-party license attributions and notice files across runtime templates (#164, #165, #166).
 
 ## Bug fixes
 
-- `tools/cut_release.py` now refuses a cut unless the repository's immutable-releases setting answers
-  with `enabled` set to the boolean `true`. A response without `enabled`, or with `null`, `false` or a
-  non-boolean value, used to pass the gate; it now stops the dry run and `--publish` before any tag or
-  release is written. Reported by @Blackwellboy in #158 (#162).
-
-- `tools/promote_runtime.py` can add a version the registry does not hold yet. The documented
-  `--release-branch` command refused the first promotion of a cut with
-  `approval not in independently trusted registry`. A maintainer-written `--new-anchor FILE`, outside
-  the checkout and holding exactly the promoted key, is now authenticated like any other registry
-  entry and committed as that model's `runtimes/templates/approvals/<family>/<model>.json` (#163).
-- `tools/check_model_branch.py` now reads the base registry together with its modular
-  `approvals/<family>/<model>.json` files, not only the top-level `APPROVALS.json` (#163).
-- Registry modules are bound to their path. Every key in `approvals/<family>/<model>.json` must be
-  `<family>/<model>/v<N>`, and empty modules or modules with other sections are refused (#163).
-- `pr-rules` no longer lets a `model/*-approval` PR change `.github/workflows/verify.yml`. The retired
-  `TRUSTED_APPROVALS_SHA256` pin check used to pass any added line that contained that name (#163).
-
-
-- Corrected the multi-model promotion command reference to record the protected main base once and reuse it for every promotion onto one release branch. The former second-promotion command used the first promotion's `HEAD`, which the CLI correctly refuses because it is not on protected main; a regression test now covers two successful promotions with the original base and the old command's refusal.
+- Require immutable releases to report `enabled` as boolean `true` before cutting a release (#162).
+- Allow initial promotion of new registry versions with an authenticated `--new-anchor` and load modular registries correctly (#163).
+- Bind registry modules to their expected paths and prevent approval-only PRs from changing the verification workflow (#163).
+- Correct multi-model promotion commands to reuse the protected `main` base (#163).
+- Upload release assets through `uploads.github.com` (#167).
 
 ## Breaking changes and upgrade notes
 

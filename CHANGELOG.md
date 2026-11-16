@@ -1,5 +1,48 @@
 # Changelog
 
+## [v0.1.2] - 2026-11-15
+
+- Allowed one reviewed `release/vX.Y.Z` PR to promote multiple models with per-model approval modules and corresponding source.
+- Added unified `engine-vX.Y.Z-<sha>` dev asset selection, parallel diff-scoped downloads, and shared archive caching.
+- Removed the conflicting workflow registry pin while preserving sealed approval and immutable base-tree verification.
+- Fixed release asset uploads to use `uploads.github.com` and deduplicated shared engine corresponding source.
+
+
+- A release manifest can now list `engine.source_archives`, so the engine corresponding-source archive that several models were sealed from is published once (`rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz`) instead of once per model. Each sealed approval still names its own archive digest and size; the release tools map it to the shared asset by that digest, refuse any mismatch, and check the published asset against the manifest. Releases without the key (`v0.1.0`, `v0.1.1`) are unchanged.
+
+- `tools/promote_runtime.py --co-author "Name <id+login@users.noreply.github.com>"` (repeatable) adds
+  `Co-authored-by:` trailers to a promotion commit, so tester credit reaches main in the single-PR
+  release flow (docs/RELEASING.md) (#163).
+- The release-cut `LOCAL-VALIDATION v1` forms (`models:` and the `sealed_receipts: PASS` waiver) are
+  now documented, and tests show that the waiver never applies to a `model/<model>` PR (#163).
+- The docs no longer promise the standalone `model/<model>-approval` route for a new version: verify
+  refuses an anchor without its tree. A single-model hotfix that needs a new anchor is a one-model
+  `release/v<X.Y.Z>` patch release PR (#163).
+
+- The production `verify` and `model-completeness` checks now accept a new approval anchor only from a `release/v<X.Y.Z>` branch of this repository (never a fork) whose release manifest lists that anchor with the same approval hash, and they refuse anything else before downloading development assets. A green `verify` proves that a tree equals a published development seal; the maintainers' review of the release pull request is what authorizes a new anchor. Pull requests that add no anchor are unaffected.
+
+- `tools/cut_release.py` now refuses a cut unless the repository's immutable-releases setting answers
+  with `enabled` set to the boolean `true`. A response without `enabled`, or with `null`, `false` or a
+  non-boolean value, used to pass the gate; it now stops the dry run and `--publish` before any tag or
+  release is written. Reported by @Blackwellboy in #158 (#162).
+
+- `tools/promote_runtime.py` can add a version the registry does not hold yet. The documented
+  `--release-branch` command refused the first promotion of a cut with
+  `approval not in independently trusted registry`. A maintainer-written `--new-anchor FILE`, outside
+  the checkout and holding exactly the promoted key, is now authenticated like any other registry
+  entry and committed as that model's `runtimes/templates/approvals/<family>/<model>.json` (#163).
+- `tools/check_model_branch.py` now reads the base registry together with its modular
+  `approvals/<family>/<model>.json` files, not only the top-level `APPROVALS.json` (#163).
+- Registry modules are bound to their path. Every key in `approvals/<family>/<model>.json` must be
+  `<family>/<model>/v<N>`, and empty modules or modules with other sections are refused (#163).
+- `pr-rules` no longer lets a `model/*-approval` PR change `.github/workflows/verify.yml`. The retired
+  `TRUSTED_APPROVALS_SHA256` pin check used to pass any added line that contained that name (#163).
+
+
+- Corrected the multi-model promotion command reference to record the protected main base once and reuse it for every promotion onto one release branch. The former second-promotion command used the first promotion's `HEAD`, which the CLI correctly refuses because it is not on protected main; a regression test now covers two successful promotions with the original base and the old command's refusal.
+
+- Models: qwen3.8/qwen3.8-27b v4, qwen3.8/qwen3.8-flash-next v3, glm-5.3/glm-5.3-flash v2, glm-5.3/glm-5.3-flash-tp2 v1, glm-5.3/red-snow-5.3-flash-tp2 v1, nemotron-3.5/nemotron-3.5-super-vl v2, minicpm-v-4.7/minicpm-v-4.7-35b-a3b v1, deepseek-v4.1/deepseek-v4.1-flash-1017-tp2 v1, ling-3.1/ling-3.1-flash-1019 v1.
+
 ## [v0.1.1] - 2026-11-12
 
 - DeepSeek-V4.1-Flash-1017 (EXL3 1.55 bits per weight, SAGE) on two GB10 nodes, tensor parallel: the model's full 1,048,576-token window, 1 slot, q4 KV cache, speculative decoding and prefix cache on, image input off (`dsv41-tp2-1m`, port 8940). SAGE is our own mixed-precision quantization method for EXL3. The method is not published. A fresh full gate chain on the release binary (engine 0.1.1, two GB10s) passed all 11 gates, including context needles at 131,072 to 1,048,576 tokens (16 of 16) and chunked prefill equal to whole prefill on a 1,047,526-token prompt; an extra full-window check (drafted equal to serial, cached equal to cold at 1,048,576 tokens) also passed. Measured on that binary: 37.2 tok/s generation for one stream (median of 3 runs of 5 replies of 256 tokens, short context), prompt speed 898 tok/s at 524,292 tokens and 554 tok/s at 1,048,396 tokens (cold prompts, median of 3 runs; the full-window prompt takes about 31.5 minutes). Q200 182 of 200 (91.0%) with reasoning effort off, greedy, a 32,768-token budget, one client worker remote from the leader; 7 text replies ran to the budget and count as incorrect. This is the pack's own baseline: floors are each suite's score minus two, overall bar 90%. Thinking is off unless a request sets a reasoning effort. Details and methods in `docs/packs/deepseek-v4.1-flash-1017-tp2.md`. Added by #130.

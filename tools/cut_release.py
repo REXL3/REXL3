@@ -528,8 +528,12 @@ def upload_assets(api, repo, release_id, work, manifest, repo_root=None):
         raise ValueError('release assets missing after upload: ' + ', '.join(sorted(missing)))
 
 
-def verify_published(api, repo, version, merge_commit, manifest, *, draft_ok=False, repo_root=None):
-    release = api.get(f'/repos/{repo}/releases/tags/{urllib.parse.quote(version, safe="")}')
+def verify_published(api, repo, version, merge_commit, manifest, *, draft_ok=False, release_id=None,
+                     repo_root=None):
+    if draft_ok:
+        release = api.get(f'/repos/{repo}/releases/{release_id}')
+    else:
+        release = api.get(f'/repos/{repo}/releases/tags/{urllib.parse.quote(version, safe="")}')
     if release is None:
         raise ValueError('published release missing')
     if not draft_ok and (release.get('draft') or release.get('prerelease')):
@@ -587,7 +591,8 @@ def cut(api, repo, version, mode, repo_root='.'):
     if not isinstance(release, dict) or not release.get('id'):
         raise ValueError('draft release creation failed')
     upload_assets(api, repo, release['id'], work, manifest, repo_root=repo_root)
-    published = verify_published(api, repo, version, merge_commit, manifest, draft_ok=True, repo_root=repo_root)
+    published = verify_published(api, repo, version, merge_commit, manifest,
+                                 draft_ok=True, release_id=release['id'], repo_root=repo_root)
     api.patch(f'/repos/{repo}/releases/{release["id"]}', {'draft': False})
     print(f'PUBLISHED {version} id={published["id"]} at {merge_commit}')
     return 0

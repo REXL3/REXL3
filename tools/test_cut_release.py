@@ -110,6 +110,10 @@ class FakeApi(c.Api):
         if '/releases/assets/' in path:
             asset_id = int(path.rsplit('/', 1)[1])
             return self.fixtures['assets'][asset_id]
+        release_prefix = f'/repos/{REPO}/releases/'
+        if path.startswith(release_prefix) and path[len(release_prefix):].isdigit():
+            release_id = int(path[len(release_prefix):])
+            return next((release for release in self.releases.values() if release['id'] == release_id), None)
         if '/immutable-releases' in path:
             if not self.immutable:
                 raise ValueError('GitHub API 403')
@@ -297,6 +301,23 @@ class PublishTest(CutFixture):
         expected = c.model_assets(self.manifest)
         self.assertEqual({a['name'] for a in release['assets']}, expected)
         self.assertEqual(len(api.uploads), len(expected))
+
+    def test_publish_verifies_the_draft_release_by_id_instead_of_tag(self):
+        api = self.api()
+        original_get = api.get
+        draft_id_gets = []
+
+        def get(path, **kwargs):
+            if path == f'/repos/{REPO}/releases/tags/{VERSION}' and VERSION in api.releases:
+                raise AssertionError('GitHub returns 404 for a draft release fetched by tag')
+            if path == f'/repos/{REPO}/releases/200':
+                draft_id_gets.append(path)
+                return api.releases[VERSION]
+            return original_get(path, **kwargs)
+
+        api.get = get
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        self.assertEqual(draft_id_gets, [f'/repos/{REPO}/releases/200'])
 
     def test_publish_refuses_when_the_registry_anchor_is_missing(self):
         registry = e.load_json(self.root / 'runtimes/templates/APPROVALS.json')

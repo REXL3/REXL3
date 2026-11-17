@@ -530,12 +530,21 @@ def upload_assets(api, repo, release_id, work, manifest, repo_root=None):
 
 def verify_published(api, repo, version, merge_commit, manifest, *, draft_ok=False, release_id=None,
                      repo_root=None):
+    if draft_ok and release_id is None:
+        raise ValueError('draft verification needs the release id')
     if draft_ok:
         release = api.get(f'/repos/{repo}/releases/{release_id}')
     else:
         release = api.get(f'/repos/{repo}/releases/tags/{urllib.parse.quote(version, safe="")}')
     if release is None:
         raise ValueError('published release missing')
+    if draft_ok:
+        if release.get('id') != release_id:
+            raise ValueError('draft release id mismatch')
+        if release.get('tag_name') != version:
+            raise ValueError('draft release tag mismatch')
+        if release.get('draft') is not True:
+            raise ValueError('draft release is not a draft')
     if not draft_ok and (release.get('draft') or release.get('prerelease')):
         raise ValueError('release is draft/prerelease')
     ref = api.get(f'/repos/{repo}/git/ref/tags/{version}')

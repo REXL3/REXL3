@@ -248,7 +248,7 @@ def check_rulesets(repo_root, repo, token, live=None):
 
 
 def check_immutable_releases(repo, token):
-    """Read the repo-level immutable-releases setting; fail closed when unreadable or explicitly disabled.
+    """Read the repo-level immutable-releases setting; fail closed unless `enabled` is the boolean true.
 
     The GitHub Actions workflow token cannot read this repository-settings endpoint and receives
     HTTP 403; the change is still verifiable by a maintainer (or a token with repository-admin

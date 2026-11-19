@@ -244,6 +244,12 @@ class ImmutableCheckTest(unittest.TestCase):
             problems = g.check_immutable_releases(REPO, 'tok')[0]
             self.assertTrue(any('disabled' in p for p in problems))
 
+    def test_missing_or_non_boolean_enabled_fails_closed(self):
+        for body in (b'{}', b'{"enabled": null}', b'{"enabled": "true"}', b'[]'):
+            with patch('tools.governance_audit.api', return_value=body):
+                problems = g.check_immutable_releases(REPO, 'tok')[0]
+                self.assertNotEqual(problems, [], body)
+
     def test_unreadable_fails_closed(self):
         with patch('tools.governance_audit.api', side_effect=ValueError('HTTP 500')):
             problems = g.check_immutable_releases(REPO, 'tok')[0]

@@ -264,8 +264,10 @@ def check_immutable_releases(repo, token):
         doc = json.loads(raw.decode('utf-8'))
     except (ValueError, UnicodeError):
         return ['immutable releases setting returned an unreadable response'], None
-    if not isinstance(doc, dict) or doc.get('enabled') is False:
-        return ['immutable releases are disabled'], None
+    if not isinstance(doc, dict) or doc.get('enabled') is not True:
+        if isinstance(doc, dict) and doc.get('enabled') is False:
+            return ['immutable releases are disabled'], None
+        return ['immutable releases setting returned no boolean `enabled`; cannot verify (fail closed)'], None
     return [], raw.decode('utf-8', 'replace')[:80]
 
 

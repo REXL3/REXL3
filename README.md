@@ -129,11 +129,11 @@ APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)   # exa
 # 2. Verify before extracting: the bundle's SHA-256 must equal bundle.sha256 in the approval
 want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
-[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract"
+[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract (the next step will not run)"
 
 # 3. Extract into a new directory
-mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
-cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+[ "$want" = "$have" ] && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
+  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
 
 # 4. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
 #    SHA-256 against the approval, and install it at its path with mode 0755

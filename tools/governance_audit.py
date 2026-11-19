@@ -76,7 +76,9 @@ def check_merged_prs(repo_root, repo, token, owners, *, since=None, pulls=None, 
             pulls.extend(batch)
             if len(batch) < 100 or not batch or batch[-1].get('updated_at') is None:
                 break
-            if batch[-1].get('merged_at') and parse_iso(batch[-1]['merged_at']) < since:
+            # sorted by updated_at (desc): a PR merged in the window was updated in the window, so stop only once the
+            # last PR of the page was last updated before it (its merged_at says nothing about the next page)
+            if parse_iso(batch[-1]['updated_at']) < since:
                 break
             page += 1
     incidents = ''

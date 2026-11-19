@@ -79,6 +79,18 @@ class MergedPrCheckTest(unittest.TestCase):
                                       reviews_for=lambda n: [])
         self.assertEqual(problems, [])
 
+    def test_pagination_continues_past_an_old_merge_updated_recently(self):
+        # sorted by updated: page 1's last PR merged long ago but was updated today; page 2 holds a PR merged in the window
+        page1 = [dict(merged_pr(1000 + i, days=30), updated_at=(NOW - timedelta(hours=12)).isoformat()) for i in range(100)]
+        page2 = [dict(merged_pr(7, days=2), updated_at=(NOW - timedelta(days=2)).isoformat())]
+
+        def fake(path, token):
+            page = int(path.rsplit('&page=', 1)[1])
+            return {1: page1, 2: page2}.get(page, [])
+        with patch('tools.governance_audit.api_json', side_effect=fake):
+            problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, reviews_for=lambda n: [])
+        self.assertTrue(any('PR #7 ' in p for p in problems), problems)
+
     def test_old_merge_is_ignored(self):
         problems = g.check_merged_prs(self.root, REPO, 'tok', OWNERS, pulls=[merged_pr(1, days=30)],
                                       reviews_for=lambda n: [])

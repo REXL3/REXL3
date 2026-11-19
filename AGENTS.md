@@ -45,14 +45,14 @@ gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
 APPROVAL=$(ls "$DL"/*-approval.json)
 BUNDLE=$(ls "$DL"/*-bundle.tar.gz)
 
-# 1. Verify bundle archive SHA-256 against the sealed approval before extracting
+# 1. Verify bundle archive SHA-256 against the sealed approval before extracting. Everything below sits
+#    inside this one `if ... fi`: on a mismatch none of it runs, and an interactive shell stays open
 want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
-[ "$want" = "$have" ] && echo BUNDLE_OK || { echo "HASH MISMATCH"; exit 1; }
-
-mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID"
-tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID"
-cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+if [ -z "$want" ] || [ "$want" != "$have" ]; then
+  echo "HASH MISMATCH (or a failed download): nothing was extracted and no later step ran"; false
+elif echo BUNDLE_OK && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
+  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"; then
 
 # 2. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
 #    SHA-256 against the approval, and install it at its path with mode 0755
@@ -71,6 +71,10 @@ done
 ./launch.sh --yes setup --accept-model-download
 ./launch.sh verify
 ./launch.sh --yes start
+
+else
+  echo "EXTRACT FAILED: no later step ran"; false
+fi   # closes the `if` opened in step 1
 ```
 
 - **Lifecycle commands:** `./launch.sh status`, `./launch.sh logs --lines 200 --no-follow`, `./launch.sh diagnostics`, `./launch.sh stop`. There is no separate smoke command: `start` reports `READY` only after its own smoke request succeeds.

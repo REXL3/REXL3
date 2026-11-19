@@ -126,14 +126,16 @@ gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
   -p "${RUNTIME_ID}-*-approval.json" -p "${RUNTIME_ID}-*-bundle.tar.gz"
 APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)   # exactly one of each
 
-# 2. Verify before extracting: the bundle's SHA-256 must equal bundle.sha256 in the approval
+# 2. Verify before extracting: the bundle's SHA-256 must equal bundle.sha256 in the approval.
+#    Steps 3 to 5 sit inside this one `if ... fi`: on a mismatch none of them runs, and your shell stays open
 want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
-[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract (the next step will not run)"
+if [ -z "$want" ] || [ "$want" != "$have" ]; then
+  echo "HASH MISMATCH (or a failed download): nothing was extracted and no later step ran; download again (user guide section 4.3)"; false
 
 # 3. Extract into a new directory
-[ "$want" = "$have" ] && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
-  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+elif echo BUNDLE_OK && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
+  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"; then
 
 # 4. Fetch the engine binaries the approval names (the bundle ships without bin/), check each one's
 #    SHA-256 against the approval, and install it at its path with mode 0755
@@ -152,6 +154,10 @@ done
 ./launch.sh print-command                     # the exact command, including the profile's port
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the pinned model
 ./launch.sh --yes start                       # foreground; verified READY before serving
+
+else
+  echo "EXTRACT FAILED: no later step ran"; false
+fi   # closes the `if` opened in step 2
 ```
 
 If `install-deps` or `doctor` exits 20 on the NVIDIA driver packages, the host's packages have moved

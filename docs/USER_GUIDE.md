@@ -76,9 +76,10 @@ gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
 APPROVAL=$(ls "$DL"/*-approval.json); BUNDLE=$(ls "$DL"/*-bundle.tar.gz)   # exactly one of each
 want=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$APPROVAL")
 have=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
-[ "$want" = "$have" ] && echo BUNDLE_OK || echo "HASH MISMATCH: do not extract (the next step will not run)"   # section 4.3
-[ "$want" = "$have" ] && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
-  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"
+if [ -z "$want" ] || [ "$want" != "$have" ]; then   # everything down to `fi` runs only when the hashes match
+  echo "HASH MISMATCH (or a failed download): nothing was extracted and no later step ran; download again (section 4.3)"; false
+elif echo BUNDLE_OK && mkdir -p "$HOME/rexl3/$TAG/$RUNTIME_ID" && tar -xzf "$BUNDLE" -C "$HOME/rexl3/$TAG/$RUNTIME_ID" \
+  && cd "$HOME/rexl3/$TAG/$RUNTIME_ID"; then
 python3 -c 'import json,sys
 for p,i in (json.load(open(sys.argv[1])).get("engine_binaries") or {}).items(): print(i["asset"], i["sha256"], p)' "$APPROVAL" |
 while read -r asset sha path; do                # the engine binaries the approval names (section 4.4)
@@ -93,6 +94,10 @@ done
 ./launch.sh print-command               # what will run, including the profile's --port
 ./launch.sh --yes setup --accept-model-download   # downloads and verifies the model
 ./launch.sh --yes start                 # foreground; leave this terminal open
+
+else
+  echo "EXTRACT FAILED: no later step ran"; false
+fi   # closes the `if` above
 ```
 
 In a second terminal:

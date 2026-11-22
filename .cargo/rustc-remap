@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Cargo's rustc wrapper for this repository (config.toml beside this file, build.rustc-wrapper).
+
+It runs the compiler it is given with the checkout's path and Cargo's home replaced by fixed names.
+
+rustc writes source paths into a binary: panic locations, and the debug information the release profile keeps
+(debug = 1). With the real paths, the same commit built in two directories, or by two users, gives two different
+files. With these mappings it gives one, which is what lets every node build its own release binaries and still agree
+on their sha256 (docs/REPRODUCIBLE_BUILDS.md). The mappings change names only, never code.
+
+Why Python and not a shell script: Cargo hands rustc environment variables whose names are not shell identifiers
+(CARGO_BIN_EXE_rexl3-serve, for a test that runs a binary), and dash, which is /bin/sh on Ubuntu, drops those. This
+process replaces itself with rustc and passes the environment through untouched.
+
+Usage (by Cargo): rustc-remap <rustc> <rustc arguments...>
+"""
+import os
+import sys
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: rustc-remap <rustc> <rustc arguments...>\n")
+        return 2
+    # The checkout as it was reached and as it is on disk (the two differ behind a symbolic link).
+    logical = os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0])))
+    cargo_home = os.environ.get("CARGO_HOME") or os.path.join(os.path.expanduser("~"), ".cargo")
+    remaps = []
+    for path, name in ((logical, "/rexl3"), (cargo_home, "/cargo")):
+        for variant in (path, os.path.realpath(path)):
+            flag = "--remap-path-prefix=%s=%s" % (variant, name)
+            if flag not in remaps:
+                remaps.append(flag)
+    os.execvp(sys.argv[1], sys.argv[1:] + remaps)
+    return 1  # not reached: execvp replaces this process or raises
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -11,6 +11,7 @@
 //! is deterministic for an image whatever else the process does; it is not part of the serial-equals-drafted contract (`docs/CUDA_BACKEND.md`).
 
 use super::config::{GlmConfig, GlmVisionConfig, VisionTowerFormat};
+use super::lend::{self, Party, Placement, ScratchLease};
 use super::load::{allocate, LoadOptions, Regions};
 use super::plan::{LoadPlan, RegionKind};
 use super::weights::{align_up, GlmVisionWeights, PlainLinear, PlainTensor, VisionLinear, VisionQkv};
@@ -22,6 +23,7 @@ use gb_cuda::loader::Options as LoaderOptions;
 use gb_cuda::{DevBuf, Stream};
 use gb_exl3::loadstats::Component;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const DEPTH: usize = 24;
 pub const HIDDEN: usize = 1024;
@@ -633,11 +635,14 @@ pub struct TowerOptions {
     pub loader: LoaderOptions,
     /// Debug (the tests): a deliberate bug. Never set in serving.
     pub mutant: Option<Mutant>,
+    /// Borrow the [`lend::LENT_ITEMS`] of the scratch from a language model's prefill scratch (`lend.rs`, rank 0 of a group under
+    /// `REXL3_GLM_TOWER_LEND`): placed by [`lend::place`], what does not fit allocated as before. `None`: the tower's own scratch.
+    pub lend: Option<Arc<ScratchLease>>,
 }
 
 impl TowerOptions {
     pub fn new(max_patches: usize, floor_bytes: u64) -> Self {
-        Self { max_patches, floor_bytes, loader: LoadOptions::from_env(floor_bytes).loader, mutant: None }
+        Self { max_patches, floor_bytes, loader: LoadOptions::from_env(floor_bytes).loader, mutant: None, lend: None }
     }
 }
 
@@ -672,6 +677,11 @@ pub struct GlmVisionTower {
     pub teacher: Option<Teacher>,
     /// Seconds of the last `load` (allocate, read and convert, prepare, scratch).
     pub boot: BootTimes,
+    /// The lease over the lent part of the scratch ([`TowerOptions::lend`]) and where each lent item is.
+    lease: Option<Arc<ScratchLease>>,
+    placement: Placement,
+    /// Debug (the tests): encode on the lent bytes WITHOUT the lease (the bug the lease prevents). Never set in serving.
+    pub unleased: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -729,18 +739,44 @@ impl GlmVisionTower {
         let format = weights.format;
         let items = scratch_items(o.max_patches, format);
         let sz = |name: &str| items.iter().find(|i| i.0 == name).map_or(0, |i| i.1 as usize);
+        let placement = o.lend.as_ref().map(|l| lend::place(&items, &l.region_bytes())).unwrap_or_default();
+        // a lent item is a view of the lender's bytes (block-backed, like the tower's own `block_buf`s); any other is allocated as before
+        let lent = |name: &str| -> Result<Option<DevBuf>, ModelError> {
+            match (placement.get(name), o.lend.as_ref()) {
+                (Some(p), Some(l)) => l.view(p).map(Some),
+                _ => Ok(None),
+            }
+        };
         let mut s = Scratch {
             xin: DevBuf::zeroed(sz("patches"))?,
-            x: DevBuf::alloc(sz("residual"))?,
+            x: match lent("residual")? {
+                Some(v) => v,
+                None => DevBuf::alloc(sz("residual"))?,
+            },
             // block-backed (one cudaMalloc each, as before), so the EXL3 tower's staged GEMMs can take views of their rows and columns
-            h: block_buf(sz("normed"))?,
-            qkv: block_buf(sz("qkv"))?,
-            att: block_buf(sz("attention"))?,
-            tmp: block_buf(sz("sublayer"))?,
+            h: match lent("normed")? {
+                Some(v) => v,
+                None => block_buf(sz("normed"))?,
+            },
+            qkv: match lent("qkv")? {
+                Some(v) => v,
+                None => block_buf(sz("qkv"))?,
+            },
+            att: match lent("attention")? {
+                Some(v) => v,
+                None => block_buf(sz("attention"))?,
+            },
+            tmp: match lent("sublayer")? {
+                Some(v) => v,
+                None => block_buf(sz("sublayer"))?,
+            },
             // a view of a block of its own: the second GEMM of gate | up and of the merger write at an offset into it (`subview`)
-            gu: {
-                let b = std::sync::Arc::new(gb_cuda::rt::Block::alloc(sz("gate_up"))?);
-                DevBuf::view(&b, 0, sz("gate_up"))
+            gu: match lent("gate_up")? {
+                Some(v) => v,
+                None => {
+                    let b = std::sync::Arc::new(gb_cuda::rt::Block::alloc(sz("gate_up"))?);
+                    DevBuf::view(&b, 0, sz("gate_up"))
+                }
             },
             inv_freq: DevBuf::alloc(sz("inv_freq"))?,
             counter,
@@ -768,7 +804,33 @@ impl GlmVisionTower {
             mutant: o.mutant,
             teacher: None,
             boot: BootTimes { prepare_s, scratch_s, ..Default::default() },
+            lease: o.lend.clone(),
+            placement,
+            unleased: false,
         })
+    }
+
+    /// Where the lent items of the scratch are ([`TowerOptions::lend`]; empty: the tower's own scratch).
+    pub fn placement(&self) -> &Placement {
+        &self.placement
+    }
+
+    /// Bytes of the scratch that are lent (not the tower's allocations).
+    pub fn lent_scratch_bytes(&self) -> u64 {
+        self.placement.lent_bytes()
+    }
+
+    /// Bytes of the scratch the tower allocated itself.
+    pub fn own_scratch_bytes(&self) -> u64 {
+        self.scratch_bytes() - self.lent_scratch_bytes()
+    }
+
+    /// The buffers of the scratch that are lent, by item name.
+    fn lent_buffers(&mut self) -> Vec<&mut DevBuf> {
+        let Scratch { x, h, qkv, att, tmp, gu, .. } = &mut self.s;
+        let all: [(&str, &mut DevBuf); 6] =
+            [("residual", x), ("normed", h), ("qkv", qkv), ("attention", att), ("sublayer", tmp), ("gate_up", gu)];
+        all.into_iter().filter(|(n, _)| self.placement.get(n).is_some()).map(|(_, b)| b).collect()
     }
 
     /// Bytes of the weights on the device (the region, padding included).
@@ -851,6 +913,36 @@ impl GlmVisionTower {
         if out.bytes() < tokens * OUT_HIDDEN * 4 {
             return Err(ModelError::Request("output buffer too small for the image's features".into()));
         }
+        // the patches into the GEMM's padded rows: the tower's own buffer, before the lease (the lease's holder never waits on a copy)
+        gv::upload_rows(&mut self.s.xin, PATCH_KP * 2, patches, PATCH_K * 2, PATCH_K * 2, p, st)?;
+        // every stage after it reads or writes the lent bytes: under the lease, which orders `st` after the model's last prompt chunk
+        let held = match (&self.lease, self.unleased) {
+            (Some(l), false) => Some(l.acquire(Party::Tower, st)?),
+            _ => None,
+        };
+        let r = self.encode_stages(p, gw, tokens, out, st, obs);
+        // the lent bytes go back zeroed, as the model's boot left them (queued before the release, so the model's next chunk orders after it)
+        let z = self.lent_buffers().into_iter().try_for_each(|b| b.memset_async(0, st)).map_err(ModelError::from);
+        let rel = match held {
+            Some(h) => h.release(st),
+            None => Ok(()),
+        };
+        r?;
+        z?;
+        rel
+    }
+
+    /// The tower's stages after the patch upload ([`GlmVisionTower::encode_observed`]).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_stages(
+        &mut self,
+        p: usize,
+        gw: usize,
+        tokens: usize,
+        out: &mut DevBuf,
+        st: &Stream,
+        obs: &mut dyn FnMut(&str, &DevBuf, &Stream),
+    ) -> Result<(), ModelError> {
         let m = self.mutant;
         let qkv_flags = match m {
             Some(Mutant::RopeAxisSwap) => gv::qkv::SWAP_AXES,
@@ -873,8 +965,6 @@ impl GlmVisionTower {
 
         let Self { w, s, teacher, .. } = self;
         let Scratch { xin, x, h, qkv, att, tmp, gu, inv_freq, ws, ex, .. } = s;
-        // the patches into the GEMM's padded rows
-        gv::upload_rows(xin, PATCH_KP * 2, patches, PATCH_K * 2, PATCH_K * 2, p, st)?;
         // patch embedding: fp16 GEMM into fp32, the fp16 bias added in fp32 (the fork's `hgemm` into a float tensor, then `y += bias`)
         gv::gemm(xin, PATCH_KP, &w.patch_w, x, HIDDEN, p, PATCH_KP, HIDDEN, true, ws, st)?;
         if m != Some(Mutant::NoPatchBias) {

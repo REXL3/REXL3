@@ -4,6 +4,7 @@
 use crate::schema::{Cluster, Node};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,69 @@ pub fn describe(options: &[String], node: &Node, what: &str, script: &str) -> St
     s
 }
 
+struct OutputReader {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl OutputReader {
+    fn spawn<R: Read + Send + 'static>(mut input: R) -> Self {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::clone(&bytes);
+        let (tx, done) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match input.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => shared.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = tx.send(());
+        });
+        Self { bytes, done, thread: Some(thread) }
+    }
+
+    fn finish(mut self, timeout: Option<Duration>) -> Vec<u8> {
+        match timeout {
+            Some(t) => {
+                let _ = self.done.recv_timeout(t);
+                // Dropping a still-blocked reader detaches it; its shared bytes remain available to this error path.
+                self.thread.take();
+            }
+            None => {
+                let _ = self.done.recv();
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        let bytes = self.bytes.lock().unwrap_or_else(|p| p.into_inner());
+        bytes.clone()
+    }
+}
+
+fn timeout_error(words: &[String], node: &Node, timeout: Duration, stdout: &[u8], stderr: &[u8]) -> String {
+    fn tail(bytes: &[u8]) -> String {
+        const LIMIT: usize = 8192;
+        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(LIMIT)..]).trim_end().to_string()
+    }
+    let mut e = format!("`{}` did not finish within {timeout:?} (node {})", words.join(" "), node.name);
+    let stdout = tail(stdout);
+    let stderr = tail(stderr);
+    if !stdout.is_empty() {
+        e.push_str(&format!("; stdout tail: {stdout}"));
+    }
+    if !stderr.is_empty() {
+        e.push_str(&format!("; stderr tail: {stderr}"));
+    }
+    if stdout.is_empty() && stderr.is_empty() {
+        e.push_str("; no output before timeout");
+    }
+    e
+}
+
 impl Transport for SshTransport {
     fn run(&self, node: &Node, script: &str, timeout: Duration) -> Result<Exec, String> {
         let w = session_words(&self.ssh_options, node);
@@ -70,18 +134,10 @@ impl Transport for SshTransport {
         let feeder = std::thread::spawn(move || {
             let _ = stdin.write_all(script.as_bytes());
         });
-        let mut out = child.stdout.take().ok_or("no stdout")?;
-        let mut err = child.stderr.take().ok_or("no stderr")?;
-        let t_out = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = out.read_to_end(&mut b);
-            b
-        });
-        let t_err = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = err.read_to_end(&mut b);
-            b
-        });
+        let out = child.stdout.take().ok_or("no stdout")?;
+        let err = child.stderr.take().ok_or("no stderr")?;
+        let t_out = OutputReader::spawn(out);
+        let t_err = OutputReader::spawn(err);
         let deadline = Instant::now() + timeout;
         let status = loop {
             match child.try_wait() {
@@ -90,7 +146,12 @@ impl Transport for SshTransport {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(format!("`{}` did not finish within {timeout:?} (node {})", w.join(" "), node.name));
+                        let _ = feeder.join();
+                        // Normally killing the direct child closes both pipes. A descendant or a persistent SSH master can keep
+                        // them open, so bound the joins and retain the bytes read so far instead of blocking the timeout forever.
+                        let stdout = t_out.finish(Some(Duration::from_millis(250)));
+                        let stderr = t_err.finish(Some(Duration::from_millis(250)));
+                        return Err(timeout_error(&w, node, timeout, &stdout, &stderr));
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -98,8 +159,8 @@ impl Transport for SshTransport {
             }
         };
         let _ = feeder.join();
-        let stdout = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).into_owned();
-        let stderr = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).into_owned();
+        let stdout = String::from_utf8_lossy(&t_out.finish(None)).into_owned();
+        let stderr = String::from_utf8_lossy(&t_err.finish(None)).into_owned();
         Ok(Exec { status: status.code().unwrap_or(-1), stdout, stderr })
     }
 }
@@ -145,6 +206,17 @@ mod tests {
     fn a_session_that_does_not_finish_is_killed() {
         let t = SshTransport { ssh_options: vec![] };
         let e = t.run(&node(true), "sleep 30\n", Duration::from_millis(300)).unwrap_err();
+        assert!(e.contains("did not finish") && e.contains("no output"), "{e}");
+    }
+
+    #[test]
+    fn a_timeout_keeps_partial_stdout_and_stderr() {
+        let t = SshTransport { ssh_options: vec![] };
+        let e = t
+            .run(&node(true), "echo remote-progress\necho remote-diagnostic >&2\nsleep 30\n", Duration::from_millis(300))
+            .unwrap_err();
         assert!(e.contains("did not finish"), "{e}");
+        assert!(e.contains("stdout tail: remote-progress"), "{e}");
+        assert!(e.contains("stderr tail: remote-diagnostic"), "{e}");
     }
 }

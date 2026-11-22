@@ -1,14 +1,12 @@
 //! Startup checks of what a pack's configuration says against what the kernels were compiled for (release plan R11, R13).
 //!
-//! The attention, GDN and draft kernels are built for one set of shapes (24 query heads, 4 KV heads of 256, 48 value heads of 128, a
-//! draft of 5 layers over 5,120 channels, and so on). A pack whose `config.json` says something else would pass the loader, which
-//! only checks tensor shapes against these same constants, and then read or write device memory out of bounds or compute with the
-//! wrong geometry. Everything here fails at startup, before any weight is read, with a message that names the field, what the pack
-//! has and what the kernels were built for.
+//! The config selects among the attention and GDN kernels compiled into the engine (including 24/4 and 16/4 attention and 48- or
+//! 32-value-head GDN). DFlash2 keeps its fixed layer/head geometry while its target width, FFN width, vocabulary and tap indices come
+//! from the draft config. Anything without a compiled implementation fails at startup, before weights are read, with the offending
+//! field and geometry named.
 
 use crate::config::QwenConfig;
 use crate::error::ModelError;
-use gb_cuda::glue::AttnPrepCfg;
 use serde_json::Value;
 use std::path::Path;
 
@@ -34,28 +32,46 @@ impl Mismatches {
     }
 }
 
-/// The target's attention and GDN geometry against the kernels (`gb_cuda::attention`, `gb_cuda::gdn`, `AttnPrepCfg::QWEN_TARGET`), and
-/// the layer indices the draft reads its context from against the number of layers.
+/// Select the target's attention and GDN kernels from its config, and reject dimensions the shared glue kernels do not implement.
+/// Qwen3.8-27B therefore selects its original Q24/Kv4 and Hv48 kernels; another supported geometry needs no source edit.
 pub fn check_target(c: &QwenConfig) -> Result<(), String> {
-    use gb_cuda::{attention as a, gdn};
-    let q = AttnPrepCfg::QWEN_TARGET;
-    let mut m = Mismatches::default();
-    m.eq("num_attention_heads", c.heads, a::N_Q_HEADS);
-    m.eq("num_key_value_heads", c.kv_heads, a::N_KV_HEADS);
-    m.eq("head_dim", c.head_dim, a::HEAD_DIM);
-    m.eq("rotary dim (head_dim x partial_rotary_factor)", c.rotary_dim, q.rotary_dim);
-    m.eq("rope_theta", c.rope_theta as f32, q.theta);
-    m.eq("rms_norm_eps", c.rms_eps as f32, q.eps);
-    m.eq("linear_num_key_heads", c.lin_key_heads, gdn::KEY_HEADS);
-    m.eq("linear_num_value_heads", c.lin_value_heads, gdn::VALUE_HEADS);
-    m.eq("linear_key_head_dim", c.lin_key_dim, gdn::HEAD_DIM);
-    m.eq("linear_value_head_dim", c.lin_value_dim, gdn::HEAD_DIM);
-    m.eq("linear_conv_kernel_dim", c.conv_kernel, gdn::CONV_TAPS);
-    m.eq("conv channels (2 x key heads x key dim + value heads x value dim)", c.conv_channels(), gdn::CONV_DIM);
-    if let Some(&l) = crate::forward::TAP_LAYERS.iter().find(|&&l| l >= c.layers.len()) {
-        m.0.push(format!("the draft reads layer {l}, the model has {} layers", c.layers.len()));
+    c.attn_shape()?;
+    c.gdn_shape()?;
+    if c.head_dim != gb_cuda::attention::HEAD_DIM {
+        return Err(format!(
+            "unsupported attention geometry: head_dim is {}, the compiled Qwen attention kernels require {}",
+            c.head_dim,
+            gb_cuda::attention::HEAD_DIM
+        ));
     }
-    m.finish("the target model's config.json")
+    if c.conv_kernel != gb_cuda::gdn::CONV_TAPS {
+        return Err(format!(
+            "unsupported GDN geometry: linear_conv_kernel_dim is {}, the compiled Qwen GDN kernels require {}",
+            c.conv_kernel,
+            gb_cuda::gdn::CONV_TAPS
+        ));
+    }
+    if !matches!(c.rotary_dim, 0 | 64 | 128 | 256) || c.rotary_dim > c.head_dim {
+        return Err(format!(
+            "unsupported attention RoPE geometry: rotary dim {} (head_dim x partial_rotary_factor) is not one of 0, 64, 128, 256 within head_dim {}",
+            c.rotary_dim, c.head_dim
+        ));
+    }
+    if c.has_vision {
+        if c.rotary_dim != 64 {
+            return Err(format!(
+                "unsupported vision M-RoPE geometry: rope_parameters rotary dim is {}, the vision kernels require 64",
+                c.rotary_dim
+            ));
+        }
+        if c.mrope_section != Some([11, 11, 10]) {
+            return Err(format!(
+                "unsupported vision M-RoPE geometry: rope_parameters.mrope_section is {:?}, the vision kernels require [11, 11, 10]",
+                c.mrope_section
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The DFlash2 draft's `config.json`, the fields the kernels depend on.
@@ -79,6 +95,7 @@ pub struct DraftConfig {
     pub selector_rank: usize,
     pub selector_top_k: usize,
     pub target_layer_ids: Vec<usize>,
+    pub config_causal: bool,
 }
 
 impl DraftConfig {
@@ -126,21 +143,61 @@ impl DraftConfig {
             selector_rank: uz(d, "selector_rank")?,
             selector_top_k: uz(d, "selector_top_k")?,
             target_layer_ids: ids,
+            config_causal: root
+                .get("is_causal")
+                .and_then(|x| x.as_bool())
+                .ok_or("the draft's config.json: missing or invalid `is_causal`")?,
         })
+    }
+
+    /// The validated draft geometry. Target hidden width, vocabulary, FFN width, mask token and tap indices all come from this file.
+    pub fn geometry(&self) -> Result<crate::draft::DraftGeom, String> {
+        let tap_layers: [usize; crate::draft::TAPS] = self.target_layer_ids.clone().try_into().map_err(|ids: Vec<usize>| {
+            format!(
+                "the draft's config.json: dflash_config.target_layer_ids has {} entries, the DFlash2 fc takes {}",
+                ids.len(),
+                crate::draft::TAPS
+            )
+        })?;
+        let geom = crate::draft::DraftGeom {
+            name: "qwen-config",
+            vocab: self.vocab,
+            tap_layers,
+            config_causal: self.config_causal,
+            hidden: self.hidden,
+            intermediate: self.intermediate,
+            mask_token: self.mask_token as i32,
+            eps: self.rms_eps as f32,
+            rope_theta: self.rope_theta,
+            block_causal: true,
+        };
+        for known in crate::draft::DraftGeom::KNOWN {
+            let mut candidate = geom;
+            candidate.name = known.name;
+            candidate.block_causal = known.block_causal;
+            if candidate == *known {
+                return Ok(*known);
+            }
+        }
+        // An unknown draft has no published exception to the causal engine mask.
+        if geom.config_causal != geom.block_causal {
+            return Err(format!(
+                "the draft's config.json: is_causal is {}, but the generic DFlash2 engine mask is causal; only a matched DraftGeom::KNOWN geometry may override it",
+                geom.config_causal
+            ));
+        }
+        Ok(geom)
     }
 
     /// The draft against the kernels and against the target it drafts for.
     pub fn check(&self, target: &QwenConfig) -> Result<(), String> {
         use crate::draft as d;
+        let geom = self.geometry()?;
         let mut m = Mismatches::default();
-        m.eq("hidden_size", self.hidden, d::HIDDEN);
         m.eq("num_hidden_layers", self.layers, d::LAYERS);
         m.eq("num_attention_heads", self.heads, d::Q_HEADS);
         m.eq("num_key_value_heads", self.kv_heads, d::KV_HEADS);
         m.eq("head_dim", self.head_dim, d::HEAD_DIM);
-        m.eq("intermediate_size", self.intermediate, d::INTERMEDIATE);
-        m.eq("rms_norm_eps", self.rms_eps as f32, d::EPS);
-        m.eq("rope_theta", self.rope_theta, d::ROPE_THETA);
         m.eq("sliding_window", self.sliding_window, gb_cuda::dflash2::DraftCtxLayout::WINDOW);
         // the pack's block is what the checkpoint was TRAINED with (8): the runtime knob `REXL3_DRAFT_BLOCK` (8..=16) runs the
         // block longer, it does not retune the pack, so a pack trained with another block is still a different draft
@@ -152,14 +209,15 @@ impl DraftConfig {
         }
         m.eq("dflash_config.conv_group_size", self.conv_group, d::CONV_GROUP);
         m.eq("dflash_config.conv_kernel_size", self.conv_kernel, 2);
-        m.eq("dflash_config.mask_token_id", self.mask_token, d::MASK_TOKEN as u64);
         m.eq("dflash_config.selector_rank", self.selector_rank, d::SELECTOR_RANK);
         m.eq("dflash_config.selector_top_k", self.selector_top_k, d::SELECTOR_TOP_K);
-        if self.target_layer_ids != crate::forward::TAP_LAYERS {
+        if let Some(&l) = geom.tap_layers.iter().find(|&&l| l >= target.layers.len()) {
+            m.0.push(format!("dflash_config.target_layer_ids contains layer {l}, the target has {} layers", target.layers.len()));
+        }
+        if geom.tap_layers.windows(2).any(|w| w[0] >= w[1]) {
             m.0.push(format!(
-                "dflash_config.target_layer_ids is {:?}, the engine taps layers {:?}",
-                self.target_layer_ids,
-                crate::forward::TAP_LAYERS
+                "dflash_config.target_layer_ids {:?} must be strictly increasing with no duplicates",
+                geom.tap_layers
             ));
         }
         // the draft must belong to this target
@@ -176,20 +234,28 @@ impl DraftConfig {
                 target.layers.len()
             ));
         }
-        if d::MASK_TOKEN as usize >= target.vocab {
-            m.0.push(format!("the mask token {} is outside the target's vocabulary of {}", d::MASK_TOKEN, target.vocab));
+        if self.mask_token > i32::MAX as u64 {
+            m.0.push(format!("dflash_config.mask_token_id {} exceeds the kernel's signed 32-bit token id", self.mask_token));
+        } else if self.mask_token as usize >= target.vocab {
+            m.0.push(format!("the mask token {} is outside the target's vocabulary of {}", self.mask_token, target.vocab));
         }
         m.finish("the draft's config.json")
     }
 }
 
-/// Read `dir/config.json` of a draft pack and check it (see [`DraftConfig::check`]). A missing or unreadable config is an error: the
-/// draft's shapes are compiled in, so the pack has to say they are the ones it was trained with.
-pub fn check_draft_dir(dir: &Path, target: &QwenConfig) -> Result<(), ModelError> {
+/// Read and validate `dir/config.json`, returning the draft geometry the loader and target forward must use.
+pub fn read_draft_dir(dir: &Path, target: &QwenConfig) -> Result<DraftConfig, ModelError> {
     let path = dir.join("config.json");
     let text = std::fs::read_to_string(&path).map_err(|e| ModelError::Config(format!("{}: {e}", path.display())))?;
     let root: Value = serde_json::from_str(&text).map_err(|e| ModelError::Config(format!("{}: {e}", path.display())))?;
-    DraftConfig::from_json(&root).and_then(|d| d.check(target)).map_err(ModelError::Config)
+    let draft = DraftConfig::from_json(&root).map_err(ModelError::Config)?;
+    draft.check(target).map_err(ModelError::Config)?;
+    Ok(draft)
+}
+
+/// Compatibility helper for callers that only need validation.
+pub fn check_draft_dir(dir: &Path, target: &QwenConfig) -> Result<(), ModelError> {
+    read_draft_dir(dir, target).map(|_| ())
 }
 
 /// The driver must report CUDA 13.0 or newer. A missing driver is its own message.
@@ -230,60 +296,81 @@ mod tests {
     }
 
     #[test]
-    fn a_target_with_other_attention_or_gdn_shapes_is_refused_by_field() {
-        // each of these used to pass startup and index out of bounds on the device
+    fn qwen38_draft_keeps_its_known_geometry_and_unknown_masks_fail_closed() {
+        let draft = DraftConfig::from_json(&draft_json()).unwrap();
+        assert_eq!(draft.geometry().unwrap(), crate::draft::DraftGeom::QWEN38);
+        assert_eq!(draft.geometry().unwrap().name, "qwen38");
+
+        let mut unknown = draft_json();
+        unknown["hidden_size"] = json!(4096);
+        let e = DraftConfig::from_json(&unknown).unwrap().geometry().unwrap_err();
+        assert!(e.contains("is_causal") && e.contains("engine mask"), "{e}");
+    }
+
+    #[test]
+    fn vision_mrope_must_match_the_compiled_sections() {
+        let mut root: Value = serde_json::from_str(include_str!("../../../testdata/qwen38/config.json")).unwrap();
+        root["text_config"]["rope_parameters"]["partial_rotary_factor"] = json!(0.5);
+        let e = check_target(&QwenConfig::from_json(&root).unwrap()).unwrap_err();
+        assert!(e.contains("vision M-RoPE") && e.contains("rotary dim is 128"), "{e}");
+
+        let mut root: Value = serde_json::from_str(include_str!("../../../testdata/qwen38/config.json")).unwrap();
+        root["text_config"]["rope_parameters"]["mrope_section"] = json!([11, 10, 11]);
+        let e = check_target(&QwenConfig::from_json(&root).unwrap()).unwrap_err();
+        assert!(e.contains("vision M-RoPE") && e.contains("mrope_section") && e.contains("[11, 11, 10]"), "{e}");
+    }
+
+    #[test]
+    fn unsupported_target_geometries_are_refused_by_field() {
         for (field, value, needle) in [
-            ("num_attention_heads", json!(32), "num_attention_heads is 32, the kernels are built for 24"),
-            ("num_key_value_heads", json!(8), "num_key_value_heads is 8, the kernels are built for 4"),
-            ("head_dim", json!(128), "head_dim is 128, the kernels are built for 256"),
-            ("linear_num_key_heads", json!(8), "linear_num_key_heads is 8, the kernels are built for 16"),
-            ("linear_num_value_heads", json!(32), "linear_num_value_heads is 32, the kernels are built for 48"),
-            ("linear_key_head_dim", json!(64), "linear_key_head_dim is 64, the kernels are built for 128"),
-            ("linear_conv_kernel_dim", json!(5), "linear_conv_kernel_dim is 5, the kernels are built for 4"),
-            ("rms_norm_eps", json!(1e-5), "rms_norm_eps"),
+            ("num_attention_heads", json!(32), "unsupported attention geometry"),
+            ("num_key_value_heads", json!(8), "num_key_value_heads=8"),
+            ("head_dim", json!(128), "head_dim is 128"),
+            ("linear_num_key_heads", json!(8), "unsupported GDN geometry"),
+            ("linear_key_head_dim", json!(64), "linear_key_head_dim=64"),
+            ("linear_conv_kernel_dim", json!(5), "linear_conv_kernel_dim is 5"),
         ] {
             let mut root: Value = serde_json::from_str(include_str!("../../../testdata/qwen38/config.json")).unwrap();
-            let t = if root.get("text_config").is_some() { &mut root["text_config"] } else { &mut root };
-            t[field] = value;
+            root["text_config"][field] = value;
             let cfg = QwenConfig::from_json(&root).unwrap_or_else(|e| panic!("{field}: the parser refuses it first: {e}"));
             let e = check_target(&cfg).unwrap_err();
             assert!(e.contains(needle), "{field}: {e}");
-            assert!(e.contains("does not match the compiled kernels"), "{e}");
         }
-        // several mismatches are reported together
+        // A supported non-27B shape is selected, not rejected as a mismatch with 27B.
         let mut root: Value = serde_json::from_str(include_str!("../../../testdata/qwen38/config.json")).unwrap();
-        let t = if root.get("text_config").is_some() { &mut root["text_config"] } else { &mut root };
-        t["head_dim"] = json!(128);
-        t["num_key_value_heads"] = json!(8);
-        let e = check_target(&QwenConfig::from_json(&root).unwrap()).unwrap_err();
-        assert!(e.contains("head_dim") && e.contains("num_key_value_heads"), "{e}");
+        root["text_config"]["num_attention_heads"] = json!(16);
+        root["text_config"]["linear_num_value_heads"] = json!(32);
+        let cfg = QwenConfig::from_json(&root).unwrap();
+        check_target(&cfg).unwrap();
+        assert_eq!(cfg.attn_shape().unwrap(), gb_cuda::attention::AttnShape::Q16Kv4);
+        assert_eq!(cfg.gdn_shape().unwrap(), gb_cuda::gdn::GdnShape::Hv32);
     }
 
     #[test]
     fn a_draft_with_other_shapes_or_for_another_target_is_refused_by_field() {
         for (path, value, needle) in [
-            ("hidden_size", json!(4096), "hidden_size is 4096, the kernels are built for 5120"),
+            ("hidden_size", json!(4096), "hidden_size 4096 differs from the target's 5120"),
             ("num_hidden_layers", json!(4), "num_hidden_layers is 4, the kernels are built for 5"),
             ("num_attention_heads", json!(16), "num_attention_heads is 16"),
             ("head_dim", json!(64), "head_dim is 64"),
-            ("intermediate_size", json!(8192), "intermediate_size is 8192"),
             ("sliding_window", json!(1024), "sliding_window is 1024"),
             ("vocab_size", json!(150000), "vocab_size 150000 differs from the target's 248320"),
             ("num_target_layers", json!(48), "num_target_layers 48 differs"),
         ] {
             let mut j = draft_json();
+            j["is_causal"] = json!(true);
             j[path] = value;
             let e = DraftConfig::from_json(&j).unwrap().check(&target()).unwrap_err();
             assert!(e.contains(needle), "{path}: {e}");
         }
         for (path, value, needle) in [
             ("block_size", json!(16), "block_size is 16, the draft was trained with a block of 8"),
-            ("mask_token_id", json!(1), "mask_token_id is 1"),
             ("selector_rank", json!(128), "selector_rank is 128"),
             ("conv_kernel_size", json!(3), "conv_kernel_size is 3"),
-            ("target_layer_ids", json!([4, 19, 33, 47, 61]), "target_layer_ids is [4, 19, 33, 47, 61]"),
+            ("target_layer_ids", json!([4, 19, 33, 47, 64]), "target_layer_ids contains layer 64"),
         ] {
             let mut j = draft_json();
+            j["is_causal"] = json!(true);
             j["dflash_config"][path] = value;
             let e = DraftConfig::from_json(&j).unwrap().check(&target()).unwrap_err();
             assert!(e.contains(needle), "{path}: {e}");

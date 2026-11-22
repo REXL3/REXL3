@@ -489,6 +489,27 @@ impl PrefixIndex {
         out
     }
 
+    /// Make `need` pages free given that the backend reports `free_now` free: evicts LRU entries until it is so, or until only pinned ones
+    /// are left. Returns the handles to release. A page becomes free when the last entry holding it is gone (`page_refs` drops it); an
+    /// entry that only shared pages frees none. (`pages_held() + pending + free_now == limits.page_blocks` is the engine's accounting; this
+    /// only says how many to drop.)
+    pub fn evict_for_pages(&mut self, need: usize, free_now: usize) -> Vec<PrefixHandle> {
+        let mut out = Vec::new();
+        let mut free = free_now;
+        while free < need {
+            let before = self.pages_held();
+            match self.evict_lru() {
+                Some(h) => {
+                    self.stats.evicted_for_pages += 1;
+                    out.push(h);
+                    free += before.saturating_sub(self.pages_held());
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
     /// Store a capture of the first `cap.len` tokens of `prompt`. Evicts LRU entries until the pages fit; refuses (handing the capture back)
     /// when the same prefix is already stored or its pages cannot fit.
     pub fn insert(&mut self, path: u32, prompt: Arc<Vec<u32>>, cap: Captured) -> Insert {

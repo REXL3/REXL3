@@ -467,8 +467,8 @@ pub fn select_host_f16(
     (p, w.iter().map(|&v| f64_to_f16(v as f64)).collect())
 }
 
-/// Routed-expert top-p pruning threshold for decode (`rows <= 8`): defaults to `0.85` (overridable via
-/// `REXL3_DSV41_MOE_TOPP`; set `REXL3_DSV41_MOE_TOPP=1.0` to disable). For `rows > 8` (prefill), returns `1.0`.
+/// A runtime knob: the value of `key` in the file `REXL3_DSV41_KNOBS_FILE` names (lines of `KEY=VALUE`), else the
+/// environment variable `key`.
 pub fn runtime_env(key: &str) -> Option<String> {
     static KNOBS_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if let Some(path) = KNOBS_PATH.get_or_init(|| std::env::var("REXL3_DSV41_KNOBS_FILE").ok()) {
@@ -486,6 +486,8 @@ pub fn runtime_env(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
+/// Routed-expert top-p pruning threshold for a step of `rows` rows. The default is `1.0`, which disables the pruning;
+/// `REXL3_DSV41_MOE_TOPP` (a finite value above 0) sets it for steps of at most 16 rows. Above 16 rows it is always `1.0`.
 pub fn moe_top_p(rows: usize) -> f32 {
     if rows > 16 {
         return 1.0;

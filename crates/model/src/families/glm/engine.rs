@@ -141,7 +141,20 @@ fn plan_for_slots(
     };
     // `--prefix-cache pool`: the cache's entries keep the pool's idle pages, so it plans snapshot slots and no pages of its own
     if pool {
-        return plan_memory_pool_cached(profile, free, floor, slots, kv_tokens_cap, features, snapshot_bytes, 0, window_tokens);
+        // `REXL3_GLM_PLAN_PRICE_UNMODELLED=1`: the minimum snapshot slots, none bought from the spare
+        let buy = !memory::price_unmodelled().map_err(|e| PlanError::Memory(gb_sched::MemoryError::Inconsistent(e)))?;
+        return plan_memory_pool_cached(
+            profile,
+            free,
+            floor,
+            slots,
+            kv_tokens_cap,
+            features,
+            snapshot_bytes,
+            0,
+            window_tokens,
+            buy,
+        );
     }
     // the cache is sized from the window, for `auto` and an explicit `--prefix-cache-mib` alike: the pages of one full window before anything else
     // (`docs/PREFIX_CACHE_SIZING.md` section 5)
@@ -207,6 +220,13 @@ pub fn check_prefill_chunk(flag: usize, c: super::contract::PrefillContract) -> 
 pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     gb_engine::boot::checkpoint();
     check_options(o)?;
+    // the tower's scratch lent from the prefill scratch (`lend.rs`) is rank 0 of a group's: one node loads its tower before its model
+    if super::lend::tower_lend()? {
+        return Err(ModelError::Config(format!(
+            "{}=1 lends rank 0's vision tower its scratch in a tensor-parallel group; a single node keeps the tower's own scratch (unset it)",
+            super::lend::TOWER_LEND_ENV
+        )));
+    }
     loadstats::set_component(Component::Scan);
     let cfg = GlmConfig::from_dir(&o.model_dir).map_err(ModelError::Config)?;
     // a DFlash2 draft given with `--draft` is the model drafter (checked against the target before anything is read)
@@ -461,6 +481,18 @@ pub fn build_engine(o: &ServeOptions) -> Result<GlmEngine, ModelError> {
     }
     if plan.cache.enabled() {
         model.enable_prefix_cache(plan.cache.snapshot_slots).map_err(|e| refuse("the prefix cache's snapshot pool", e))?;
+    }
+    // the graph caches' one-slot limits under the opt-in and the pool-page cache (speed only, never a bit)
+    let depth = if model.dflash().is_some() {
+        super::dflash::MAX_DEPTH
+    } else if model.has_mtp() {
+        alloc::MTP_MAX_DEPTH
+    } else {
+        0
+    };
+    let priced = memory::price_unmodelled().map_err(ModelError::Config)?;
+    if let Some(b) = super::model::GraphBudget::for_boot(priced, o.prefix_pool, slots, depth) {
+        model.set_graph_budget(b);
     }
     loadstats::phase_end(ph);
     // the plan the admission was priced with is what was allocated: say so loudly if it is not (a bug in the memory model, never a property of the pack)

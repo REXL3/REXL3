@@ -689,6 +689,114 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// logprob_rows_f32 and topk_f32_raw
+
+struct LogprobOut {
+    norm: Vec<f32>,
+    ids: Vec<i32>,
+    vals: Vec<f32>,
+}
+
+/// The compact readout, including the raw-pointer top-k entry point used by the model's carved output arena.
+fn run_logprob(st: &Stream, logits: &[f32], rows: usize, vocab: usize, k: usize, chosen: &[i32]) -> LogprobOut {
+    assert_eq!((logits.len(), chosen.len()), (rows * vocab, rows));
+    let logits = upload_f32(logits);
+    let chosen = DevBuf::from_slice(chosen).unwrap();
+    let mut norm = DevBuf::zeroed(rows * 2 * 4).unwrap();
+    let mut ids = DevBuf::zeroed(rows * k * 4).unwrap();
+    let mut vals = DevBuf::zeroed(rows * k * 4).unwrap();
+    let wsb = ng::topk_workspace_bytes(rows, vocab, k);
+    let mut ws = DevBuf::zeroed(wsb).unwrap();
+    // SAFETY: every buffer has exactly the shape and alignment required by logprob_rows_f32/topk_f32_raw.
+    unsafe {
+        ng::logprob_rows_f32(logits.ptr(), rows, vocab, k, chosen.ptr(), norm.ptr(), ids.ptr(), vals.ptr(), ws.ptr(), wsb, st)
+            .unwrap();
+    }
+    st.sync().unwrap();
+    LogprobOut { norm: download_f32(&norm, rows * 2), ids: ids.to_vec().unwrap(), vals: vals.to_vec().unwrap() }
+}
+
+/// Independent max-shifted host-f64 log-sum-exp. These tests use finite maxima, with -inf masks in some rows.
+fn host_lse(row: &[f32]) -> f64 {
+    let m = row.iter().fold(f64::NEG_INFINITY, |a, &x| a.max(x as f64));
+    assert!(m.is_finite());
+    m + row.iter().map(|&x| ((x as f64) - m).exp()).sum::<f64>().ln()
+}
+
+#[test]
+#[cfg(not(gb_no_cuda))]
+fn f32_logprob_normalizer_and_raw_topk_match_f64_and_lowest_id_oracles() {
+    gpu!();
+    const VOCAB: usize = 131_072;
+    const ROWS: usize = 64;
+    const K: usize = 20;
+    // The 131k-column f32 tree reduction can differ from a sequential host-f64 sum by a few ulps at LSE ~100.
+    const TOL: f64 = 5e-6;
+
+    let st = Stream::new().unwrap();
+    let mut rng = Rng(0x10ab_cdef);
+    let mut logits = Vec::with_capacity(ROWS * VOCAB);
+    let mut chosen = Vec::with_capacity(ROWS);
+    for r in 0..ROWS {
+        let mut row: Vec<f32> = (0..VOCAB).map(|c| rng.uniform(-20.0, -8.0) + ((c + r) % 17) as f32 * 0.001).collect();
+        // A broad finite range and masked columns exercise both max-shifted summation and -inf handling.
+        for c in (r..VOCAB).step_by(3) {
+            row[c] = f32::NEG_INFINITY;
+        }
+        for (j, c) in [0usize, 1, 63, 1023, 4097, 65_537, VOCAB - 1].into_iter().enumerate() {
+            row[c] = 80.0 - j as f32 * 40.0 - r as f32 * 0.01;
+        }
+        // More tied maxima than k, including ids on opposite sides of the 1024-thread reduction boundary.
+        for c in [7usize, 31, 1024, 2049, 32_769, 65_535, 100_003, VOCAB - 2] {
+            row[c] = 100.0;
+        }
+        // Exact ties below the maximum too: the raw top-k must order every rank by lowest token id.
+        for c in [3usize, 11, 1025, 4099, 70_001, VOCAB - 3] {
+            row[c] = 99.0;
+        }
+        chosen.push(if r == ROWS - 1 { -1 } else { [7, 3, 65_537, VOCAB as i32 - 1][r % 4] });
+        logits.extend(row);
+    }
+
+    let whole = run_logprob(&st, &logits, ROWS, VOCAB, K, &chosen);
+    let mut worst_lse = 0.0f64;
+    let mut worst_logprob = 0.0f64;
+    for r in 0..ROWS {
+        let row = &logits[r * VOCAB..(r + 1) * VOCAB];
+        let lse = host_lse(row);
+        let dl = (whole.norm[2 * r] as f64 - lse).abs();
+        assert!(dl <= TOL, "row {r}: lse differs from host f64 by {dl:e}");
+        worst_lse = worst_lse.max(dl);
+        let want_chosen = if chosen[r] < 0 { f32::NEG_INFINITY } else { row[chosen[r] as usize] };
+        assert_eq!(whole.norm[2 * r + 1].to_bits(), want_chosen.to_bits(), "row {r}: chosen logit");
+        if chosen[r] >= 0 {
+            let dp = ((want_chosen as f64 - whole.norm[2 * r] as f64) - (want_chosen as f64 - lse)).abs();
+            assert!(dp <= TOL, "row {r}: chosen logprob differs from host f64 by {dp:e}");
+            worst_logprob = worst_logprob.max(dp);
+        } else {
+            assert_eq!(want_chosen as f64 - whole.norm[2 * r] as f64, f64::NEG_INFINITY);
+        }
+        let (want_ids, want_vals) = topk_model(row, K);
+        assert_eq!(&whole.ids[r * K..(r + 1) * K], &want_ids, "row {r}: raw top-k lowest-id tie order");
+        assert_eq!(bits(&whole.vals[r * K..(r + 1) * K]), bits(&want_vals), "row {r}: raw top-k values");
+    }
+    assert_eq!(&whole.ids[..14], &[7, 31, 1024, 2049, 32769, 65535, 100003, 131070, 3, 11, 1025, 4099, 70001, 131069]);
+
+    // The same rows must be bit-identical in a seven-row tile and in single-row calls (all batch sizes are <= 64).
+    let seven = run_logprob(&st, &logits[..7 * VOCAB], 7, VOCAB, K, &chosen[..7]);
+    assert_eq!(bits(&seven.norm), bits(&whole.norm[..14]));
+    assert_eq!(seven.ids, whole.ids[..7 * K]);
+    assert_eq!(bits(&seven.vals), bits(&whole.vals[..7 * K]));
+    for r in [0usize, 1, 7, 31, 63] {
+        let one = run_logprob(&st, &logits[r * VOCAB..(r + 1) * VOCAB], 1, VOCAB, K, &chosen[r..r + 1]);
+        assert_eq!(bits(&one.norm), bits(&whole.norm[2 * r..2 * r + 2]), "row {r} alone: norm");
+        assert_eq!(one.ids, whole.ids[r * K..(r + 1) * K], "row {r} alone: ids");
+        assert_eq!(bits(&one.vals), bits(&whole.vals[r * K..(r + 1) * K]), "row {r} alone: values");
+    }
+    eprintln!("nemotron f32 logprob: max |lse-f64|={worst_lse:e}, max |logprob-f64|={worst_logprob:e} (tol {TOL:e})");
+}
+
 #[test]
 fn topk_refuses_what_is_outside_its_contract_and_panics_on_a_short_workspace() {
     gpu!();

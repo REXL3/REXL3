@@ -222,8 +222,8 @@ pub struct ServeOptions {
     /// Serve a target or draft whose fingerprint is not on the validated list ([`crate::fingerprint::validated_pack`]; logged and reported as
     /// unvalidated).
     pub allow_unvalidated_pack: bool,
-    /// A runtime intervention directory (`--intervention DIR`): loaded and validated against the family's plan at
-    /// boot; a mismatch refuses to serve. Load-time only (matching the reference semantics), weights untouched.
+    /// A runtime intervention directory (`--intervention DIR`). Refused at startup while it is set
+    /// ([`INTERVENTION_NOT_APPLIED`]): no forward applies an overlay in this build.
     pub intervention_dir: Option<std::path::PathBuf>,
     /// Read every file the packs' checksums cover and refuse to start if a shard differs (`--verify-pack`; see
     /// [`crate::verify`]). Off by default: it reads the whole pack once (about a second warm).
@@ -326,7 +326,7 @@ impl TpOptions {
         if max_ranks < 2 {
             return Err(format!(
                 "--tp-ranks {}: the {family} family has no tensor-parallel runtime (its cap is {max_ranks} rank; \
-                 nemotron_h_omni and glm5_next have one today)",
+                 nemotron_h_omni, glm5_next and deepseek_v41 have one today)",
                 self.ranks
             ));
         }
@@ -418,7 +418,9 @@ pub fn mem_available() -> Option<u64> {
 
 /// The `MemAvailable` floor a boot keeps: 8 GiB unless `REXL3_MEMORY_FLOOR_GIB` names another (fractions allowed, e.g. `0.5` or
 /// `2.5`). A value that does not parse, or one under 0.25 GiB, is refused loudly rather than silently replaced: the floor is what
-/// keeps the box out of swap and the OOM killer, so a typo must not become "no floor".
+/// keeps the box out of swap and the OOM killer, so a typo must not become "no floor". This is the unified-memory default; a family on
+/// a discrete GPU calls [`floor_bytes_for_device`], which keeps an explicit override and lowers the default to
+/// [`DISCRETE_MEMORY_FLOOR`] (the device has its own VRAM; [ host's `MemAvailable` is not a bound it must keep out of).
 pub fn floor_bytes_from_env() -> u64 {
     const DEFAULT: u64 = 8 << 30;
     let Ok(v) = std::env::var("REXL3_MEMORY_FLOOR_GIB") else {
@@ -431,6 +433,23 @@ pub fn floor_bytes_from_env() -> u64 {
             b
         }
         _ => panic!("REXL3_MEMORY_FLOOR_GIB={v:?}: expected a number of GiB >= 0.25"),
+    }
+}
+
+/// The floor a discrete GPU keeps when `REXL3_MEMORY_FLOOR_GIB` is not set: 0.5 GiB for the driver and the OS, not the 8 GiB that
+/// keeps a unified-memory GB10 out of swap (on a discrete card the host's `MemAvailable` is not the device's memory at all, so the
+/// 8 GiB would cost a small card its whole boot at the new reserve).
+pub const DISCRETE_MEMORY_FLOOR: u64 = 1 << 29;
+
+/// The floor a boot keeps for a device class: an explicit `REXL3_MEMORY_FLOOR_GIB` always wins, on both classes; otherwise a discrete GPU
+/// (`cudaDevAttrIntegrated` == 0) keeps [`DISCRETE_MEMORY_FLOOR`] and a unified-memory device keeps the `8 GiB default ([`floor_bytes_from_env`]).
+pub fn floor_bytes_for_device(floor: u64, integrated: bool) -> u64 {
+    if std::env::var("REXL3_MEMORY_FLOOR_GIB").is_ok() {
+        floor
+    } else if !integrated {
+        DISCRETE_MEMORY_FLOOR
+    } else {
+        floor
     }
 }
 
@@ -454,6 +473,20 @@ pub fn check_options(o: &ServeOptions) -> Result<(), ModelError> {
         )));
     }
     Ok(())
+}
+
+/// What a start with `--intervention` is refused with. The loader validates an overlay and the operator is tested
+/// ([`crate::intervention`]), but no family's forward applies one, so serving with the flag would serve the
+/// unchanged model.
+pub const INTERVENTION_NOT_APPLIED: &str = "--intervention is not applied in this build: no forward pass applies an \
+     overlay yet, so the server refuses to start instead of serving the unchanged model; remove the flag";
+
+/// Refuse an intervention directory before anything is probed or loaded ([`INTERVENTION_NOT_APPLIED`]).
+pub fn refuse_unapplied_intervention(o: &ServeOptions) -> Result<(), ModelError> {
+    match o.intervention_dir {
+        Some(_) => Err(ModelError::Config(INTERVENTION_NOT_APPLIED.into())),
+        None => Ok(()),
+    }
 }
 
 /// What the boot log's `event=unvalidated_pack` line, the boot fact `pack_warning` and `/v1/models` (`pack_warning`) say of a pack
@@ -760,16 +793,9 @@ pub fn start(o: &ServeOptions) -> Result<Box<dyn ServeEngine>, ModelError> {
 
 /// [`start`] against a given registry.
 pub fn start_in(registry: &Registry, o: &ServeOptions) -> Result<Box<dyn ServeEngine>, ModelError> {
+    refuse_unapplied_intervention(o)?;
     check_options(o)?;
     let (family, plan) = registry.probe(&o.model_dir)?;
-    if let Some(dir) = &o.intervention_dir {
-        // fail-closed: an overlay whose layers or tensors do not match this model refuses to serve, naming both sides
-        let iv =
-            crate::intervention::Intervention::load(dir, &plan).map_err(|e| ModelError::Config(format!("intervention: {e}")))?;
-        crate::intervention::ACTIVE
-            .set(iv)
-            .map_err(|_| ModelError::Config("intervention: already loaded (boot twice)".into()))?;
-    }
     let id = plan.family;
     let missing = plan.missing_components();
     refuse_unsupported_window(family, o)?;
@@ -846,7 +872,7 @@ fn refuse_tensor_parallel(family: &dyn crate::family::ModelFamily, o: &ServeOpti
         )));
     }
     tp.validate_for(family.id(), family.max_tp_ranks()).map_err(ModelError::Config)?;
-    if tp.rank != want_rank {
+    if (want_rank == 0) != (tp.rank == 0) {
         return Err(ModelError::Config(if want_rank == 0 {
             format!("--tp-rank {} serves no HTTP front end: it follows rank 0 (serve::start_follower)", tp.rank)
         } else {
@@ -865,6 +891,7 @@ pub fn start_follower(o: &ServeOptions) -> Result<(), ModelError> {
 
 /// [`start_follower`] against a given registry.
 pub fn start_follower_in(registry: &Registry, o: &ServeOptions) -> Result<(), ModelError> {
+    refuse_unapplied_intervention(o)?;
     check_options(o)?;
     let (family, plan) = registry.probe(&o.model_dir)?;
     refuse_tensor_parallel(family, o, 1)?;
@@ -916,18 +943,18 @@ pub fn build_engine(o: &ServeOptions) -> Result<QwenEngine, ModelError> {
     // the family's memory model, validated before a single weight is read: a config that prices a token at zero bytes stops here
     let profile = qwen::memory_profile(&cfg, &memory_options(o, false)).map_err(|e| ModelError::Config(e.to_string()))?;
     let pack = Pack::open(&o.model_dir)?;
+    let mut draft_geom = crate::draft::DraftGeom::QWEN38;
     let dpack = match (o.drafting, &o.draft_dir) {
         (true, Some(dir)) => {
-            // the draft's shapes are compiled in: its config.json must say they are the ones the pack was built with, for this target
-            crate::shapes::check_draft_dir(dir, &cfg)?;
-            // and its pack is a DFlash2 draft of the Qwen3.8 geometry for this target (the one structural check every family asks)
+            let draft_cfg = crate::shapes::read_draft_dir(dir, &cfg)?;
+            draft_geom = draft_cfg.geometry().map_err(ModelError::Config)?;
             let expect = crate::draft::DraftExpect {
                 hidden: cfg.hidden,
                 vocab: cfg.vocab,
-                tap_layers: crate::forward::TAP_LAYERS,
+                tap_layers: draft_geom.tap_layers,
                 target_layers: cfg.layers.len(),
             };
-            match crate::draft::check_draft_pack(dir, &crate::draft::DraftGeom::QWEN38, &expect) {
+            match crate::draft::check_draft_pack(dir, &draft_geom, &expect) {
                 Ok(_) => {}
                 Err(e) if o.allow_unvalidated_pack => eprintln!("rexl3 level=warn event=unvalidated_draft reason=\"{e}\""),
                 Err(e) => {
@@ -980,7 +1007,17 @@ pub fn build_engine(o: &ServeOptions) -> Result<QwenEngine, ModelError> {
     if let Some(dpack) = &dpack {
         let ph = loadstats::phase_start(Component::Draft);
         let block = crate::draft::draft_block_from_env()?;
-        let (d, bytes) = crate::draft::Draft::declare(&mut ctx, dpack, cfg.vocab, o.slots, o.prefill_chunk, block)?;
+        let head_bits = (pack.group_meta("lm_head")?.bits.twice() as usize).div_ceil(2);
+        let (d, bytes) = crate::draft::Draft::declare_geom(
+            &mut ctx,
+            dpack,
+            draft_geom,
+            head_bits,
+            cfg.vocab,
+            o.slots,
+            o.prefill_chunk,
+            block,
+        )?;
         boot::fact("draft_block", block.to_string());
         if serial {
             loadstats::phase_end(ph);
@@ -1185,7 +1222,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<QwenEngine, ModelError> {
     let planned = plan.planned_bytes(o.slots);
     let refuse = |what: &str, e: ModelError| allocation_error(what, e, planned, o.floor_bytes, host.as_ref());
     // the pool holds the pages the cache may keep on top of the pages admission hands out
-    let mut model = Model::with_window_rows(
+    let mut model = Model::with_window_rows_taps(
         cfg.clone(),
         w,
         o.slots,
@@ -1193,6 +1230,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<QwenEngine, ModelError> {
         o.max_model_len,
         o.prefill_chunk,
         o.window_rows,
+        draft_geom.tap_layers,
     )
     .map_err(|e| refuse("the engine's buffers (KV pool, slot state, scratch)", e))?;
     if let Some(b) = wq_budget {
@@ -1508,6 +1546,8 @@ mod tests {
         // a group above the family's cap is refused naming the family and the cap; at the cap it is served
         let big = |ranks, rank| Some(TpOptions::new(ranks, rank, "192.0.2.1:29600"));
         assert!(refuse_tensor_parallel(&fam, &with_tp(big(4, 0)), 0).is_ok());
+        assert!(refuse_tensor_parallel(&fam, &with_tp(big(4, 2)), 1).is_ok());
+        assert!(refuse_tensor_parallel(&fam, &with_tp(big(4, 3)), 1).is_ok());
         let e = refuse_tensor_parallel(&fam, &with_tp(big(5, 0)), 0).unwrap_err().to_string();
         assert!(e.contains("toy") && e.contains("at most 4 ranks") && e.contains("--tp-ranks 5"), "{e}");
         let e = refuse_tensor_parallel(&fam, &with_tp(big(5, 3)), 1).unwrap_err().to_string();
@@ -1516,9 +1556,12 @@ mod tests {
         assert!(
             crate::family::ModelFamily::tensor_parallel(&fam) && !crate::family::ModelFamily::tensor_parallel(&Toy { cap: 1 })
         );
-        // the message of a family with no runtime names its cap and the one family that has one
+        // the message of a family with no runtime names its cap and the families that have one
         let e = refuse_tensor_parallel(&Toy { cap: 1 }, &with_tp(big(2, 0)), 0).unwrap_err().to_string();
         assert!(e.contains("toy") && e.contains("no tensor-parallel runtime") && e.contains("cap is 1"), "{e}");
+        for id in ["nemotron_h_omni", "glm5_next", "deepseek_v41"] {
+            assert!(e.contains(id), "{id} has a tensor-parallel runtime and is missing from: {e}");
+        }
     }
 
     #[test]
@@ -1578,6 +1621,21 @@ mod tests {
         assert!(!trees_wanted(&o) && !memory_options(&o, false).trees);
     }
 
+    /// `--intervention` is refused before the pack is even probed: the directory and the model need not exist.
+    #[test]
+    fn an_intervention_directory_is_refused_at_start_because_no_forward_applies_it() {
+        let mut o = ServeOptions::new(std::path::PathBuf::from("/nonexistent"));
+        assert!(refuse_unapplied_intervention(&o).is_ok());
+        o.intervention_dir = Some(std::path::PathBuf::from("/nonexistent/overlay"));
+        let said = |e: ModelError| e.to_string();
+        let e = said(refuse_unapplied_intervention(&o).unwrap_err());
+        assert!(e.contains("--intervention is not applied in this build") && e.contains("remove the flag"), "{e}");
+        assert!(said(start(&o).err().unwrap()).contains(INTERVENTION_NOT_APPLIED));
+        assert!(said(start_follower(&o).unwrap_err()).contains(INTERVENTION_NOT_APPLIED));
+        // nothing was loaded on the way to the refusal
+        assert!(crate::intervention::ACTIVE.get().is_none());
+    }
+
     #[test]
     fn prefill_chunk_beyond_the_kernels_is_refused_up_front() {
         let mut o = ServeOptions::new(std::path::PathBuf::from("/nonexistent"));
@@ -1615,9 +1673,9 @@ mod tests {
         let dir = pack_dir("shapes", &cfg.to_string());
         let o = ServeOptions::new(dir.clone());
         let e = preflight(&o).unwrap_err().to_string();
-        assert!(e.contains("num_key_value_heads is 8, the kernels are built for 4"), "{e}");
+        assert!(e.contains("unsupported attention geometry") && e.contains("num_key_value_heads=8"), "{e}");
         let e = start(&o).err().expect("must refuse").to_string();
-        assert!(e.contains("num_key_value_heads is 8"), "{e}");
+        assert!(e.contains("num_key_value_heads=8"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

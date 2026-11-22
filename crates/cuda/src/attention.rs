@@ -83,6 +83,8 @@ pub enum AttnShape {
     Q24Kv4,
     /// 24 over 2 (groups of 12): Qwen3.8-Flash-Next.
     Q24Kv2,
+    /// 16 over 4 (groups of 4): Qwen3.5-4B and other generic Qwen hybrids.
+    Q16Kv4,
     /// 16 over 2 (groups of 8): the full-attention layers of the Qwen3.5/3.6-35B-A3B text backbone (MiniCPM-V-4.7).
     Q16Kv2,
     /// 8 over 2 (groups of 4): the layers of MiniCPM-V-4.7's DSpark draft.
@@ -93,14 +95,15 @@ pub enum AttnShape {
 
 impl AttnShape {
     /// Every shape the kernels are built for.
-    pub const ALL: [AttnShape; 5] =
-        [AttnShape::Q24Kv4, AttnShape::Q24Kv2, AttnShape::Q16Kv2, AttnShape::Q8Kv2, AttnShape::Q32Kv2];
+    pub const ALL: [AttnShape; 6] =
+        [AttnShape::Q24Kv4, AttnShape::Q24Kv2, AttnShape::Q16Kv4, AttnShape::Q16Kv2, AttnShape::Q8Kv2, AttnShape::Q32Kv2];
 
     /// The shape for a config's head counts, if the kernels are built for it (head dim 256 in all).
     pub const fn from_counts(q_heads: usize, kv_heads: usize) -> Option<Self> {
         match (q_heads, kv_heads) {
             (24, 4) => Some(Self::Q24Kv4),
             (24, 2) => Some(Self::Q24Kv2),
+            (16, 4) => Some(Self::Q16Kv4),
             (16, 2) => Some(Self::Q16Kv2),
             (8, 2) => Some(Self::Q8Kv2),
             (32, 2) => Some(Self::Q32Kv2),
@@ -110,14 +113,14 @@ impl AttnShape {
     pub const fn q_heads(self) -> usize {
         match self {
             Self::Q24Kv4 | Self::Q24Kv2 => 24,
-            Self::Q16Kv2 => 16,
+            Self::Q16Kv4 | Self::Q16Kv2 => 16,
             Self::Q8Kv2 => 8,
             Self::Q32Kv2 => 32,
         }
     }
     pub const fn kv_heads(self) -> KvHeads {
         match self {
-            Self::Q24Kv4 => KvHeads::Four,
+            Self::Q24Kv4 | Self::Q16Kv4 => KvHeads::Four,
             Self::Q24Kv2 | Self::Q16Kv2 | Self::Q8Kv2 | Self::Q32Kv2 => KvHeads::Two,
         }
     }
@@ -527,6 +530,84 @@ mod ffi {
             variant: i32,
             stream: *mut c_void,
         ) -> i32;
+        // the same launchers built for 16 query heads over 4 kv heads (csrc/attention_q16kv4.cu)
+        pub fn gb_kv_write_q16kv4(
+            k: *const c_void,
+            v: *const c_void,
+            row_slot: *const i32,
+            row_pos: *const i32,
+            block_table: *const i32,
+            max_blocks: i32,
+            k_cache: *mut c_void,
+            v_cache: *mut c_void,
+            rows: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_kv_write_rows_q16kv4(
+            k: *const c_void,
+            v: *const c_void,
+            src_row: *const i32,
+            row_slot: *const i32,
+            row_pos: *const i32,
+            block_table: *const i32,
+            max_blocks: i32,
+            k_cache: *mut c_void,
+            v_cache: *mut c_void,
+            n: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_attn_decode_tree_q16kv4(
+            q: *const c_void,
+            k_cache: *const c_void,
+            v_cache: *const c_void,
+            k_nodes: *const c_void,
+            v_nodes: *const c_void,
+            block_table: *const i32,
+            max_blocks: i32,
+            row_slot: *const i32,
+            row_pos: *const i32,
+            row_base: *const i32,
+            paths: *const i32,
+            path_stride: i32,
+            out: *mut c_void,
+            rows: i32,
+            max_context: i32,
+            workspace: *mut c_void,
+            workspace_bytes: usize,
+            stream: *mut c_void,
+        ) -> i32;
+        #[allow(dead_code)]
+        pub fn gb_attn_decode_workspace_bytes_q16kv4(rows: i32, max_context: i32) -> usize;
+        pub fn gb_attn_decode_q16kv4(
+            q: *const c_void,
+            k_cache: *const c_void,
+            v_cache: *const c_void,
+            block_table: *const i32,
+            max_blocks: i32,
+            row_slot: *const i32,
+            row_pos: *const i32,
+            out: *mut c_void,
+            rows: i32,
+            max_context: i32,
+            workspace: *mut c_void,
+            workspace_bytes: usize,
+            stream: *mut c_void,
+        ) -> i32;
+        #[allow(dead_code)]
+        pub fn gb_attn_prefill_workspace_bytes_q16kv4(rows: i32) -> usize;
+        pub fn gb_attn_prefill_variant_q16kv4(
+            q: *const c_void,
+            k_cache: *const c_void,
+            v_cache: *const c_void,
+            block_table: *const i32,
+            max_blocks: i32,
+            slot: i32,
+            start: i32,
+            rows: i32,
+            out: *mut c_void,
+            variant: i32,
+            stream: *mut c_void,
+        ) -> i32;
         // the same launchers built for 8 query heads over 2 kv heads (csrc/attention_q8kv2.cu)
         pub fn gb_kv_write_q8kv2(
             k: *const c_void,
@@ -688,10 +769,11 @@ mod ffi {
 
 /// Picks a launcher by shape: the default (24 x 4) one, then its `_kv2`, `_q16kv2` and `_q8kv2` twins (the same signature).
 macro_rules! by_shape {
-    ($shape:expr, $a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
+    ($shape:expr, $a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
         match $shape {
             AttnShape::Q24Kv4 => ffi::$a,
             AttnShape::Q24Kv2 => ffi::$b,
+            AttnShape::Q16Kv4 => ffi::$f,
             AttnShape::Q16Kv2 => ffi::$c,
             AttnShape::Q8Kv2 => ffi::$d,
             AttnShape::Q32Kv2 => ffi::$e,
@@ -714,7 +796,15 @@ pub fn kv_write(
     let te = cache.kv_heads.token_elems();
     assert!(k.bytes() >= n_rows * te * 2 && v.bytes() >= n_rows * te * 2);
     let rc = unsafe {
-        (by_shape!(cache.shape, gb_kv_write, gb_kv_write_kv2, gb_kv_write_q16kv2, gb_kv_write_q8kv2, gb_kv_write_q32kv2))(
+        (by_shape!(
+            cache.shape,
+            gb_kv_write,
+            gb_kv_write_kv2,
+            gb_kv_write_q16kv2,
+            gb_kv_write_q8kv2,
+            gb_kv_write_q32kv2,
+            gb_kv_write_q16kv4
+        ))(
             k.ptr(),
             v.ptr(),
             rows.slot.ptr() as *const i32,
@@ -755,7 +845,8 @@ pub fn kv_write_rows(
             gb_kv_write_rows_kv2,
             gb_kv_write_rows_q16kv2,
             gb_kv_write_rows_q8kv2,
-            gb_kv_write_rows_q32kv2
+            gb_kv_write_rows_q32kv2,
+            gb_kv_write_rows_q16kv4
         ))(
             k.ptr(),
             v.ptr(),
@@ -819,7 +910,8 @@ pub fn attn_decode_tree(
             gb_attn_decode_tree_kv2,
             gb_attn_decode_tree_q16kv2,
             gb_attn_decode_tree_q8kv2,
-            gb_attn_decode_tree_q32kv2
+            gb_attn_decode_tree_q32kv2,
+            gb_attn_decode_tree_q16kv4
         ))(
             q.ptr(),
             cache.k.ptr(),
@@ -872,7 +964,8 @@ pub fn attn_decode(
             gb_attn_decode_kv2,
             gb_attn_decode_q16kv2,
             gb_attn_decode_q8kv2,
-            gb_attn_decode_q32kv2
+            gb_attn_decode_q32kv2,
+            gb_attn_decode_q16kv4
         ))(
             q.ptr(),
             cache.k.ptr(),
@@ -952,7 +1045,8 @@ pub fn attn_prefill_rows(
             gb_attn_prefill_variant_kv2,
             gb_attn_prefill_variant_q16kv2,
             gb_attn_prefill_variant_q8kv2,
-            gb_attn_prefill_variant_q32kv2
+            gb_attn_prefill_variant_q32kv2,
+            gb_attn_prefill_variant_q16kv4
         ))(
             q.ptr_at(off) as *const core::ffi::c_void,
             cache.k.ptr(),
@@ -988,6 +1082,9 @@ mod tests {
         assert_eq!(prefill_workspace_bytes(4096), unsafe { ffi::gb_attn_prefill_workspace_bytes_kv2(4096) });
         // the 16- and 8-head builds size it by their own head counts
         for (r, c) in [(1, 1), (1, 513), (8, 262144), (128, 5000)] {
+            assert_eq!(decode_workspace_bytes_for(AttnShape::Q16Kv4, r, c), unsafe {
+                ffi::gb_attn_decode_workspace_bytes_q16kv4(r as i32, c as i32)
+            });
             assert_eq!(decode_workspace_bytes_for(AttnShape::Q16Kv2, r, c), unsafe {
                 ffi::gb_attn_decode_workspace_bytes_q16kv2(r as i32, c as i32)
             });
@@ -995,6 +1092,7 @@ mod tests {
                 ffi::gb_attn_decode_workspace_bytes_q8kv2(r as i32, c as i32)
             });
         }
+        assert_eq!(prefill_workspace_bytes(4096), unsafe { ffi::gb_attn_prefill_workspace_bytes_q16kv4(4096) });
         assert_eq!(prefill_workspace_bytes(4096), unsafe { ffi::gb_attn_prefill_workspace_bytes_q16kv2(4096) });
         assert_eq!(prefill_workspace_bytes(4096), unsafe { ffi::gb_attn_prefill_workspace_bytes_q8kv2(4096) });
     }
@@ -1003,16 +1101,20 @@ mod tests {
     fn attention_shapes() {
         assert_eq!(AttnShape::default(), AttnShape::Q24Kv4);
         // the model configs: Qwen3.8-27B 24/4, Flash-Next 24/2, the 35B-A3B backbone 16/2, its DSpark draft 8/2
-        for (q, kv, s) in
-            [(24, 4, AttnShape::Q24Kv4), (24, 2, AttnShape::Q24Kv2), (16, 2, AttnShape::Q16Kv2), (8, 2, AttnShape::Q8Kv2)]
-        {
+        for (q, kv, s) in [
+            (24, 4, AttnShape::Q24Kv4),
+            (24, 2, AttnShape::Q24Kv2),
+            (16, 4, AttnShape::Q16Kv4),
+            (16, 2, AttnShape::Q16Kv2),
+            (8, 2, AttnShape::Q8Kv2),
+        ] {
             assert_eq!(AttnShape::from_counts(q, kv), Some(s));
             assert_eq!((s.q_heads(), s.kv_heads().count()), (q, kv));
             assert_eq!(s.group(), q / kv);
             assert_eq!(s.q_row_elems(), q * 256);
             assert_eq!(AttnShape::from(s.kv_heads()).kv_heads(), s.kv_heads());
         }
-        for (q, kv) in [(32, 8), (16, 4), (8, 4), (12, 2), (0, 2)] {
+        for (q, kv) in [(32, 8), (8, 4), (12, 2), (0, 2)] {
             assert_eq!(AttnShape::from_counts(q, kv), None, "{q}/{kv}");
         }
         assert_eq!(AttnShape::from(KvHeads::Four), AttnShape::Q24Kv4);
@@ -1023,7 +1125,7 @@ mod tests {
         }
         assert!(AttnShape::Q24Kv4.prefill_variant_supported(2) && AttnShape::Q24Kv4.prefill_variant_supported(3));
         assert!(AttnShape::Q24Kv2.prefill_variant_supported(2) && AttnShape::Q24Kv2.prefill_variant_supported(3));
-        for s in [AttnShape::Q16Kv2, AttnShape::Q8Kv2] {
+        for s in [AttnShape::Q16Kv4, AttnShape::Q16Kv2, AttnShape::Q8Kv2] {
             assert!(!s.prefill_variant_supported(2) && !s.prefill_variant_supported(3), "{s:?}");
         }
         assert!(!AttnShape::Q24Kv4.prefill_variant_supported(5) && !AttnShape::Q24Kv4.prefill_variant_supported(-1));

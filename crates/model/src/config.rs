@@ -27,6 +27,9 @@ pub struct QwenConfig {
     pub head_dim: usize,
     pub rotary_dim: usize,
     pub rope_theta: f64,
+    /// Vision packs use the three-axis M-RoPE sectioning declared here.
+    pub has_vision: bool,
+    pub mrope_section: Option<[usize; 3]>,
     // gated delta net
     pub lin_key_heads: usize,
     pub lin_value_heads: usize,
@@ -62,10 +65,38 @@ impl QwenConfig {
         let head_dim = u(t, "head_dim")?;
         let rope = t.get("rope_parameters").ok_or("config.json: missing `rope_parameters`")?;
         let partial = f(rope, "partial_rotary_factor").or_else(|_| f(t, "partial_rotary_factor"))?;
+        let has_vision = root.get("vision_config").is_some();
+        let mrope_section = if has_vision {
+            let values = rope
+                .get("mrope_section")
+                .and_then(|x| x.as_array())
+                .ok_or("config.json: vision pack is missing `rope_parameters.mrope_section`")?
+                .iter()
+                .map(|x| {
+                    x.as_u64().map(|x| x as usize).ok_or("config.json: `rope_parameters.mrope_section` must contain integers")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(values.try_into().map_err(|v: Vec<usize>| {
+                format!("config.json: `rope_parameters.mrope_section` has {} entries, expected 3", v.len())
+            })?)
+        } else {
+            None
+        };
         let eos = match t.get("eos_token_id") {
-            Some(Value::Number(n)) => n.as_u64().map(|x| vec![x as u32]).unwrap_or_default(),
-            Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect(),
-            _ => vec![],
+            None | Some(Value::Null) => vec![],
+            Some(Value::Number(n)) => vec![n
+                .as_u64()
+                .and_then(|x| u32::try_from(x).ok())
+                .ok_or("config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them")?],
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|x| {
+                    x.as_u64().and_then(|x| u32::try_from(x).ok()).ok_or_else(|| {
+                        "config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them".to_string()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them".into()),
         };
         let c = Self {
             hidden: u(t, "hidden_size")?,
@@ -79,6 +110,8 @@ impl QwenConfig {
             head_dim,
             rotary_dim: (head_dim as f64 * partial).round() as usize,
             rope_theta: f(rope, "rope_theta")?,
+            has_vision,
+            mrope_section,
             lin_key_heads: u(t, "linear_num_key_heads")?,
             lin_value_heads: u(t, "linear_num_value_heads")?,
             lin_key_dim: u(t, "linear_key_head_dim")?,
@@ -97,6 +130,12 @@ impl QwenConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.lin_key_heads == 0 {
+            return Err("config.json: `linear_num_key_heads` must be positive".into());
+        }
+        if self.kv_heads == 0 {
+            return Err("config.json: `num_key_value_heads` must be positive".into());
+        }
         if self.lin_value_heads % self.lin_key_heads != 0 {
             return Err("linear value heads must be a multiple of key heads".into());
         }
@@ -134,6 +173,43 @@ impl QwenConfig {
     pub fn conv_channels(&self) -> usize {
         2 * self.lin_key_heads * self.lin_key_dim + self.lin_value_heads * self.lin_value_dim
     }
+    /// The compiled attention kernel this config selects.
+    pub fn attn_shape(&self) -> Result<gb_cuda::attention::AttnShape, String> {
+        use gb_cuda::attention::AttnShape;
+        match AttnShape::from_counts(self.heads, self.kv_heads) {
+            Some(shape @ (AttnShape::Q24Kv4 | AttnShape::Q16Kv4)) => Ok(shape),
+            _ => Err(format!(
+                "unsupported attention geometry: num_attention_heads={} num_key_value_heads={} head_dim={}; the tested generic Qwen continuation kernels are Q24/Kv4 and Q16/Kv4",
+                self.heads, self.kv_heads, self.head_dim
+            )),
+        }
+    }
+
+    /// The compiled gated-delta-net kernel this config selects.
+    pub fn gdn_shape(&self) -> Result<gb_cuda::gdn::GdnShape, String> {
+        use gb_cuda::gdn::GdnShape;
+        match GdnShape::from_counts(self.lin_key_heads, self.lin_value_heads, self.lin_key_dim, self.lin_value_dim) {
+            Some(shape @ (GdnShape::Hv48 | GdnShape::Hv32)) => Ok(shape),
+            _ => Err(format!(
+                "unsupported GDN geometry: linear_num_key_heads={} linear_num_value_heads={} linear_key_head_dim={} linear_value_head_dim={}; the tested generic Qwen continuation kernels are Hv48 and Hv32",
+                self.lin_key_heads, self.lin_value_heads, self.lin_key_dim, self.lin_value_dim
+            )),
+        }
+    }
+
+    /// Runtime q/k norm and RoPE configuration (the same kernel, not a 27B-specialised constant).
+    pub fn attn_prep(&self) -> gb_cuda::glue::AttnPrepCfg {
+        gb_cuda::glue::AttnPrepCfg {
+            heads: self.heads,
+            kv_heads: self.kv_heads,
+            head_dim: self.head_dim,
+            rotary_dim: self.rotary_dim,
+            has_gate: true,
+            eps: self.rms_eps as f32,
+            theta: self.rope_theta as f32,
+        }
+    }
+
     /// KV bytes per token over all full-attention layers (bf16 K and V).
     pub fn kv_bytes_per_token(&self) -> u64 {
         (self.full_layers() * self.kv_heads * self.head_dim * 2 * 2) as u64
@@ -203,5 +279,43 @@ mod tests {
         let mut v = sample();
         v["text_config"]["layer_types"][0] = json!("sliding_attention");
         assert!(QwenConfig::from_json(&v).unwrap_err().contains("unsupported layer type"));
+    }
+
+    #[test]
+    fn zero_head_counts_return_named_errors_instead_of_panicking() {
+        for (key, needle) in [
+            ("num_key_value_heads", "num_key_value_heads` must be positive"),
+            ("linear_num_key_heads", "linear_num_key_heads` must be positive"),
+        ] {
+            let mut v = sample();
+            v["text_config"][key] = json!(0);
+            let e = QwenConfig::from_json(&v).unwrap_err();
+            assert!(e.contains(needle), "expected `{needle}`, got `{e}`");
+        }
+    }
+
+    #[test]
+    fn eos_token_ids_are_parsed_strictly() {
+        for bad in [
+            json!("248044"),
+            json!(248044.0),
+            json!(-1),
+            json!(u64::from(u32::MAX) + 1),
+            json!([248044, "248045"]),
+            json!([null]),
+            json!({ "id": 248044 }),
+        ] {
+            let mut v = sample();
+            v["text_config"]["eos_token_id"] = bad;
+            let e = QwenConfig::from_json(&v).unwrap_err();
+            assert!(e.contains("eos_token_id"), "unexpected error: {e}");
+        }
+
+        let mut v = sample();
+        v["text_config"]["eos_token_id"] = json!([248044, 248045]);
+        assert_eq!(QwenConfig::from_json(&v).unwrap().eos, vec![248044, 248045]);
+        let mut v = sample();
+        v["text_config"].as_object_mut().unwrap().remove("eos_token_id");
+        assert!(QwenConfig::from_json(&v).unwrap().eos.is_empty());
     }
 }

@@ -13,7 +13,7 @@ use crate::pack::Pack;
 use crate::plan::{choose_slots, plan_memory_cached_windowed, MIN_TOKENS_PER_SLOT};
 use crate::serve::{gib, PrefixCacheOption, ServeOptions};
 use gb_engine::{boot, Drafter, Engine, EngineConfig, NoDrafts};
-use gb_exl3::checkpoint::{read_header_checked, scan};
+use gb_exl3::checkpoint::{read_header_checked, scan, Checkpoint};
 use gb_sched::{CostModel, ModelMemory};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -43,6 +43,22 @@ fn draft_head_plan_bytes(
     super::model::check_draft_head_shapes(nv, h.n)?;
     let bits = h.bits.twice() as usize / 2;
     Ok(super::model::draft_head_prefix_bytes(h.k, nv, bits) as u64)
+}
+
+/// Bytes the DFlash2 restricted vocabulary sub-head will own, charged before the KV pool is sized.
+/// A full head owns nothing beyond the target's already-loaded `lm_head`.
+fn dflash_sub_head_plan_bytes(
+    groups: &std::collections::BTreeMap<String, super::weights::Exl3Group>,
+    cfg: &FlashNextConfig,
+    slots: usize,
+    block: usize,
+) -> Result<u64, ModelError> {
+    let Some(ranges) = crate::costs::DraftVocab::from_env()?.ranges() else { return Ok(0) };
+    let head = groups.get("lm_head").ok_or_else(|| ModelError::Config("missing packed LM head".into()))?;
+    let bits = head.bits.twice() as usize / 2;
+    let max_seqs = slots.clamp(1, crate::draft::MAX_DRAFT_SEQS.min(128 / block));
+    let max_rows = max_seqs * (block - 1);
+    Ok(crate::draft::Draft::restricted_vocab_plan_bytes(&ranges, head.k, head.n, bits, cfg.hidden, max_rows)? as u64)
 }
 
 /// Device memory left for the KV plan after the loaded weights are deducted from the
@@ -122,8 +138,8 @@ fn check_flash_options(o: &ServeOptions) -> Result<(), ModelError> {
 /// Sidecars are outside the shard index, so fold their checked tensor descriptions
 /// (including payload offsets) and file lengths without reading their payloads.
 /// As with upstream's fingerprint, a payload edit with unchanged metadata is not detected.
-fn pack_header_fingerprint(dir: &Path) -> Result<String, ModelError> {
-    let ck = scan(dir, true).map_err(|e| ModelError::Config(format!("pack fingerprint: {e}")))?;
+/// `ck` is the scan of the pack in `dir` (`scan(dir, true)`); the sidecar headers are read from `dir`.
+fn pack_header_fingerprint_of(dir: &Path, ck: &Checkpoint) -> Result<String, ModelError> {
     let issues: Vec<_> = ck.issues.iter().filter(|issue| !issue.contains(" as the index says")).collect();
     if !issues.is_empty() {
         return Err(ModelError::Config(format!(
@@ -133,7 +149,7 @@ fn pack_header_fingerprint(dir: &Path) -> Result<String, ModelError> {
     }
     let mut h = Sha256::new();
     h.update(b"rexl3-flash-next-pack-headers-v1\0");
-    h.update(crate::fingerprint::fingerprint(&ck).as_bytes());
+    h.update(crate::fingerprint::fingerprint(ck).as_bytes());
     for file in [super::inventory::NGRAM_FILE, super::inventory::MTP_MIXER_FILE] {
         let path = dir.join(file);
         let (_, _, entries) = read_header_checked(&path).map_err(|e| ModelError::Config(format!("pack fingerprint: {e}")))?;
@@ -174,19 +190,20 @@ fn pack_header_fingerprint(dir: &Path) -> Result<String, ModelError> {
 
 /// The pack gate before anything is loaded: the target against the validated list and, with `--draft`, the draft beside it (the shared
 /// `serve::check_packs`, which records `target_fingerprint`, `draft_fingerprint`, `pack_validated` (the pair's name for a listed pair)
-/// and `draft_validated` as boot facts, the identity `/metrics` and `/v1/models` report). Returns `load`'s value and the target's
-/// fingerprint.
-fn validate_pack_before_load<T>(
-    dir: &Path,
+/// and `draft_validated` as boot facts, the identity `/metrics` and `/v1/models` report). `target` is the target's scan (`scan(dir, true)`),
+/// refused here as `Pack::open` refuses it. Returns `load`'s value, the target's fingerprint, and the target and draft packs it opened,
+/// which the load then reads instead of scanning them again.
+fn validate_scanned_pack_before_load<T>(
+    target: Checkpoint,
     draft_dir: Option<&Path>,
     allow_unvalidated: bool,
     load: impl FnOnce() -> Result<T, ModelError>,
-) -> Result<(T, String), ModelError> {
-    let pack = Pack::open(dir)?;
+) -> Result<(T, String, Pack, Option<Pack>), ModelError> {
+    let pack = Pack::from_checkpoint(target)?;
     let draft = draft_dir.map(Pack::open).transpose()?;
     let target = crate::serve::check_packs(&pack, draft.as_ref(), allow_unvalidated)?;
     boot::mark("packs_checked", None);
-    Ok((load()?, target))
+    Ok((load()?, target, pack, draft))
 }
 
 pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelError> {
@@ -219,25 +236,28 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     )
     .map_err(|e| ModelError::Config(e.to_string()))?;
 
-    // WeightMap::from_dir opens and validates the entire text pack's headers,
-    // including both sidecars, without reading its large tensor payloads.
-    let weights = WeightMap::from_dir(&o.model_dir, &cfg)
+    // The pack is scanned once (its headers and EXL3 codebook markers, not the tensor payloads; a scan of the 3.05 bpw pack
+    // takes seconds): the weight map, the pack gate, the prefix cache's header fingerprint and the weight load below all read
+    // this scan. The weight map validates the entire text pack's headers, including both sidecars, as `WeightMap::from_dir` does.
+    let ck = scan(&o.model_dir, true).map_err(|e| ModelError::Config(format!("Flash-Next pack: {e}")))?;
+    let weights = WeightMap::from_checkpoint(&o.model_dir, &ck, &cfg)
         .map_err(|errors| ModelError::Config(format!("Flash-Next pack: {}", errors.join("; "))))?;
     boot::mark("packs_scanned", None);
     let mode = warm_mode_from_env(std::env::var("REXL3_NGRAM_WARM").ok().as_deref());
-    let (loaded, target_fp) = validate_pack_before_load(&o.model_dir, draft_dir, o.allow_unvalidated_pack, || {
-        let table_bytes = if mode != WarmMode::Off && !cfg.ple_layer_ids.is_empty() {
-            let table = NgramTable::open(&o.model_dir, &cfg).map_err(ModelError::Config)?;
-            (table.rows as u64)
-                .checked_mul(table.words as u64)
-                .and_then(|n| n.checked_mul(2))
-                .ok_or_else(|| ModelError::Config("n-gram table size overflows".into()))?
-        } else {
-            0
-        };
-        gb_cuda::rt::init_context()?;
-        Ok((table_bytes, gb_cuda::rt::mem_info()?.0 as u64))
-    })?;
+    let (loaded, target_fp, pack, draft_pack) =
+        validate_scanned_pack_before_load(ck, draft_dir, o.allow_unvalidated_pack, || {
+            let table_bytes = if mode != WarmMode::Off && !cfg.ple_layer_ids.is_empty() {
+                let table = NgramTable::open(&o.model_dir, &cfg).map_err(ModelError::Config)?;
+                (table.rows as u64)
+                    .checked_mul(table.words as u64)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or_else(|| ModelError::Config("n-gram table size overflows".into()))?
+            } else {
+                0
+            };
+            gb_cuda::rt::init_context()?;
+            Ok((table_bytes, gb_cuda::rt::mem_info()?.0 as u64))
+        })?;
     let (table_bytes, cuda_free) = loaded;
     boot::mark("cuda_ready", None);
     let mut weight_bytes = weights
@@ -257,24 +277,27 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     }
     // The DFlash2 draft is loaded before the room that is left is measured (MemAvailable then no longer counts it); its tap buffer, which
     // the model allocates later, is planned with the weights.
-    let draft = match draft_dir {
-        Some(dir) => {
-            let d = load_draft(dir, &cfg, &weights, o.slots, o.prefill_chunk, o.floor_bytes)?;
+    let draft = match (draft_dir, draft_pack) {
+        (Some(dir), Some(draft_pack)) => {
+            let d = load_draft_from(dir, &draft_pack, &cfg, &weights, o.slots, o.prefill_chunk, o.floor_bytes)?;
             let tap = super::model::tap_buffer_bytes(o.prefill_chunk.max(WINDOW_ROWS), cfg.hidden);
-            weight_bytes =
-                weight_bytes.checked_add(tap).ok_or_else(|| ModelError::Config("draft tap buffer accounting overflow".into()))?;
+            weight_bytes = weight_bytes
+                .checked_add(tap)
+                .and_then(|b| b.checked_add(d.sub_head_bytes))
+                .ok_or_else(|| ModelError::Config("draft tap and sub-head accounting overflow".into()))?;
             eprintln!(
-                "rexl3 event=model_drafter drafter=dflash2 draft={} form={} draft_gib={:.2} tap_gib={:.3} validated=\"{}\" mtp=not_loaded",
+                "rexl3 event=model_drafter drafter=dflash2 draft={} form={} draft_gib={:.2} tap_gib={:.3} sub_head_mib={} validated=\"{}\" mtp=not_loaded",
                 d.check.fingerprint,
                 d.form,
                 gib(d.total_bytes),
                 gib(tap),
+                d.sub_head_bytes / (1 << 20),
                 d.check.how(&target_fp)
             );
             boot::fact("model_drafter", "dflash2 (--draft); MTP head not loaded");
             Some(d)
         }
-        None => None,
+        _ => None,
     };
     let host = MemInfo::read();
     let want_warm = mode != WarmMode::Off
@@ -349,7 +372,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     }
     // the cache namespace covers the draft too: a snapshot keeps the draft's window
     let fingerprint = if plan.cache.enabled() {
-        let target = pack_header_fingerprint(&o.model_dir)?;
+        let target = pack_header_fingerprint_of(&o.model_dir, &pack.ck)?;
         Some(match &draft {
             Some(d) => format!("{target}|dflash2={}", d.check.fingerprint),
             None => target,
@@ -364,8 +387,10 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
     boot::fact("slots", slots.to_string());
     boot::fact("kv_pages", plan.kv_blocks.to_string());
     boot::fact("kv_tokens", plan.kv_tokens.to_string());
-    let mut model = FlashNextModel::load_with(
+    let mut model = FlashNextModel::load_from(
         &o.model_dir,
+        &pack,
+        &weights,
         ModelOptions { slots, kv_pages: pool_pages, max_context, prefill_rows: o.prefill_chunk, warm: want_warm },
         with_mtp,
     )
@@ -378,9 +403,11 @@ pub fn build_engine(o: &ServeOptions) -> Result<Engine<FlashNextBackend>, ModelE
             host.as_ref(),
         )
     })?;
+    // the scan has served the load: its host memory is released before the prefix arena is allocated
+    drop(pack);
     // the draft joins the model before its snapshot arena (whose slots then keep the draft's window) and before any forward (the taps)
     if let Some(d) = draft {
-        model.enable_dflash(d.draft, d.weight_bytes)?;
+        model.enable_dflash(d.draft, d.weight_bytes, d.sub_head_bytes)?;
     }
     let mtp_k = if o.drafting && o.spec.uses_mtp() && model.has_mtp() {
         std::env::var("REXL3_MTP_K").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).min(WINDOW_ROWS - 1)
@@ -433,6 +460,8 @@ pub struct LoadedDraft {
     pub check: crate::draft::DraftCheck,
     /// Bytes of its weights (the context rings excluded) and of everything it allocated.
     pub weight_bytes: u64,
+    /// Bytes the restricted vocabulary sub-head will add after this load, already charged to the target plan.
+    pub sub_head_bytes: u64,
     pub total_bytes: u64,
     pub form: &'static str,
 }
@@ -448,18 +477,48 @@ pub fn load_draft(
     floor: u64,
 ) -> Result<LoadedDraft, ModelError> {
     let check = super::dflash::check_dir(dir, cfg)?;
+    let sub_head_bytes = dflash_sub_head_plan_bytes(&weights.groups, cfg, slots, crate::draft::BLOCK)?;
     let pack = Pack::open(dir).map_err(|e| ModelError::Config(format!("{}: {e}", dir.display())))?;
+    load_checked_draft(&pack, check, sub_head_bytes, cfg, weights, slots, chunk, floor)
+}
+
+/// [`load_draft`] with the draft in `dir` already opened as `pack` (what `Pack::open(dir)` returns), so it is not scanned again.
+pub fn load_draft_from(
+    dir: &Path,
+    pack: &Pack,
+    cfg: &FlashNextConfig,
+    weights: &WeightMap,
+    slots: usize,
+    chunk: usize,
+    floor: u64,
+) -> Result<LoadedDraft, ModelError> {
+    let check = super::dflash::check_dir(dir, cfg)?;
+    let sub_head_bytes = dflash_sub_head_plan_bytes(&weights.groups, cfg, slots, crate::draft::BLOCK)?;
+    load_checked_draft(pack, check, sub_head_bytes, cfg, weights, slots, chunk, floor)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_checked_draft(
+    pack: &Pack,
+    check: crate::draft::DraftCheck,
+    sub_head_bytes: u64,
+    cfg: &FlashNextConfig,
+    weights: &WeightMap,
+    slots: usize,
+    chunk: usize,
+    floor: u64,
+) -> Result<LoadedDraft, ModelError> {
     let head = weights.groups.get("lm_head").ok_or_else(|| ModelError::Config("missing packed LM head".into()))?;
     let head_bits = head.bits.twice() as usize / 2;
     let form = if pack.has_group("fc") { "exl3" } else { "bf16" };
     let before = MemInfo::read().map(|m| m.available);
     // one arena block sized to the pack, not the default 1 GiB blocks (their unused tail would be most of a 0.5 GiB draft's footprint)
-    let mut ctx = crate::loadctx::LoadCtx::from_env_with_block(crate::draft::arena_block_bytes(&pack));
+    let mut ctx = crate::loadctx::LoadCtx::from_env_with_block(crate::draft::arena_block_bytes(pack));
     // the absorbs come in pieces of at most one window (`model_dflash.rs`), so the draft's context scratch is sized for one piece
     let ctx_rows = chunk.min(super::dflash::WINDOW);
     let (draft, bytes) = crate::draft::Draft::declare_geom(
         &mut ctx,
-        &pack,
+        pack,
         crate::draft::DraftGeom::FLASH_NEXT,
         head_bits,
         cfg.vocab,
@@ -481,7 +540,7 @@ pub fn load_draft(
             gib(floor)
         )));
     }
-    Ok(LoadedDraft { draft, check, weight_bytes: bytes as u64 - ring, total_bytes, form })
+    Ok(LoadedDraft { draft, check, weight_bytes: bytes as u64 - ring, sub_head_bytes, total_bytes, form })
 }
 
 /// The Flash-Next prefix config: the interactive cut policy (cuts that serve a second question about a long document and a short tool

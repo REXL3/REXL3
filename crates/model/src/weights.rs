@@ -71,6 +71,24 @@ pub struct Weights {
     pub bytes: usize,
 }
 
+/// Refuse an EXL3 group stored at a half-integer width (an odd `k2`: 1.5, 2.5 or 3.5 bits) before anything is read or allocated.
+/// The Qwen dense linears run whole widths only: the decode window, the GEMV prefill and the pinned prefill return a CUDA error on an
+/// odd `k2`, and the fused prefill GEMM would decode the trellis at the next whole width down. `name` is the tensor as the error names
+/// it, `who` what cannot serve it.
+pub(crate) fn refuse_half_width(name: &str, g: &gb_exl3::checkpoint::Group, who: &str) -> Result<(), ModelError> {
+    if g.bits.is_integer() {
+        return Ok(());
+    }
+    let k2 = g.bits.twice() as usize;
+    Err(ModelError::Config(format!(
+        "{name}: an EXL3 tensor at {} bits per weight (a half-integer width, k2 = {k2}); half-width tensors are not servable by {who} \
+         yet: quantize it at a whole width ({} or {} bits)",
+        g.bits.as_f64(),
+        k2 / 2,
+        k2 / 2 + 1
+    )))
+}
+
 fn exl3<'p>(
     ctx: &mut LoadCtx<'p>,
     pack: &'p Pack,
@@ -83,6 +101,7 @@ fn exl3<'p>(
     if (g.k, g.n) != (k, n) {
         return Err(ModelError::Config(format!("{prefix}: expected K={k} N={n}, found K={} N={}", g.k, g.n)));
     }
+    refuse_half_width(prefix, g, "the Qwen dense family")?;
     let w = ctx.group(pack, prefix)?;
     *bytes += w.weight_bytes();
     Ok(w)
@@ -131,9 +150,9 @@ impl Weights {
                         in_proj_a: ctx.raw16(pack, &format!("{a}in_proj_a.weight"), "F16", &[hv, d])?,
                         in_proj_b: ctx.raw16(pack, &format!("{a}in_proj_b.weight"), "F16", &[hv, d])?,
                         conv_w: ctx.raw16(pack, &format!("{a}conv1d.weight"), "BF16", &[qkv, 1, c.conv_kernel])?,
-                        a_log: ctx.f32_from_bf16(pack, &format!("{a}A_log"), &[hv], false)?,
-                        dt_bias: ctx.f32_from_bf16(pack, &format!("{a}dt_bias"), &[hv], false)?,
-                        norm: ctx.f32_from_bf16(pack, &format!("{a}norm.weight"), &[c.lin_value_dim], false)?,
+                        a_log: ctx.f32_plain(pack, &format!("{a}A_log"), &[hv], false)?,
+                        dt_bias: ctx.f32_plain(pack, &format!("{a}dt_bias"), &[hv], false)?,
+                        norm: ctx.f32_plain(pack, &format!("{a}norm.weight"), &[c.lin_value_dim], false)?,
                         out_proj: exl3(ctx, pack, &format!("{a}out_proj"), &mut bytes, z, d)?,
                     };
                     bytes += m.in_proj_a.bytes()
@@ -218,5 +237,83 @@ impl Weights {
             v.extend([&l.mlp.gate, &l.mlp.up, &l.mlp.down]);
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loadctx::LoadMode;
+
+    const K: usize = 128;
+    const N: usize = 256;
+
+    /// A one-shard pack on disk of Mul1 EXL3 groups `K` x `N`, one per `(prefix, k2)`: what `Pack::open` scans from a real pack (the
+    /// trellis `[K/16, N/16, 8 * k2]`, the `.mul1` marker, the fp16 scales), so the width the loader sees is the one the scan parsed.
+    fn pack_of(tag: &str, groups: &[(&str, usize)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gb-model-half-width-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"quantization_config":{"quant_method":"exl3"}}"#).unwrap();
+        let (mut header, mut data) = (serde_json::Map::new(), Vec::<u8>::new());
+        for &(prefix, k2) in groups {
+            let parts: [(&str, &str, Vec<usize>, Vec<u8>); 4] = [
+                ("trellis", "I16", vec![K / 16, N / 16, 8 * k2], vec![0u8; (K / 16) * (N / 16) * 16 * k2]),
+                ("mul1", "I32", vec![1], gb_exl3::MARKER_MUL1.to_le_bytes().to_vec()),
+                ("suh", "F16", vec![K], [0x00u8, 0x3c].repeat(K)),
+                ("svh", "F16", vec![N], [0x00u8, 0x3c].repeat(N)),
+            ];
+            for (part, dtype, shape, bytes) in parts {
+                let at = data.len();
+                data.extend_from_slice(&bytes);
+                header.insert(
+                    format!("{prefix}.{part}"),
+                    serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [at, data.len()]}),
+                );
+            }
+        }
+        let header = serde_json::Value::Object(header).to_string();
+        let mut f = (header.len() as u64).to_le_bytes().to_vec();
+        f.extend_from_slice(header.as_bytes());
+        f.extend_from_slice(&data);
+        std::fs::write(dir.join("model.safetensors"), f).unwrap();
+        dir
+    }
+
+    /// A half-integer-width tensor (odd k2: 1.5, 2.5, 3.5 bits) is refused when the target is loaded, before anything is read or
+    /// allocated, by the tensor's name and width with the whole widths around it; the head goes through the same check. A whole width
+    /// passes the check (whatever the upload then does on this machine).
+    #[test]
+    fn a_half_width_tensor_is_refused_at_load_by_name_and_width() {
+        let mlp = "model.language_model.layers.0.mlp.gate_proj";
+        let names: Vec<String> = (0..5).map(|i| format!("model.language_model.layers.{i}.mlp.up_proj")).collect();
+        let groups: Vec<(&str, usize)> =
+            vec![(mlp, 5), ("lm_head", 7), (&names[0], 3), (&names[1], 4), (&names[2], 6), (&names[3], 2), (&names[4], 8)];
+        let dir = pack_of("load", &groups);
+        let pack = Pack::open(&dir).unwrap();
+        for &(prefix, k2) in &groups {
+            assert_eq!(pack.group_meta(prefix).unwrap().bits.twice() as usize, k2, "{prefix}: the scan parsed the width");
+            let mut ctx = LoadCtx::new(LoadMode::Serial);
+            let mut bytes = 0usize;
+            let r = exl3(&mut ctx, &pack, prefix, &mut bytes, K, N);
+            if k2 % 2 == 0 {
+                if let Err(e) = r {
+                    assert!(
+                        !e.to_string().contains("half-integer"),
+                        "{prefix}: a whole width (k2 = {k2}) must pass the check: {e}"
+                    );
+                }
+                continue;
+            }
+            let e = r.err().unwrap_or_else(|| panic!("{prefix}: k2 = {k2} must be refused"));
+            assert!(matches!(e, ModelError::Config(_)), "{prefix}: {e:?}");
+            let (bits, lo, hi) = (k2 as f64 / 2.0, k2 / 2, k2 / 2 + 1);
+            let msg = e.to_string();
+            assert!(msg.contains(&format!("{prefix}: an EXL3 tensor at {bits} bits per weight")), "{msg}");
+            assert!(msg.contains(&format!("k2 = {k2}")) && msg.contains("not servable by the Qwen dense family"), "{msg}");
+            assert!(msg.contains(&format!("({lo} or {hi} bits)")), "{msg}");
+            assert_eq!(bytes, 0, "{prefix}: nothing is counted for a refused tensor");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

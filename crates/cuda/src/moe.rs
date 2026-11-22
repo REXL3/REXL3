@@ -29,7 +29,7 @@
 //! `MoeScratch::set_picks` lets a caller route elsewhere (tests, a different router); a pick outside `0..experts` contributes nothing.
 
 use crate::exl3_linear::{Dtype, Exl3Weights};
-pub use crate::moe_owned::{combine_pairs, ExpertOwnership, OwnScratch};
+pub use crate::moe_owned::{combine_pairs, combine_pairs_f32, combine_pairs_local_f32, ExpertOwnership, OwnScratch};
 pub use crate::moe_subbanks::{subbank_partition, MoeSubbankLayer, MoeSubbanks, SubbankKey, SubbankRegion};
 use crate::rt::{CudaError, DevBuf, Stream};
 use gb_exl3::checkpoint::{Checkpoint, LoadedGroup};
@@ -1001,20 +1001,35 @@ impl MoeExperts {
         };
         let members = band_partition(e, key_of)?;
         // the pointer tables: the device addresses of the existing trellis buffers (no byte is copied)
+        // The stacked scales are copied device to device, one copy per expert, on one stream synchronised once per stack (a copy through
+        // the host was two synchronous transfers per expert: about 1.2 s of a Flash-Next boot). The sources are complete first: an upload
+        // from pageable memory can return before its DMA lands, and this stream is not ordered after it. Same bytes, same layout, and the
+        // stack is a view of a block of its own, as `DevBuf::from_slice` makes it (a `MoeBand` takes subviews of it).
+        crate::rt::device_sync()?;
+        let copies = Stream::new_nonblocking()?;
         let stack = |gs: &[usize], proj: usize, suh: bool| -> Result<DevBuf, CudaError> {
-            let mut v: Vec<u16> = Vec::new();
-            for &g in gs {
-                let w = match proj {
-                    0 => gate[g],
-                    1 => up[g],
-                    _ => down[g],
-                };
-                let n = if suh { w.k } else { w.n };
-                let mut tmp = vec![0u16; n];
-                (if suh { &w.suh } else { &w.svh }).download(&mut tmp)?;
-                v.extend_from_slice(&tmp);
+            let parts: Vec<(&DevBuf, usize)> = gs
+                .iter()
+                .map(|&g| {
+                    let w = match proj {
+                        0 => gate[g],
+                        1 => up[g],
+                        _ => down[g],
+                    };
+                    let n = if suh { w.k } else { w.n };
+                    (if suh { &w.suh } else { &w.svh }, n * 2)
+                })
+                .collect();
+            let total: usize = parts.iter().map(|(_, b)| b).sum();
+            let block = std::sync::Arc::new(crate::rt::Block::alloc(total.max(1))?);
+            let mut out = DevBuf::view(&block, 0, total);
+            let mut at = 0;
+            for (src, bytes) in parts {
+                out.copy_from_at(at, src, 0, bytes, &copies)?;
+                at += bytes;
             }
-            DevBuf::from_slice(&v)
+            copies.sync()?;
+            Ok(out)
         };
         if members.len() == 1 {
             // uniform: exactly the previous single-band behaviour

@@ -3,9 +3,13 @@
 //! The general mechanism (family-agnostic, fail-closed): an intervention directory holds `intervention.json`
 //! (the manifest) and direction `.pt` files (serialized torch tensors). At load we validate every layer index
 //! against the family's plan and every direction file against its pinned sha256, orthonormalize the directions
-//! in manifest order (the runtime rule of the reference implementation), and apply them per forward at the
-//! manifest's application point. A mismatch refuses at boot naming both sides — an overlay built for another
-//! model or another layer numbering never silently applies.
+//! in manifest order (the runtime rule of the reference implementation). The operator ([`apply_row`]) applies an
+//! entry to one row at the manifest's application point. A mismatch refuses at load naming both sides — an
+//! overlay built for another model, another hidden width or another layer numbering never loads.
+//!
+//! Not applied in this build: no family's forward calls [`apply_at`], so `rexl3-serve` refuses `--intervention`
+//! at startup (`serve::INTERVENTION_NOT_APPLIED`) instead of serving a model the overlay did not change. This
+//! module is the loader, the validation and the operator, exercised by its tests.
 //!
 //! The first consumer is the Blackfrost derisk overlay of the MiMo-V2.6 pack (schema
 //! `blackfrost.mimo_mlp_output_intervention.v3`): a rank-one down-projection ablation
@@ -62,8 +66,9 @@ pub struct Intervention {
 }
 
 impl Intervention {
-    /// Load and validate an intervention directory against a family plan. Every failure names both sides.
-    pub fn load(dir: &Path, plan: &FamilyPlan) -> Result<Self, String> {
+    /// Load and validate an intervention directory against a family plan and the model's hidden width
+    /// ([`hidden_width`] reads it from the pack's config). Every failure names both sides.
+    pub fn load(dir: &Path, plan: &FamilyPlan, hidden: usize) -> Result<Self, String> {
         let at = |m: &str| format!("intervention: {m}");
         let manifest_path = dir.join("intervention.json");
         let text = std::fs::read_to_string(&manifest_path).map_err(|e| at(&format!("{}: {e}", manifest_path.display())))?;
@@ -112,8 +117,15 @@ impl Intervention {
             }
             tensor_hint = file.tensor.clone();
             let mut v = file.values;
-            if v.is_empty() || v.len() != v.len() {
+            if v.is_empty() {
                 return Err(at(&format!("{rel}: the direction is empty")));
+            }
+            if v.len() != hidden {
+                return Err(at(&format!(
+                    "{rel}: the direction is {} wide, the model's hidden width is {hidden} (manifest {experiment:?}, family {})",
+                    v.len(),
+                    plan.family
+                )));
             }
             // normalize, then Gram-Schmidt against priors in serialized order
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
@@ -191,14 +203,28 @@ impl Intervention {
     }
 }
 
-/// `h <- h - alpha * (h . d) * d` (Projective) or `h <- y + scale * d` (Additive), fp32 math, one row, fixed
-/// reduction order (row-invariant by construction, like every kernel).
-/// The process-wide loaded intervention (set once at boot by `serve` when `--intervention` is given).
+/// The hidden width a pack's `config.json` declares: `hidden_size`, at the top level or under `text_config`.
+/// This is the width [`Intervention::load`] checks every direction against.
+pub fn hidden_width(model_dir: &Path) -> Result<usize, String> {
+    let path = model_dir.join("config.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let root: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let hidden = [root.get("hidden_size"), root.get("text_config").and_then(|t| t.get("hidden_size"))]
+        .into_iter()
+        .flatten()
+        .find_map(|v| v.as_u64())
+        .filter(|h| *h > 0);
+    hidden.map(|h| h as usize).ok_or_else(|| format!("{}: no positive hidden_size", path.display()))
+}
+
+/// The process-wide loaded intervention. Nothing sets it in this build: `serve` refuses `--intervention`
+/// because no forward applies an overlay yet.
 pub static ACTIVE: std::sync::OnceLock<Intervention> = std::sync::OnceLock::new();
 
 /// Apply the loaded intervention's entries for `layer` at `point` to one row (fp32 math, fixed reduction
-/// order). The layer runner calls this at the layer boundary; with nothing loaded or no entry at this layer
-/// and point, the row is returned unchanged. Returns whether anything was applied.
+/// order). The seam a layer runner is to call at the layer boundary; no forward calls it in this build. With
+/// nothing loaded or no entry at this layer and point, the row is returned unchanged. Returns whether anything
+/// was applied.
 pub fn apply_at(layer: usize, point: ApplyPoint, row: &[f32], out: &mut [f32]) -> bool {
     let Some(iv) = ACTIVE.get() else {
         return false;
@@ -217,6 +243,8 @@ pub fn apply_at(layer: usize, point: ApplyPoint, row: &[f32], out: &mut [f32]) -
     applied
 }
 
+/// `h <- h - alpha * (h . d) * d` (Projective) or `h <- h + scale * d` (Additive), fp32 math, one row, fixed
+/// reduction order (row-invariant by construction, like every kernel).
 pub fn apply_row(entry: &InterventionEntry, row: &[f32], out: &mut [f32]) {
     match entry.mode {
         InterventionMode::Projective { alpha } => {
@@ -308,20 +336,18 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             0x89 => stack.push(PV::Bool(false)), // NEWFALSE
             0x4a => {
                 // BININT
-                let v = i32::from_le_bytes(pkl[i..i + 4].try_into().map_err(|_| err("BININT eof"))?) as i64;
-                i += 4;
-                stack.push(PV::Int(v));
+                let b = take(pkl, &mut i, 4).ok_or_else(|| err("BININT eof"))?;
+                stack.push(PV::Int(i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64));
             }
             0x4b => {
                 // BININT1
-                stack.push(PV::Int(pkl[i] as i64));
-                i += 1;
+                let b = take(pkl, &mut i, 1).ok_or_else(|| err("BININT1 eof"))?;
+                stack.push(PV::Int(b[0] as i64));
             }
             0x4d => {
                 // BININT2 ('M', two-byte unsigned)
-                let v = u16::from_le_bytes(pkl[i..i + 2].try_into().map_err(|_| err("BININT2 eof"))?) as i64;
-                i += 2;
-                stack.push(PV::Int(v));
+                let b = take(pkl, &mut i, 2).ok_or_else(|| err("BININT2 eof"))?;
+                stack.push(PV::Int(u16::from_le_bytes([b[0], b[1]]) as i64));
             }
             0x4c => {
                 // LONG ('L', a decimal line)
@@ -340,32 +366,27 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             0x8a | 0x8b => {
                 // LONG1 / LONG2
                 let n = if op == 0x8a {
-                    pkl[i] as usize
+                    take(pkl, &mut i, 1).ok_or_else(|| err("LONG1 eof"))?[0] as usize
                 } else {
-                    u32::from_le_bytes(pkl[i..i + 4].try_into().map_err(|_| err("LONG2 eof"))?) as usize
+                    let b = take(pkl, &mut i, 4).ok_or_else(|| err("LONG2 eof"))?;
+                    u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
                 };
-                i += if op == 0x8a { 1 } else { 4 };
-                let b = pkl.get(i..i + n).ok_or_else(|| err("LONG eof"))?;
-                i += n;
+                let b = take(pkl, &mut i, n).ok_or_else(|| err("LONG eof"))?;
                 let v = if n == 1 { b[0] as i8 as i64 } else { i64::from_le_bytes(b.try_into().map_err(|_| err("LONG wide"))?) };
                 stack.push(PV::Int(v));
             }
             0x8c => {
                 // SHORT_BINUNICODE
-                let n = pkl[i] as usize;
-                i += 1;
-                stack.push(PV::Str(
-                    String::from_utf8_lossy(pkl.get(i..i + n).ok_or_else(|| err("SHORT_BINUNICODE eof"))?).into_owned(),
-                ));
-                i += n;
+                let n = take(pkl, &mut i, 1).ok_or_else(|| err("SHORT_BINUNICODE eof"))?[0] as usize;
+                let b = take(pkl, &mut i, n).ok_or_else(|| err("SHORT_BINUNICODE eof"))?;
+                stack.push(PV::Str(String::from_utf8_lossy(b).into_owned()));
             }
             0x58 => {
                 // BINUNICODE
-                let n = u32::from_le_bytes(pkl[i..i + 4].try_into().map_err(|_| err("BINUNICODE eof"))?) as usize;
-                i += 4;
-                stack
-                    .push(PV::Str(String::from_utf8_lossy(pkl.get(i..i + n).ok_or_else(|| err("BINUNICODE eof"))?).into_owned()));
-                i += n;
+                let b = take(pkl, &mut i, 4).ok_or_else(|| err("BINUNICODE eof"))?;
+                let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+                let b = take(pkl, &mut i, n).ok_or_else(|| err("BINUNICODE eof"))?;
+                stack.push(PV::Str(String::from_utf8_lossy(b).into_owned()));
             }
             0x28 => marks.push(stack.len()), // MARK
             0x29 => {
@@ -384,6 +405,9 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             0x74 => {
                 // TUPLE (from mark)
                 let m = marks.pop().ok_or_else(|| err("TUPLE without mark"))?;
+                if m > stack.len() {
+                    return Err(err("TUPLE mark above the stack"));
+                }
                 let items = stack.split_off(m);
                 stack.push(PV::Tuple(items));
             }
@@ -400,6 +424,9 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             0x65 => {
                 // APPENDS (from mark)
                 let m = marks.pop().ok_or_else(|| err("APPENDS without mark"))?;
+                if m > stack.len() {
+                    return Err(err("APPENDS mark above the stack"));
+                }
                 let items = stack.split_off(m);
                 match stack.last_mut() {
                     Some(PV::List(l)) => l.extend(items),
@@ -418,6 +445,9 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             0x75 => {
                 // SETITEMS (from mark)
                 let m = marks.pop().ok_or_else(|| err("SETITEMS without mark"))?;
+                if m > stack.len() {
+                    return Err(err("SETITEMS mark above the stack"));
+                }
                 let items = stack.split_off(m);
                 if items.len() % 2 != 0 {
                     return Err(err("SETITEMS with an odd item count"));
@@ -440,8 +470,8 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             } // LONG_BINPUT
             0x6f => {
                 // NEWLIST: a list of a known length
-                let n = i32::from_le_bytes(pkl[i..i + 4].try_into().map_err(|_| err("NEWLIST eof"))?) as usize;
-                i += 4;
+                let b = take(pkl, &mut i, 4).ok_or_else(|| err("NEWLIST eof"))?;
+                let n = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
                 if n > 1 << 20 {
                     return Err(err("NEWLIST of an absurd length"));
                 }
@@ -558,6 +588,15 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
             persid_storages
         ));
     }
+    // a payload that is not a whole number of elements is a cut file, not a shorter tensor
+    let width = if half || bfloat16 { 2 } else { 4 };
+    if data.len() % width != 0 {
+        return Err(format!(
+            "{}: data/0 holds {} bytes, not a whole number of {width}-byte elements",
+            path.display(),
+            data.len()
+        ));
+    }
     let values: Vec<f32> = if half {
         let mut out = Vec::with_capacity(data.len() / 2);
         for c in data.chunks_exact(2) {
@@ -582,11 +621,29 @@ fn read_direction_pt(path: &Path, bytes: &[u8]) -> Result<DirectionFile, String>
     if size.len() != 1 {
         return Err(format!("{}: data.pkl: the direction is {}-D; only 1-D is read", path.display(), size.len()));
     }
-    let n = size[0] as usize;
-    if values.len() != n {
+    let n = size[0];
+    if n < 0 || values.len() as u64 != n as u64 {
         return Err(format!("{}: data/0 holds {} elements, the tensor says {n}", path.display(), values.len()));
     }
     Ok(DirectionFile { tensor: tensor_hint, values })
+}
+
+/// The next `n` bytes of `bytes` at `*at`, advancing it; `None` when the buffer ends first.
+fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> Option<&'a [u8]> {
+    let s = bytes.get(*at..at.checked_add(n)?)?;
+    *at += n;
+    Some(s)
+}
+
+/// A little-endian u16 / u32 at `at`, as an offset or length; `None` when the buffer ends first.
+fn le16(bytes: &[u8], at: usize) -> Option<usize> {
+    let s = bytes.get(at..at.checked_add(2)?)?;
+    Some(u16::from_le_bytes([s[0], s[1]]) as usize)
+}
+
+fn le32(bytes: &[u8], at: usize) -> Option<usize> {
+    let s = bytes.get(at..at.checked_add(4)?)?;
+    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize)
 }
 
 struct Bits<'a> {
@@ -611,34 +668,50 @@ impl Bits<'_> {
 
 /// Read a zip's stored files (name -> bytes): the central directory only, STORE and DEFLATE.
 fn read_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    // find EOCD
+    // find EOCD; every offset and length below comes from the file, so every read is bounds-checked
     let eocd_at = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").ok_or("no EOCD")?;
-    let n = u16::from_le_bytes(bytes[eocd_at + 10..eocd_at + 12].try_into().unwrap()) as usize;
-    let cd_off = u32::from_le_bytes(bytes[eocd_at + 16..eocd_at + 20].try_into().unwrap()) as usize;
-    let mut files = Vec::with_capacity(n);
+    let eocd = "the end-of-central-directory record is cut short";
+    // the record is 22 bytes before its comment: a file cut inside it is cut, even past the fields read here
+    if bytes.len() - eocd_at < 22 {
+        return Err(eocd.into());
+    }
+    let n = le16(bytes, eocd_at + 10).ok_or(eocd)?;
+    let cd_off = le32(bytes, eocd_at + 16).ok_or(eocd)?;
+    let mut files = Vec::new();
     let mut p = cd_off;
-    for _ in 0..n {
-        if &bytes[p..p + 4] != b"PK\x01\x02" {
+    for k in 0..n {
+        let cut = || format!("central directory entry {k} of {n} is outside the file");
+        // the fixed part of an entry is 46 bytes
+        let entry = bytes.get(p..).filter(|e| e.len() >= 46).ok_or_else(cut)?;
+        if &entry[..4] != b"PK\x01\x02" {
             return Err("bad central directory".into());
         }
-        let method = u16::from_le_bytes(bytes[p + 10..p + 12].try_into().unwrap());
-        let csize = u32::from_le_bytes(bytes[p + 20..p + 24].try_into().unwrap()) as usize;
-        let name_len = u16::from_le_bytes(bytes[p + 28..p + 30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(bytes[p + 30..p + 32].try_into().unwrap()) as usize;
-        let comm_len = u16::from_le_bytes(bytes[p + 32..p + 34].try_into().unwrap()) as usize;
-        let lfh_off = u32::from_le_bytes(bytes[p + 42..p + 46].try_into().unwrap()) as usize;
-        let name = String::from_utf8_lossy(&bytes[p + 46..p + 46 + name_len]).into_owned();
+        let field16 = |at: usize| le16(entry, at).ok_or_else(cut);
+        let field32 = |at: usize| le32(entry, at).ok_or_else(cut);
+        let method = field16(10)?;
+        let csize = field32(20)?;
+        let name_len = field16(28)?;
+        let extra_len = field16(30)?;
+        let comm_len = field16(32)?;
+        let lfh_off = field32(42)?;
+        let name = String::from_utf8_lossy(entry.get(46..46 + name_len).ok_or_else(cut)?).into_owned();
         // local file header: skip its (possibly different) name/extra lengths
-        if &bytes[lfh_off..lfh_off + 4] != b"PK\x03\x04" {
+        let header = bytes
+            .get(lfh_off..)
+            .filter(|h| h.len() >= 30)
+            .ok_or_else(|| format!("{name}: the local header is outside the file"))?;
+        if &header[..4] != b"PK\x03\x04" {
             return Err(format!("{name}: bad local header"));
         }
-        let l_name = u16::from_le_bytes(bytes[lfh_off + 26..lfh_off + 28].try_into().unwrap()) as usize;
-        let l_extra = u16::from_le_bytes(bytes[lfh_off + 28..lfh_off + 30].try_into().unwrap()) as usize;
-        let start = lfh_off + 30 + l_name + l_extra;
-        let raw = &bytes[start..start + csize];
+        let l_name = u16::from_le_bytes([header[26], header[27]]) as usize;
+        let l_extra = u16::from_le_bytes([header[28], header[29]]) as usize;
+        let raw = header
+            .get(30 + l_name + l_extra..)
+            .and_then(|d| d.get(..csize))
+            .ok_or_else(|| format!("{name}: its {csize} bytes of data are outside the file"))?;
         let data = match method {
             0 => raw.to_vec(),
-            8 => inflate(raw)?,
+            8 => inflate(raw).map_err(|e| format!("{name}: {e}"))?,
             m => return Err(format!("{name}: compression method {m} is not supported")),
         };
         files.push((name, data));
@@ -661,15 +734,15 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
                 if h + 4 > data.len() {
                     return Err("deflate: eof in stored block".into());
                 }
-                let len = u16::from_le_bytes(data[h..h + 2].try_into().unwrap()) as usize;
-                out.extend_from_slice(&data[h + 4..h + 4 + len]);
+                let len = u16::from_le_bytes([data[h], data[h + 1]]) as usize;
+                out.extend_from_slice(data.get(h + 4..h + 4 + len).ok_or("deflate: eof in stored block")?);
                 bits.pos = (h + 4 + len) * 8;
             }
             1 => {
                 // fixed Huffman
                 let mut lens = [0u8; 288];
-                let mut dlens = [5u8; 30];
-                dlens[0] = 0;
+                // every one of the 30 distance codes is five bits (RFC 1951, 3.2.6), code 0 (distance 1) included
+                let dlens = [5u8; 30];
                 for (i, l) in lens.iter_mut().enumerate() {
                     *l = if i < 144 {
                         8
@@ -797,6 +870,9 @@ fn inflate_block(bits: &mut Bits, lit: &Huff, dist: &Huff, out: &mut Vec<u8>) ->
                 let i = (sym - 257) as usize;
                 let len = LEN_BASE[i] as usize + bits.read(LEN_EXTRA[i] as usize)? as usize;
                 let dsym = read_sym(bits, dist)? as usize;
+                if dsym >= DIST_BASE.len() {
+                    return Err("deflate: bad distance symbol".into());
+                }
                 let d = DIST_BASE[dsym] as usize + bits.read(DIST_EXTRA[dsym] as usize)? as usize;
                 if d > out.len() {
                     return Err("deflate: distance before start".into());
@@ -902,6 +978,73 @@ mod files_tests {
     use serde_json::Value;
 
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/mimo/intervention");
+    /// The fixture model's hidden width (`testdata/mimo/config.json`).
+    const HIDDEN: usize = 4096;
+    const FILES: [&str; 3] = [
+        "intervention.json",
+        "directions/layer025-post_layer_outputs.pt",
+        "directions/pass2-remaining21-layer033-post_layer_outputs.pt",
+    ];
+
+    /// A private copy of the fixture overlay, for a test that edits it.
+    fn overlay_copy(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rexl3-iv-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in FILES {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::copy(Path::new(DIR).join(f), dir.join(f)).unwrap();
+        }
+        dir
+    }
+
+    /// The width the loader checks against comes from the pack's config: top level, or under `text_config`.
+    #[test]
+    fn the_hidden_width_is_read_from_the_pack_config() {
+        let mimo = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/mimo"));
+        assert_eq!(hidden_width(mimo).unwrap(), HIDDEN);
+        let dir = std::env::temp_dir().join(format!("rexl3-iv-width-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"text_config": {"hidden_size": 5120}}"#).unwrap();
+        assert_eq!(hidden_width(&dir).unwrap(), 5120);
+        std::fs::write(dir.join("config.json"), r#"{"hidden_size": 0}"#).unwrap();
+        assert!(hidden_width(&dir).unwrap_err().contains("hidden_size"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A direction fitted on another hidden width is refused, naming the direction's width and the model's.
+    #[test]
+    fn a_direction_of_another_width_is_refused_naming_both_widths() {
+        let e = Intervention::load(Path::new(DIR), &plan(), 5120).err().unwrap();
+        assert!(e.contains("layer025-post_layer_outputs.pt"), "{e}");
+        assert!(e.contains("4096 wide") && e.contains("hidden width is 5120") && e.contains("mimo_v2"), "{e}");
+        // one off is still a mismatch, and the matching width still loads
+        assert!(Intervention::load(Path::new(DIR), &plan(), HIDDEN - 1).is_err());
+        assert!(Intervention::load(Path::new(DIR), &plan(), HIDDEN).is_ok());
+    }
+
+    /// A direction file cut short whose manifest pin matches the cut bytes (so the hash check passes and the
+    /// readers see it) is an error at every cut, never a panic.
+    #[test]
+    fn a_truncated_direction_file_with_a_matching_pin_is_an_error() {
+        let dir = overlay_copy("truncated");
+        let rel = FILES[1];
+        let whole = std::fs::read(dir.join(rel)).unwrap();
+        let manifest = std::fs::read_to_string(dir.join("intervention.json")).unwrap();
+        let plan = plan();
+        // the ends, the middle, and every cut inside the zip's trailing records
+        let cuts = [0, 1, 4, 64, whole.len() / 2].into_iter().chain(whole.len().saturating_sub(700)..whole.len());
+        for cut in cuts {
+            let bytes = &whole[..cut];
+            std::fs::write(dir.join(rel), bytes).unwrap();
+            let mut root: Value = serde_json::from_str(&manifest).unwrap();
+            root["directions"][0]["sha256"] = serde_json::json!(sha256_hex(bytes));
+            std::fs::write(dir.join("intervention.json"), root.to_string()).unwrap();
+            let e = Intervention::load(&dir, &plan, HIDDEN).err().unwrap_or_else(|| panic!("cut at {cut} loaded"));
+            assert!(e.contains("layer025-post_layer_outputs.pt") && !e.contains("hash mismatch"), "cut {cut}: {e}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn plan() -> crate::family::FamilyPlan {
         // probe from a copy of the committed fixture dir (the registry reads more than config.json);
@@ -923,7 +1066,7 @@ mod files_tests {
     /// The pack's real manifest loads, validates, orthonormalizes and expands to 12 entries (6 layers x 2 directions).
     #[test]
     fn the_real_blackfrost_manifest_loads_and_expands() {
-        let iv = Intervention::load(Path::new(DIR), &plan()).unwrap();
+        let iv = Intervention::load(Path::new(DIR), &plan(), HIDDEN).unwrap();
         assert_eq!(iv.schema, "blackfrost.mimo_mlp_output_intervention.v3");
         assert_eq!(iv.entries.len(), 12);
         let layers: Vec<usize> =
@@ -962,7 +1105,7 @@ mod files_tests {
         let mut bytes = std::fs::read(dir.join("directions/layer025-post_layer_outputs.pt")).unwrap();
         bytes[..8].copy_from_slice(&[0u8; 8]);
         std::fs::write(dir.join("directions/layer025-post_layer_outputs.pt"), bytes).unwrap();
-        let e = Intervention::load(&dir, &plan()).err().unwrap();
+        let e = Intervention::load(&dir, &plan(), HIDDEN).err().unwrap();
         assert!(e.contains("layer025-post_layer_outputs.pt") && e.contains("hash mismatch"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -986,7 +1129,7 @@ mod files_tests {
         let mut root: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("intervention.json")).unwrap()).unwrap();
         root["target_layers"] = serde_json::json!([48]);
         std::fs::write(dir.join("intervention.json"), root.to_string()).unwrap();
-        let e = Intervention::load(&dir, &plan()).err().unwrap();
+        let e = Intervention::load(&dir, &plan(), HIDDEN).err().unwrap();
         assert!(e.contains("layer 48") && e.contains("48 layers") && e.contains("mimo_v2"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1010,7 +1153,7 @@ mod files_tests {
         let mut root: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("intervention.json")).unwrap()).unwrap();
         root["weight_mutation"] = serde_json::json!(true);
         std::fs::write(dir.join("intervention.json"), root.to_string()).unwrap();
-        let e = Intervention::load(&dir, &plan()).err().unwrap();
+        let e = Intervention::load(&dir, &plan(), HIDDEN).err().unwrap();
         assert!(e.contains("weight mutation"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1018,7 +1161,7 @@ mod files_tests {
     /// Mock-forward equivalence: on == off minus alpha*(y.d)*d at exactly the named layers, bit-identical elsewhere.
     #[test]
     fn a_mock_forward_proves_the_apply_and_the_off_case() {
-        let iv = Intervention::load(Path::new(DIR), &plan()).unwrap();
+        let iv = Intervention::load(Path::new(DIR), &plan(), HIDDEN).unwrap();
         let mut hidden = vec![0.25f32; 4096];
         hidden[0] = 1.0;
         let off = hidden.clone();
@@ -1051,5 +1194,236 @@ mod files_tests {
             InterventionMode::Projective { alpha } => alpha,
             InterventionMode::Additive { scale } => scale,
         }
+    }
+}
+
+/// Malformed input to the zip, inflate and pickle readers is an error, never a panic. These call the readers
+/// directly: `Intervention::load` checks the sha256 pin first.
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    const PT: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/mimo/intervention/directions/layer025-post_layer_outputs.pt");
+
+    fn pt() -> Vec<u8> {
+        std::fs::read(PT).unwrap()
+    }
+
+    /// A zip of stored (uncompressed) members, as torch writes them.
+    fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in members {
+            let at = out.len() as u32;
+            let sizes = [(data.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes()].concat();
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&[0u8; 14]); // version, flags, method 0, time, date, crc
+            out.extend_from_slice(&sizes);
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&[0u8; 2]);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&[0u8; 16]); // versions, flags, method 0, time, date, crc
+            central.extend_from_slice(&sizes);
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attributes
+            central.extend_from_slice(&at.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_off.to_le_bytes());
+        out.extend_from_slice(&[0u8; 2]);
+        out
+    }
+
+    /// The fixture's pickle and payload, for rebuilding direction files around edited parts.
+    fn parts() -> (Vec<u8>, Vec<u8>) {
+        let files = read_zip(&pt()).unwrap();
+        let get = |suffix: &str| files.iter().find(|(n, _)| n.ends_with(suffix)).unwrap().1.clone();
+        (get("data.pkl"), get("data/0"))
+    }
+
+    fn read(pkl: &[u8], data: &[u8]) -> Result<DirectionFile, String> {
+        read_direction_pt(Path::new("t.pt"), &stored_zip(&[("t/data.pkl", pkl), ("t/data/0", data)]))
+    }
+
+    #[test]
+    fn the_test_zip_writer_round_trips_the_real_direction() {
+        let (pkl, data) = parts();
+        assert_eq!(stored_zip(&[("a", b"xy")]).len(), 30 + 1 + 2 + 46 + 1 + 22);
+        let d = read(&pkl, &data).unwrap();
+        assert_eq!((d.values.len(), d.tensor.as_str()), (4096, "post_layer_outputs"));
+    }
+
+    #[test]
+    fn every_truncation_of_a_direction_zip_is_an_error() {
+        let whole = pt();
+        assert!(read_zip(&whole).is_ok());
+        for cut in 0..whole.len() {
+            assert!(read_zip(&whole[..cut]).is_err(), "cut at {cut} of {} read", whole.len());
+        }
+    }
+
+    #[test]
+    fn zip_offsets_and_sizes_outside_the_file_are_errors() {
+        let whole = pt();
+        let eocd = whole.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let cd = u32::from_le_bytes(whole[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let edit = |at: usize, value: &[u8]| {
+            let mut b = whole.clone();
+            b[at..at + value.len()].copy_from_slice(value);
+            read_zip(&b)
+        };
+        let far = u32::MAX.to_le_bytes();
+        let e = edit(eocd + 16, &far).unwrap_err(); // the central directory offset
+        assert!(e.contains("central directory entry 0"), "{e}");
+        let e = edit(eocd + 10, &u16::MAX.to_le_bytes()).unwrap_err(); // more entries than the file holds
+        assert!(e.contains("central directory"), "{e}");
+        let e = edit(cd + 42, &far).unwrap_err(); // the first member's local header offset
+        assert!(e.contains("local header is outside the file"), "{e}");
+        let e = edit(cd + 20, &far).unwrap_err(); // the first member's stored size
+        assert!(e.contains("data are outside the file"), "{e}");
+        let e = edit(cd + 28, &u16::MAX.to_le_bytes()).unwrap_err(); // the first member's name length
+        assert!(e.contains("central directory entry 0"), "{e}");
+        // an end record with nothing after its signature
+        assert!(read_zip(b"PK\x05\x06").unwrap_err().contains("cut short"));
+    }
+
+    #[test]
+    fn every_truncation_of_the_pickle_is_handled_without_a_panic() {
+        let (pkl, data) = parts();
+        let mut refused = 0;
+        for cut in 0..pkl.len() {
+            // a cut that still leaves a whole dict on the stack may read; none may panic
+            if read(&pkl[..cut], &data).is_err() {
+                refused += 1;
+            }
+        }
+        assert!(read(&pkl[..pkl.len() / 2], &data).is_err());
+        assert!(refused > pkl.len() / 2, "{refused} of {} cuts refused", pkl.len());
+    }
+
+    #[test]
+    fn pickle_operands_that_run_past_the_end_are_errors() {
+        let (_, data) = parts();
+        for (bytes, want) in [
+            (&[0x4au8, 1, 2][..], "BININT eof"),
+            (&[0x4b], "BININT1 eof"),
+            (&[0x4d, 1], "BININT2 eof"),
+            (&[0x8a], "LONG1 eof"),
+            (&[0x8b, 1], "LONG2 eof"),
+            (&[0x8a, 8, 1], "LONG eof"),
+            (&[0x8c], "SHORT_BINUNICODE eof"),
+            (&[0x8c, 5, b'a'], "SHORT_BINUNICODE eof"),
+            (&[0x58, 1], "BINUNICODE eof"),
+            (&[0x58, 0xff, 0xff, 0xff, 0xff, b'a'], "BINUNICODE eof"),
+            (&[0x6f, 1], "NEWLIST eof"),
+            // two values, a mark, then TUPLE2 shrinks the stack below the mark
+            (&[0x4e, 0x4e, 0x28, 0x86, 0x74], "TUPLE mark above the stack"),
+            (&[0x4e, 0x4e, 0x28, 0x86, 0x65], "APPENDS mark above the stack"),
+            (&[0x4e, 0x4e, 0x28, 0x86, 0x75], "SETITEMS mark above the stack"),
+        ] {
+            let e = read(bytes, &data).err().unwrap_or_else(|| panic!("{bytes:02x?} read"));
+            assert!(e.contains(want), "{bytes:02x?}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_payload_that_is_not_whole_elements_is_an_error() {
+        let (pkl, data) = parts();
+        let e = read(&pkl, &data[..data.len() - 1]).err().unwrap();
+        assert!(e.contains("8191 bytes") && e.contains("2-byte elements"), "{e}");
+        let e = read(&pkl, &data[..data.len() - 2]).err().unwrap();
+        assert!(e.contains("4095 elements") && e.contains("4096"), "{e}");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Raw deflate of `dynamic_text()` (zlib level 9, one dynamic-Huffman block).
+    const DYNAMIC: &str = "edccc90943310c45d15654404803a946f26ccb9667a7fc6c7f200d043e3ceee22d0e7a39ae6c9b97e1a9d350b15368e8eb71b26d59264fcd43a54eb161a8c7cb7665d93c0d0f9dba8a8d42c51bb9916f04495d07de30cbb50f98de405b4125a02ea78095f7ebd70971e53a9eff207e00";
+    const TEXT: &[u8] = b"abcabcabcabcabc hello hello hello, the quick brown fox; the quick brown fox jumps.";
+
+    fn dynamic_text() -> Vec<u8> {
+        let mut t: Vec<u8> = (0..600usize).map(|i| ((i * 7 + i / 3) % 23 + 97) as u8).collect();
+        for _ in 0..3 {
+            t.extend_from_slice(TEXT);
+        }
+        t
+    }
+
+    #[test]
+    fn inflate_reads_a_dynamic_block_and_refuses_every_truncation_of_it() {
+        let stream = unhex(DYNAMIC);
+        assert_eq!(inflate(&stream).unwrap(), dynamic_text());
+        for cut in 0..stream.len() {
+            assert!(inflate(&stream[..cut]).is_err(), "cut at {cut} of {} inflated", stream.len());
+        }
+    }
+
+    #[test]
+    fn inflate_refuses_a_stored_block_longer_than_its_input() {
+        // final stored block declaring 100 bytes, holding 2
+        assert!(inflate(&[0x01, 100, 0, !100, 0xff, 1, 2]).unwrap_err().contains("stored block"));
+        assert!(inflate(&[0x01, 100]).unwrap_err().contains("stored block"));
+        assert_eq!(inflate(&[0x01, 2, 0, !2, 0xff, 7, 9]).unwrap(), [7, 9]);
+    }
+
+    /// A fixed-Huffman block with back-references inflates to its source. The stream is zlib's raw deflate of `fixed_text()` under
+    /// `Z_FIXED` (Python: `zlib.compressobj(9, zlib.DEFLATED, -15, 9, zlib.Z_FIXED)`): one final block of type 1 whose matches
+    /// use distance 1 (distance code 0, the runs), 16, 64 and 77.
+    const FIXED: &str = "4b4c44052519a90a85a599c9d90a4945f9e5790a69f9150a59a5b905c50af965a9450a20e99cc4aa4a8594fc743d05\
+        03432363135333730bcbc4a4e494d434743e4986551109181899985958d9d83938b9b87978f9f8050485844544c5c42524a5a46564e5e4151495945554d5d\
+        43534b5b47574f5f4118eb2b2b6b1b5b3a7543f00";
+
+    fn fixed_text() -> Vec<u8> {
+        let fox = b"the quick brown fox jumps over the lazy dog. ";
+        let mut t = vec![b'a'; 16];
+        t.extend_from_slice(fox);
+        t.extend_from_slice(b"0123456789abcdef0123456789abcdef");
+        t.extend_from_slice(fox);
+        t.extend_from_slice(&[b'z'; 40]);
+        t.extend(0..64u8);
+        t.extend(0..64u8);
+        t
+    }
+
+    #[test]
+    fn inflate_reads_a_fixed_block_with_back_references_and_refuses_every_truncation_of_it() {
+        let stream = unhex(FIXED);
+        assert_eq!(stream[0] & 7, 0b011, "one final block of type 1 (fixed Huffman)");
+        assert_eq!(inflate(&stream).unwrap(), fixed_text());
+        for cut in 0..stream.len() {
+            assert!(inflate(&stream[..cut]).is_err(), "cut at {cut} of {} inflated", stream.len());
+        }
+    }
+
+    /// A dynamic block may declare 32 distance codes, two more than the format defines; a stream that then
+    /// uses distance symbol 30 is an error.
+    #[test]
+    fn inflate_refuses_a_distance_symbol_the_format_does_not_define() {
+        let stream = unhex("0dff010400000080200000000000000000000000001800000000000000000000000000000000000000b80000004012000c");
+        assert!(inflate(&stream).unwrap_err().contains("bad distance symbol"));
+    }
+
+    /// A deflated member that is cut short names the member.
+    #[test]
+    fn a_deflated_zip_member_cut_short_is_an_error_naming_it() {
+        let stream = unhex(DYNAMIC);
+        let mut zip = stored_zip(&[("t/data.pkl", &stream[..stream.len() / 2])]);
+        let eocd = zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let cd = u32::from_le_bytes(zip[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        zip[cd + 10] = 8; // method: deflate
+        let e = read_zip(&zip).unwrap_err();
+        assert!(e.contains("t/data.pkl") && e.contains("deflate"), "{e}");
     }
 }

@@ -50,20 +50,29 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
     let inv = PackInventory::from_checkpoint(&ck).map_err(|e| ModelError::Config(format!("pack inventory: {e}")))?;
     let pack = BailingPack::from_inventory(&inv, cfg.clone()).map_err(|e| ModelError::Config(e.to_string()))?;
     boot::fact("target_layers", cfg.layers.len().to_string());
-    boot::fact("target_fingerprint", crate::fingerprint::fingerprint(&ck));
+    let target_fp = crate::fingerprint::fingerprint(&ck);
+    boot::fact("target_fingerprint", target_fp.clone());
+    // The scan's records are done with once the pack is mapped: drop them and hand the freed heap back before `MemAvailable` is read
+    // (`release_freed_heap`), so the plan is sized from the memory the box really has.
+    drop(inv);
+    drop(ck);
+    release_freed_heap("plan");
 
     let weights_bytes = pack.plan.device_bytes();
-    // What is left once the weights are resident, sized the way every other family sizes its plan (`hostmem::planning_free`: the host's
-    // MemAvailable rounded down to a whole GiB, so two boots of one box in one state plan one cache), less the unpriced boot overhead.
+    // What is left once the weights are resident, less the unpriced boot overhead. This family plans from the host's MemAvailable to the
+    // byte (`hostmem::planning_free_exact`), not from the whole-GiB figure the other families use: the pack leaves 6-10 GiB on one GB10,
+    // the KV pool is linear in those bytes, and rounding down to a GiB left up to a GiB unplanned, which alone refused the shipped
+    // 262,144-token window on about one idle boot in seven. The pool and the cache follow MemAvailable between boots as a result;
+    // `plan_boot` still refuses a pool short of the window, so a boot is the full window or a named refusal, never a smaller one.
     let (cuda_free, _) = gb_cuda::rt::mem_info().unwrap_or((0, 0));
     let mut host = hostmem::MemInfo::read();
-    eprintln!("{}", hostmem::memory_view_line(cuda_free as u64, host.as_ref(), o.floor_bytes));
+    eprintln!("{}", hostmem::memory_view_line_unrounded(cuda_free as u64, host.as_ref(), o.floor_bytes));
     let avail_at_plan = host.map(|h| h.available);
     if let Some(h) = host.as_mut() {
         h.available = h.available.saturating_sub(weights_bytes);
     }
     let cuda_free = (cuda_free as u64).saturating_sub(weights_bytes);
-    let free = hostmem::planning_free(cuda_free, host.as_ref()).saturating_sub(BOOT_OVERHEAD_BYTES);
+    let free = hostmem::planning_free_exact(cuda_free, host.as_ref()).saturating_sub(BOOT_OVERHEAD_BYTES);
     let requested_slots = o.slots.max(1);
     let in_place = super::load::embed_in_place();
     let kv_tokens_cap = o.kv_tokens.unwrap_or(o.max_model_len) as u64;
@@ -74,7 +83,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
     // None keeps today's host-RAM cache (no writable directory, or the cache off).
     let cache_request = o.prefix_cache.request();
     let spill = if !matches!(cache_request, CacheRequest::Off) {
-        let ns = super::backend::prefix_namespace(&crate::fingerprint::fingerprint(&ck), with_mtp);
+        let ns = super::backend::prefix_namespace(&target_fp, with_mtp);
         let explicit = match cache_request {
             CacheRequest::Fixed(bytes) => Some(bytes >> 20),
             _ => None,
@@ -176,6 +185,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
     if let Some(cfg) = &spill {
         match SpillStore::open(cfg.clone()) {
             Ok(store) => {
+                eprintln!("rexl3 event=ling31_spill_io mode={}", store.io().name());
                 backend.model.set_spill_store(Some(store));
                 boot::fact("prefix_cache_backend", "disk");
             }
@@ -183,7 +193,7 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
         }
     }
     if plan.cache.enabled() {
-        let ns = super::backend::prefix_namespace(&crate::fingerprint::fingerprint(&ck), with_mtp);
+        let ns = super::backend::prefix_namespace(&target_fp, with_mtp);
         backend = backend.with_prefix_cache(ns, plan.cache).map_err(|e| ModelError::Config(format!("the prefix cache: {e}")))?;
         let reach = reach_tokens(&plan.cache, window_tokens);
         let where_ = if spill.is_some() { "disk" } else { "host" };
@@ -233,6 +243,9 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
         EngineConfig { max_rows: super::alloc::WINDOW_ROWS, max_drafts, cost: cost_model(with_mtp), drafting: with_mtp },
         make,
     );
+    // what the load and the build freed goes back to the box (`release_freed_heap`), on its own thread: readiness does not wait for it
+    drop(pack);
+    let _ = std::thread::Builder::new().name("ling-heap-trim".into()).spawn(|| release_freed_heap("ready"));
     if plan.cache.enabled() {
         // the engine's prefix machinery (lookups, cuts, index) is independent of the backend's snapshot store; the
         // interactive cut policy is the one that serves a second question about a long document (as the other families),
@@ -242,6 +255,40 @@ pub fn build_engine(o: &ServeOptions) -> Result<BailingEngine, ModelError> {
         Ok(engine)
     }
 }
+
+/// Hand the heap the boot has freed back to the box: once before the plan reads `MemAvailable` (`at` = `plan`) and once, on a thread of
+/// its own, when the engine is built (`ready`). The pack check (`serve::check_pack_dirs`) and this family's own scan parse the 24 shard
+/// headers (49 MB of JSON) and free the records again, and the load and the build free their own host bookkeeping, but glibc keeps freed
+/// pages in its arenas:
+/// they count against `MemAvailable` although nothing uses them, so the plan refused boxes the profile fits. `malloc_trim` only returns
+/// free pages. Measured on the shipped `ling31-single-262k` (one slot, MTP, prefix cache on, chunk 512, `REXL3_MEMORY_FLOOR_GIB=2`) on
+/// idle GB10s N2, N3 and N4, 2026-11-18, untrimmed boots (dev main; on N3 main plus #416, whose change is after the plan) against
+/// trimmed ones, alternating:
+/// - the server's anonymous memory just before the weights are allocated: 887-982 MiB untrimmed (25 boots), 452-520 MiB trimmed (30);
+/// - `MemAvailable` before the server started less the plan's reading (`plan_avail_gib`): 0.77-1.32 GiB, mean 1.19 (17 boots that
+///   reached the plan line) against 0.80-1.19 GiB, mean 1.00 (28); the 262,144-token plan needs 115.25 GiB, and N3 was refused in 8 of
+///   14 untrimmed boots and 2 of 14 trimmed ones (both started at 116.03 GiB or less);
+/// - at `ready`, the second trim took the server's anonymous memory from 726-857 MiB to 217-225 MiB and `MemAvailable` five seconds
+///   after ready from 2.49-3.00 GiB to 3.06-3.25 GiB (N2, four boots each).
+/// The trim before the plan is on the boot's path: 72-82 ms (`event=ling31_heap_trim`, N2, two boots), inside the spread of boot to ready
+/// (18.6-19.6 s untrimmed, N2, 5 boots; 18.4-19.4 s trimmed, 12). The one at ready (68 ms) runs beside serving. glibc only; elsewhere
+/// nothing is trimmed.
+fn release_freed_heap(at: &str) {
+    let t = std::time::Instant::now();
+    trim_heap();
+    eprintln!("rexl3 level=info event=ling31_heap_trim at={at} ms={:.1}", t.elapsed().as_secs_f64() * 1e3);
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_heap() {
+    // SAFETY: `malloc_trim` only releases free heap pages; it takes no pointers and cannot invalidate live allocations.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_heap() {}
 
 /// The prefix-cache cut grid: `kda::window_chunked` (the prefill's KDA recurrence) steps 16 rows at a time from each call's first row, and
 /// its bits depend on where those 16-row chunks start, so a prefix that resumes at a cut gives a cold prefill's bits only when the cut
@@ -344,7 +391,7 @@ pub struct PlanInputs<'a> {
     /// The memory options and profile for a prefill chunk of `rows` ([`profile_at`] for a real boot; a test hands in the measured figures,
     /// which the kernels' workspace sizes make unavailable to a build without CUDA).
     pub profile_at: &'a dyn Fn(usize) -> Result<(crate::memory::MemoryOptions, MemoryProfile), ModelError>,
-    /// What is free once the weights are resident (`hostmem::planning_free` less [`BOOT_OVERHEAD_BYTES`]).
+    /// What is free once the weights are resident (`hostmem::planning_free_exact` less [`BOOT_OVERHEAD_BYTES`]).
     pub free_after_weights: u64,
     pub floor_bytes: u64,
     pub slots: usize,
@@ -819,7 +866,7 @@ mod tests {
     ) -> Result<Planned, PlanRefused> {
         let c = cfg();
         let host = crate::hostmem::MemInfo { available: (after_weights_gib * GIB as f64) as u64, ..Default::default() };
-        let free = crate::hostmem::planning_free(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
+        let free = crate::hostmem::planning_free_exact(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
         let base = crate::memory::MemoryOptions {
             prefill_rows: requested_chunk,
             mtp: true,
@@ -912,20 +959,41 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_sizes_its_plan_the_way_every_other_family_does() {
+    fn the_boot_sizes_its_plan_from_the_exact_free_bytes() {
         // the GPU boot cannot run here: pin the lines that decide what the plan is sized from (the guard of `serve::tests` for the families
-        // that are not in its list). The free bytes go through `hostmem::planning_free` (the host's MemAvailable rounded down to a whole GiB, so
-        // two boots of one box plan one cache), never the smaller of two figures; the admission comes from `MemoryPlan::admission` so it
-        // declares the pool; the boot plans through `plan_boot`, which refuses a pool short of the window and a cache of fewer than two entries.
+        // that are not in its list). The free bytes go through `hostmem::planning_free_exact` (the host's MemAvailable to the byte: this
+        // family's plan is too narrow for the whole-GiB rounding the others use), never the smaller of two figures; the admission comes from
+        // `MemoryPlan::admission` so it declares the pool; the boot plans through `plan_boot`, which refuses a pool short of the window and a
+        // cache of fewer than two entries.
         let code = include_str!("engine.rs").split("#[cfg(test)]").next().unwrap();
-        for needle in ["hostmem::planning_free(cuda_free", "plan.admission(", "plan_boot(&inputs)"] {
+        assert!(!code.contains("hostmem::planning_free("), "build_engine rounds MemAvailable down to a whole GiB again");
+        for needle in ["hostmem::planning_free_exact(cuda_free", "plan.admission(", "plan_boot(&inputs)"] {
             assert!(code.contains(needle), "build_engine no longer calls {needle}");
         }
         for l in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
             assert!(!(l.contains("cuda_free") && l.contains(".min(")), "the device's free is in a min again: {l}");
             assert!(!l.contains("Admission::new("), "an Admission built by hand, without the pool: {l}");
-            assert!(!l.contains("mem_available()"), "the raw MemAvailable, without the planning quantum: {l}");
+            assert!(!l.contains("mem_available()"), "MemAvailable read outside hostmem::planning_free_exact: {l}");
         }
+    }
+
+    #[test]
+    fn the_scan_heap_is_released_before_the_plan_reads_memavailable() {
+        // the boot drops the scan's records and trims the heap they were freed into before it reads `MemAvailable` for the plan
+        // (`release_freed_heap`): read before it, the plan counts freed pages nothing uses (about 0.45 GiB of the server's anonymous
+        // memory at the shipped profile's plan), and trims again once the engine is built
+        let code = include_str!("engine.rs").split("#[cfg(test)]").next().unwrap();
+        let build = &code[code.find("pub fn build_engine").expect("build_engine")..];
+        let at = |needle: &str| build.find(needle).unwrap_or_else(|| panic!("build_engine no longer has {needle}"));
+        let trim = at("release_freed_heap(\"plan\");");
+        assert!(at("drop(ck);") < trim && at("drop(inv);") < trim, "the records are dropped before the trim");
+        assert!(
+            trim < at("gb_cuda::rt::mem_info()") && trim < at("hostmem::MemInfo::read()"),
+            "the plan reads memory after the trim"
+        );
+        assert!(!build[trim..].contains("fingerprint(&ck)"), "the fingerprint is taken once, before the records are dropped");
+        let ready = at("release_freed_heap(\"ready\")");
+        assert!(at("Engine::new(") < ready && ready < at("prefix_config()?"), "the second trim runs once the engine is built");
     }
 
     /// What `boot` plans, as `(chunk, entries, reach_tokens)` or the refusal.
@@ -933,11 +1001,12 @@ mod tests {
         r.map(|p| (p.chosen.chunk, p.chosen.plan.cache.snapshot_slots, reach_tokens(&p.chosen.plan.cache, window)))
     }
 
-    // `MemAvailable` once the weights are resident, from the boots' `ling31_plan free_gib` (plus the 0.3 GiB after-plan reserve the line
-    // has taken out): N4 9.8 (gate 0, 2026-11-05), N3 8.2 (Q200, 2026-11-02), N2 6.6 (it holds 2 GiB of huge pages).
-    const N4: f64 = 10.1;
-    const N3: f64 = 8.5;
-    const N2: f64 = 6.9;
+    // `MemAvailable` once the weights are resident, as those boots planned it. The boots read 10.1 (N4, gate 0, 2026-11-05), 8.5 (N3, Q200,
+    // 2026-11-02) and 6.9 GiB (N2, which holds 2 GiB of huge pages) and planned from the whole GiB below, as the boot did then; the cases
+    // below keep those planned figures. The boot now plans from the exact bytes (`the_shipped_window_plans_from_the_exact_bytes...`).
+    const N4: f64 = 10.0;
+    const N3: f64 = 8.0;
+    const N2: f64 = 6.0;
 
     #[test]
     fn the_shipped_profile_on_a_stock_node_boots_at_the_widest_chunk_that_keeps_its_cache() {
@@ -963,7 +1032,7 @@ mod tests {
             gib(c.plan.planned_bytes(1)),
             gib(c.free)
         );
-        assert_eq!(format!("{:.2}", gib(c.free)), "7.72", "10 GiB planning quantum - 2 GiB boot overhead - 0.3 GiB reserve");
+        assert_eq!(format!("{:.2}", gib(c.free)), "7.72", "10 GiB - 2 GiB boot overhead - 0.3 GiB reserve");
     }
 
     #[test]
@@ -1033,6 +1102,123 @@ mod tests {
             "entries=0",
         ] {
             assert!(text.contains(needle), "{needle} not in {text}");
+        }
+    }
+
+    /// The shipped `ling31-single-262k` argv (262,144-token window, one slot, MTP, `--prefill-chunk 512`, `--prefix-cache on` on the disk
+    /// store) at a floor, on a node with `after_weights` bytes of `MemAvailable` once the weights are resident, planned from those exact bytes
+    /// as `build_engine` plans it.
+    fn shipped_boot(after_weights: u64, floor: u64) -> Result<Planned, PlanRefused> {
+        let c = cfg();
+        let host = crate::hostmem::MemInfo { available: after_weights, ..Default::default() };
+        let free = crate::hostmem::planning_free_exact(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
+        let base =
+            crate::memory::MemoryOptions { prefill_rows: 512, mtp: true, ..crate::memory::MemoryOptions::serving_defaults() };
+        let spill = SpillConfig {
+            dir: std::env::temp_dir(),
+            quota_bytes: 64 << 30,
+            staging_bytes: super::super::spill::SPILL_STAGING_BYTES,
+        };
+        plan_boot(&PlanInputs {
+            cfg: &c,
+            base,
+            profile_at: &measured_at,
+            free_after_weights: free,
+            floor_bytes: family_floor_bytes(floor),
+            slots: 1,
+            kv_tokens_cap: 262_144,
+            cache: ON,
+            snapshot_bytes: super::super::backend::snapshot_fixed_bytes(&c, true),
+            window_tokens: 262_144,
+            in_place: true,
+            with_mtp: true,
+            spill: Some(spill),
+        })
+    }
+
+    /// The least `MemAvailable` after the weights, to the MiB, at which the shipped argv plans at `floor`.
+    fn least_after_weights(floor: u64) -> u64 {
+        let mut a = 5 * GIB;
+        while shipped_boot(a, floor).is_err() {
+            a += 1 << 20;
+            assert!(a < 16 * GIB, "the shipped argv never plans");
+        }
+        a
+    }
+
+    const SHIPPED_FLOOR: u64 = 1536 << 20;
+
+    #[test]
+    fn the_shipped_window_plans_from_the_exact_bytes_at_the_shipped_floor() {
+        // the profile's floor is 1.5 GiB (`REXL3_MEMORY_FLOOR_GIB=1.5`). The whole window needs 8.454 GiB after the weights: with the
+        // 106.25 GiB the pack's device regions take, that is the 114.70 GiB of MemAvailable the known-issues file names.
+        let least = least_after_weights(SHIPPED_FLOOR);
+        assert_eq!(
+            format!("{:.3}", gib(least)),
+            "8.454",
+            "the least MemAvailable after the weights that plans the shipped window"
+        );
+        let p = shipped_boot(least, SHIPPED_FLOOR).expect("plans at the threshold");
+        let c = &p.chosen;
+        assert_eq!((c.chunk, c.plan.kv_tokens), (512, 262_144), "the asked chunk and the whole window");
+        assert!(c.plan.cache.enabled() && reach_tokens(&c.plan.cache, 262_144) == 262_144, "the disk cache reaches the window");
+        // what the pool was sized with plus the floor fits in the free bytes (boot overhead already out). The disk cache's staging buffer
+        // (64 MiB) is not in that sum: `judge` swaps the disk budget in after the pool is sized, so at the threshold the floor is short by at
+        // most that buffer. That is as it was before this change and is not altered here.
+        let staging = c.plan.cache.bytes();
+        assert!(
+            staging <= super::super::spill::SPILL_STAGING_BYTES as u64,
+            "the cache's RAM cost is the staging buffer: {staging}"
+        );
+        assert!(
+            c.plan.planned_bytes(1) - staging + SHIPPED_FLOOR <= c.free,
+            "planned {:.3} of {:.3} GiB",
+            gib(c.plan.planned_bytes(1) - staging),
+            gib(c.free)
+        );
+        // one MiB less is refused by name, with the pool it would have had: never a boot at a smaller window
+        let e = shipped_boot(least - (1 << 20), SHIPPED_FLOOR).err().expect("refused below the threshold").to_string();
+        assert!(e.contains("below the 262144-token window"), "{e}");
+        // the same node planned from the whole GiB below (what the boot did before) is refused: the rounding, not the memory, was short
+        let rounded = least - least % crate::hostmem::PLAN_QUANTUM;
+        assert!(shipped_boot(rounded, SHIPPED_FLOOR).is_err(), "8 GiB after the weights does not hold the window at this floor");
+        // and the floor moves the threshold byte for byte: 2.0 GiB of floor needs half a GiB more
+        assert_eq!(least_after_weights(2 * GIB) - least, 512 << 20);
+    }
+
+    #[test]
+    fn a_plan_from_exact_bytes_keeps_the_pool_in_whole_pages_and_inside_its_free_bytes() {
+        // exact planning feeds the planner byte counts that are no multiple of anything: the pool stays a whole number of 256-token pages,
+        // grows with the bytes and never passes the window, and the sized plan + floor never exceeds what was free (the staging buffer
+        // aside, see the test above)
+        let base = 6 * GIB + 123_457;
+        let mut last = 0;
+        for i in 0..40u64 {
+            let after = base + i * ((96 << 20) + 4_099);
+            let (pool, fits) = match shipped_boot(after, SHIPPED_FLOOR) {
+                Ok(p) => {
+                    let c = &p.chosen;
+                    assert!(
+                        c.plan.planned_bytes(1) - c.plan.cache.bytes() + SHIPPED_FLOOR <= c.free,
+                        "at {after} bytes the plan overruns its free bytes"
+                    );
+                    assert_eq!(c.plan.kv_tokens, 262_144, "a boot is the whole window");
+                    (c.plan.kv_tokens, true)
+                }
+                Err(e) => (e.tried.first().map_or(0, |t| t.kv_pool_tokens), false),
+            };
+            assert_eq!(
+                pool % crate::kvtables::BLOCK_TOKENS as u64,
+                0,
+                "pool of {pool} tokens at {after} bytes is not whole pages"
+            );
+            assert!(pool >= last && pool <= 262_144, "pool {pool} after {last} at {after} bytes");
+            assert_eq!(
+                fits,
+                after >= least_after_weights(SHIPPED_FLOOR),
+                "boots exactly from the threshold up, at {after} bytes"
+            );
+            last = pool;
         }
     }
 }

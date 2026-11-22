@@ -153,6 +153,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         check_strips(self.n, s0, s1)?;
         let n = (s1 - s0) * 128;
         if m == 0
@@ -211,6 +214,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         check_strips(self.n, s0, s1)?;
         let n = (s1 - s0) * 128;
         if m == 0
@@ -288,6 +294,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         let (k0, k1) = self.split_k_range(s0, s1)?;
         let (_, wk) = self.plan()?;
         let kr = k1 - k0;
@@ -369,14 +378,14 @@ impl Exl3Weights {
         let kept = cut_strips(self.n, ranges).ok_or(INVALID)?;
         let plan = self.plan()?;
         let st = Stream::new()?;
-        let mut trellis = DevBuf::alloc((self.k / 16) * kept * 64 * self.bits * 4)?;
+        let mut trellis = DevBuf::alloc((self.k / 16) * kept * 64 * self.k2 * 2)?;
         let mut suh = DevBuf::alloc(self.suh.bytes())?;
         let mut svh = DevBuf::alloc(kept * 128 * 2)?;
         let mut bias = match &self.bias {
             Some(_) => Some(DevBuf::alloc(kept * 128 * 2)?),
             None => None,
         };
-        for c in strip_trellis_plan(self.k, self.n, self.bits, ranges) {
+        for c in strip_trellis_plan(self.k, self.n, self.k2, ranges) {
             trellis.copy_2d_from(c.dst_off, c.dst_pitch, &self.trellis, c.src_off, c.src_pitch, c.width, c.height, &st)?;
         }
         suh.copy_from(&self.suh, self.suh.bytes(), &st)?;
@@ -387,7 +396,17 @@ impl Exl3Weights {
             }
         }
         st.sync()?;
-        let w = Exl3Weights { trellis, suh, svh, bias, k: self.k, n: kept * 128, bits: self.bits, codebook: self.codebook };
+        let w = Exl3Weights {
+            trellis,
+            suh,
+            svh,
+            bias,
+            k: self.k,
+            n: kept * 128,
+            bits: self.bits,
+            k2: self.k2,
+            codebook: self.codebook,
+        };
         Ok(PlannedExl3 { w, plan })
     }
 }
@@ -417,7 +436,7 @@ pub fn cut_trellis_runs(k: usize, n: usize, bits: usize, ranges: &[(usize, usize
         return None;
     }
     let mut runs = Vec::with_capacity(k / 16 * ranges.len());
-    let plan = strip_trellis_plan(k, n, bits, ranges);
+    let plan = strip_trellis_plan(k, n, 2 * bits, ranges);
     for row in 0..k / 16 {
         for c in &plan {
             runs.push((c.src_off + row * c.src_pitch, c.dst_off + row * c.dst_pitch, c.width));
@@ -463,6 +482,7 @@ impl PlannedExl3 {
             k: w.k,
             n: w.n,
             bits: w.bits,
+            k2: w.k2,
             codebook: w.codebook,
         };
         Ok(Self { w: shared, plan: decode_plan(w.k, parent_n)? })
@@ -493,6 +513,9 @@ impl PlannedExl3 {
         st: &Stream,
     ) -> Result<(), CudaError> {
         let w = &self.w;
+        if w.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         if m == 0
             || m > MAX_DECODE_ROWS
             || x.bytes() < m * w.k * x_dtype.size()
@@ -546,6 +569,9 @@ impl PlannedExl3 {
         st: &Stream,
     ) -> Result<(), CudaError> {
         let w = &self.w;
+        if w.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         if m == 0
             || m > i32::MAX as usize / 128
             || x.bytes() < m * w.k * x_dtype.size()

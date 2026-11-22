@@ -9,6 +9,7 @@
 mod build_script;
 
 use build_script::stamp::{stamp, Source, UNKNOWN};
+use build_script::{tokenizer_aux_mtime, tokenizer_inputs, tokenizer_object_is_fresh};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -125,4 +126,75 @@ fn rexl3_build_commit_is_not_read_and_the_warning_names_rexl3_commit() {
     assert_eq!(s.commit, "41ded37e");
     assert!(s.warnings.is_empty(), "{:?}", s.warnings);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn tokenizer_rerun_inputs_include_directories_sources_headers_and_includes() {
+    let d = scratch("toks-inputs");
+    for rel in [
+        "include/toks.h",
+        "src/core/bpe.h",
+        "src/core/tables.inc",
+        "src/platform/decode.hpp",
+        "src/gen/tables.cc",
+        "src/asm/arm64/asm.h",
+        "src/core/bpe.c",
+        "src/asm/arm64/kernel.S",
+        "README.md",
+    ] {
+        let path = d.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"input").unwrap();
+    }
+    let got: Vec<String> =
+        tokenizer_inputs(&d).into_iter().map(|p| p.strip_prefix(&d).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    for expected in [
+        "",
+        "include",
+        "include/toks.h",
+        "src/asm/arm64",
+        "src/asm/arm64/asm.h",
+        "src/asm/arm64/kernel.S",
+        "src/core",
+        "src/core/bpe.c",
+        "src/core/bpe.h",
+        "src/core/tables.inc",
+        "src/gen/tables.cc",
+        "src/platform/decode.hpp",
+    ] {
+        assert!(got.iter().any(|p| p == expected), "missing {expected:?}: {got:?}");
+    }
+    assert!(!got.iter().any(|p| p == "README.md"));
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("csrc/toks");
+    assert!(tokenizer_inputs(&real).iter().any(|p| p.ends_with("src/core/bpe.h")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn editing_only_a_tokenizer_header_or_include_marks_newer_objects_stale() {
+    for extension in ["h", "inc"] {
+        let d = scratch(&format!("toks-{extension}-mtime"));
+        let src = d.join("src/core/bpe.c");
+        let aux = d.join(format!("src/core/bpe.{extension}"));
+        let obj = d.join("out/bpe.o");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(obj.parent().unwrap()).unwrap();
+        std::fs::write(&src, "source").unwrap();
+        std::fs::write(&aux, "old header").unwrap();
+        std::fs::write(&obj, "object").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        let times = std::fs::FileTimes::new().set_modified(old);
+        for path in [&src, &aux] {
+            std::fs::File::options().write(true).open(path).unwrap().set_times(times).unwrap();
+        }
+        assert!(tokenizer_object_is_fresh(&src, &obj, tokenizer_aux_mtime(&d), false));
+
+        // The C source and object mtimes do not change; only a header/include moves ahead of the object.
+        std::fs::write(&aux, "edited header").unwrap();
+        let src_mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+        let obj_mtime = std::fs::metadata(&obj).unwrap().modified().unwrap();
+        assert!(obj_mtime >= src_mtime, "this test requires the object's own source to remain older");
+        assert!(!tokenizer_object_is_fresh(&src, &obj, tokenizer_aux_mtime(&d), false), ".{extension} edit was ignored");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

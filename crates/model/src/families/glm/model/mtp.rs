@@ -260,6 +260,11 @@ pub struct SubHead {
 }
 
 impl SubHead {
+    /// The kept strips' weights (tests compare a copied head's bytes with one read from the pack).
+    pub fn weights(&self) -> &gb_cuda::exl3_linear::Exl3Weights {
+        &self.w
+    }
+
     /// The share of `ids` that are tokens of the set.
     pub fn coverage(&self, ids: &[u32]) -> f32 {
         if ids.is_empty() {
@@ -518,6 +523,15 @@ fn keyed_record(s: Option<&Sampling>, len: usize, mutant: Option<MtpMutant>) -> 
     (rec, s.top_k)
 }
 
+fn debug_forward_chunk_end(n: usize, at: usize, tail: usize) -> Option<usize> {
+    if tail > MAX_ROWS || at >= n {
+        return None;
+    }
+    let left = n - at;
+    let end = if left > MAX_ROWS && left - MAX_ROWS < tail { n - tail } else { (at + MAX_ROWS).min(n) };
+    (end > at && end <= n).then_some(end)
+}
+
 impl GlmModel {
     // ---------------------------------------------------------------------------------------------------- slots, taps and commits
 
@@ -694,6 +708,26 @@ impl GlmModel {
     /// layer's dense linears and shared expert take the P2 GEMM; an absorb of committed window rows and every draft step are P1 under both.
     #[allow(clippy::too_many_arguments)]
     fn mtp_block(
+        &mut self,
+        rows: usize,
+        step: usize,
+        ids_from: IdsFrom,
+        hid_from: HidFrom,
+        max_pos: usize,
+        cap: Option<(&mut MtpCapture, usize)>,
+        prompt: bool,
+    ) -> Result<(), ModelError> {
+        // a block that reaches the prefill scratch (`mtp_block_unleased`'s `big || p2`) holds the lease over it while its work is queued
+        let pf = rows > MAX_ROWS
+            || (step == 0 && !self.snap_cuts.is_empty() && self.s.pf.is_some())
+            || self.prefill.p2_prefill(prompt);
+        let h = if pf { self.pf_enter()? } else { None };
+        let r = self.mtp_block_unleased(rows, step, ids_from, hid_from, max_pos, cap, prompt);
+        self.pf_leave(h, r)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mtp_block_unleased(
         &mut self,
         rows: usize,
         step: usize,
@@ -995,9 +1029,18 @@ impl GlmModel {
         restricted: bool,
         keyed: Option<usize>,
     ) -> Result<(), ModelError> {
-        let GlmModel { cfg, dev, stream, s, mtp, .. } = self;
+        let GlmModel { cfg, dev, stream, s, mtp, tp, .. } = self;
         let st = &*stream;
         let m = mtp.as_mut().ok_or_else(|| ModelError::Config("the model has no NextN layer".into()))?;
+        // the full-vocabulary head: a rank that holds only its vocabulary half (`lm-held`) runs its half and swaps the peer's in, as the
+        // trunk's head does (both ranks run every draft call alike, so both take this exchange in the same calls); else the whole head
+        let mut held = tp.as_mut().filter(|t| t.split_bits() & super::tp::SPLIT_LM_HELD != 0);
+        let mut full_head = |src: &DevBuf, logits: &mut DevBuf, ws: &mut DevBuf, n: usize| -> Result<(), ModelError> {
+            match held.as_mut() {
+                Some(t) => t.split_lm_head(&dev.lm_head, src, logits, n, ws, st),
+                None => Ok(dev.lm_head.forward(src, logits, n, Dtype::F16, Dtype::F16, ws, st)?),
+            }
+        };
         let m_mutant = m.mutant;
         let MtpState { sub, lm_in, out, draft_ids, draft_vals, cand_ids, cand_vals, keyed: records, profile, .. } = m;
         let src: &DevBuf = if from_lm_in { lm_in } else { out };
@@ -1059,7 +1102,7 @@ impl GlmModel {
                 }
             }
             (None, None) => {
-                dev.lm_head.forward(src, &mut s.logits, n, Dtype::F16, Dtype::F16, &mut s.ws, st)?;
+                full_head(src, &mut s.logits, &mut s.ws, n)?;
                 glm_glue::topk_f16(
                     &s.logits,
                     n,
@@ -1073,7 +1116,7 @@ impl GlmModel {
                 )?;
             }
             (None, Some(count)) => {
-                dev.lm_head.forward(src, &mut s.logits, n, Dtype::F16, Dtype::F16, &mut s.ws, st)?;
+                full_head(src, &mut s.logits, &mut s.ws, n)?;
                 glm_glue::topk_f16(
                     &s.logits,
                     n,
@@ -1110,7 +1153,83 @@ impl GlmModel {
     /// choice lies inside the set. The copy goes through the host (a boot-time cost); returns the device bytes added, which must be [`sub_head_bytes`]
     /// (what the memory plan charged). `set_mtp_vocab` turns it on.
     pub fn mtp_restrict_vocab(&mut self, ranges: &[(usize, usize)]) -> Result<usize, ModelError> {
+        if let Some((a, b)) = self.cfg.lm_strips {
+            return Err(ModelError::Config(format!(
+                "this rank holds only the lm_head strips {a}..{b} (lm-held): the drafter's restricted head is built from the pack's bytes \
+                 (mtp_restrict_vocab_from_pack), not copied from the device"
+            )));
+        }
         let w = self.dev.lm_head.select_strips(ranges)?;
+        self.install_sub_head(w, ranges)
+    }
+
+    /// [`GlmModel::mtp_restrict_vocab`] for a rank that holds only its vocabulary half of the lm_head (`lm-held`): the set's strips are read
+    /// from the pack (`dir`, the plan's `files`) where `lm` (the pack's head as this rank mapped it: `k`, `n` the stored group's, `src` the stored
+    /// parts' first bytes) stores them, by the runs the loader reads a cut with (`exl3_split::cut_trellis_runs` / `cut_vector_runs`), which lay
+    /// the strips out exactly as `Exl3Weights::select_strips` copies them from a whole head on the device: the same bytes, the same
+    /// allocations (what the plan charged, `sub_head_bytes`). A boot-time host read of the set's share of the head.
+    pub fn mtp_restrict_vocab_from_pack(
+        &mut self,
+        ranges: &[(usize, usize)],
+        dir: &std::path::Path,
+        files: &[String],
+        lm: &crate::families::glm::weights::Exl3Linear,
+    ) -> Result<usize, ModelError> {
+        use std::os::unix::fs::FileExt;
+        let bad = |m: String| ModelError::Config(format!("the drafter's restricted head from the pack: {m}"));
+        let (k, n) = (lm.k, lm.n);
+        if (k, n) != (self.cfg.hidden, self.cfg.vocab) || lm.bits.twice() % 2 != 0 {
+            return Err(bad(format!(
+                "the pack's lm_head is {k} x {n} at {} bits, not {} x {} at whole bits",
+                lm.bits.as_f64(),
+                self.cfg.hidden,
+                self.cfg.vocab
+            )));
+        }
+        let bits = lm.bits.twice() as usize / 2;
+        if bits != self.dev.lm_head.bits || lm.suh.bytes != (k * 2) as u64 {
+            return Err(bad(format!(
+                "the pack's lm_head ({bits} bits, suh {} B) is not the loaded one ({} bits)",
+                lm.suh.bytes, self.dev.lm_head.bits
+            )));
+        }
+        let (Some(tr), Some(sv)) =
+            (gb_cuda::exl3_split::cut_trellis_runs(k, n, bits, ranges), gb_cuda::exl3_split::cut_vector_runs(n, ranges))
+        else {
+            return Err(bad(format!("strips {ranges:?} are not a cut of {k} x {n}")));
+        };
+        let kept: usize = ranges.iter().map(|&(lo, hi)| hi - lo).sum();
+        let mut open: std::collections::BTreeMap<u16, std::fs::File> = Default::default();
+        let mut read = |part: &crate::families::glm::weights::Exl3Part,
+                        runs: &[(usize, usize, usize)],
+                        len: usize|
+         -> Result<DevBuf, ModelError> {
+            let file = part.src.file;
+            if !open.contains_key(&file) {
+                let name = files.get(file as usize).ok_or_else(|| bad(format!("file {file} is not in the plan")))?;
+                let f = std::fs::File::open(dir.join(name)).map_err(|e| bad(format!("{name}: {e}")))?;
+                open.insert(file, f);
+            }
+            let f = &open[&file];
+            let mut host = vec![0u8; len];
+            for &(src, dst, bytes) in runs {
+                f.read_exact_at(&mut host[dst..dst + bytes], part.src.offset + src as u64)
+                    .map_err(|e| bad(format!("{}: {e}", lm.prefix)))?;
+            }
+            let mut d = DevBuf::alloc(len)?;
+            d.upload(&host)?;
+            Ok(d)
+        };
+        let trellis = read(&lm.trellis, &tr, (k / 16) * kept * 64 * bits * 4)?;
+        let suh = read(&lm.suh, &[(0, 0, k * 2)], k * 2)?;
+        let svh = read(&lm.svh, &sv, kept * 128 * 2)?;
+        let dims = gb_cuda::exl3_linear::Exl3Dims { k, n: kept * 128, bits, codebook: lm.codebook };
+        let w = gb_cuda::exl3_linear::Exl3Weights::from_dims(dims, trellis, suh, svh, None)?;
+        self.install_sub_head(w, ranges)
+    }
+
+    /// The restricted head over `ranges` from its strips `w` (copied or read): its map, workspace and logits, checked against the plan.
+    fn install_sub_head(&mut self, w: gb_cuda::exl3_linear::Exl3Weights, ranges: &[(usize, usize)]) -> Result<usize, ModelError> {
         let cols = w.n;
         let strips_full = self.cfg.vocab / 128;
         let mut strip_in = vec![false; strips_full];
@@ -1143,6 +1262,12 @@ impl GlmModel {
         if let Some(m) = self.mtp.as_mut() {
             m.vocab = if m.sub.is_some() { mode } else { VocabMode::Full };
         }
+    }
+
+    /// Whether the last draft call's head was the restricted one (`Some(false)`: the full head, the adaptive mode's fallback included);
+    /// `None` without the NextN layer. Telemetry only (the cost log's `D` lines).
+    pub fn mtp_last_head_restricted(&self) -> Option<bool> {
+        self.mtp.as_ref().map(|m| m.vocab_active)
     }
 
     /// The restricted head, when built.
@@ -1594,9 +1719,10 @@ impl GlmModel {
     ) -> Result<MtpCapture, ModelError> {
         let h = self.cfg.hidden;
         let n = tokens.len();
-        if self.mtp.is_none() || n == 0 || hidden.len() != n * h {
+        if self.mtp.is_none() || n == 0 || hidden.len() != n * h || tail > MAX_ROWS {
             return Err(ModelError::Request(
-                "mtp_debug_forward: a model with the NextN layer, tokens and one hidden row per token".into(),
+                "mtp_debug_forward: a model with the NextN layer, tokens, one hidden row per token and a tail of at most MAX_ROWS"
+                    .into(),
             ));
         }
         self.flush()?;
@@ -1605,8 +1731,8 @@ impl GlmModel {
         let mut at = 0;
         while at < n {
             // the captured tail comes from the last call: keep at least `tail` rows for it (the layer is row-invariant, so the cut changes no bit)
-            let left = n - at;
-            let end = if left > MAX_ROWS && left - MAX_ROWS < tail { n - tail } else { (at + MAX_ROWS).min(n) };
+            let end = debug_forward_chunk_end(n, at, tail)
+                .ok_or_else(|| ModelError::Request("mtp_debug_forward: invalid tail or chunk cursor".into()))?;
             let rows = end - at;
             self.ensure_positions(&[(slot, start + end - 1)])?;
             {
@@ -1779,5 +1905,24 @@ mod tests {
         b.disable();
         assert_eq!(b.prefill_chunk(0, 8), Err(BookError::Off));
         assert_eq!(b.absorb_check(9), Err(BookError::Off));
+    }
+
+    #[test]
+    fn debug_forward_chunks_reject_an_oversized_tail_and_always_advance() {
+        assert_eq!(debug_forward_chunk_end(MAX_ROWS + 1, 0, MAX_ROWS + 1), None);
+        assert_eq!(debug_forward_chunk_end(2 * MAX_ROWS, MAX_ROWS, MAX_ROWS + 1), None);
+        for n in [1, MAX_ROWS, MAX_ROWS + 1, 2 * MAX_ROWS, 3 * MAX_ROWS + 7] {
+            for tail in [0, 1, MAX_ROWS - 1, MAX_ROWS] {
+                let mut at = 0;
+                let mut chunks = 0;
+                while at < n {
+                    let end = debug_forward_chunk_end(n, at, tail).unwrap();
+                    assert!(end > at && end <= n, "n={n} at={at} end={end} tail={tail}");
+                    at = end;
+                    chunks += 1;
+                    assert!(chunks <= n.div_ceil(MAX_ROWS) + 1);
+                }
+            }
+        }
     }
 }

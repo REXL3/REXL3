@@ -166,7 +166,10 @@ impl BailingConfig {
         let hidden = u("hidden_size")?;
         let vocab = u("vocab_size")?;
         let n = u("num_hidden_layers")?;
-        let first_dense = u("first_k_dense_replace").unwrap_or(DEFAULT_FFN_DENSE);
+        let first_dense = match t.get("first_k_dense_replace") {
+            None => DEFAULT_FFN_DENSE,
+            Some(_) => u("first_k_dense_replace")?,
+        };
         let layer_group = u("layer_group_size")?;
         if layer_group == 0 {
             return Err("config.json: `layer_group_size` must be positive".into());
@@ -288,9 +291,20 @@ impl BailingConfig {
         }
 
         let eos = match t.get("eos_token_id") {
-            Some(Value::Number(x)) => x.as_u64().map(|x| vec![x as u32]).unwrap_or_default(),
-            Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect(),
-            _ => vec![],
+            None | Some(Value::Null) => vec![],
+            Some(Value::Number(x)) => vec![x
+                .as_u64()
+                .and_then(|x| u32::try_from(x).ok())
+                .ok_or("config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them")?],
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|x| {
+                    x.as_u64().and_then(|x| u32::try_from(x).ok()).ok_or_else(|| {
+                        "config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them".to_string()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("config.json: `eos_token_id` must be a 32-bit unsigned integer or a list of them".into()),
         };
         if let Some(bad) = eos.iter().find(|&&id| id as usize >= vocab) {
             return Err(format!("config.json: eos token {bad} is outside the vocabulary of {vocab}"));
@@ -377,5 +391,45 @@ mod tests {
         let c = BailingConfig::from_json(&v).unwrap();
         assert!(c.mtp.is_empty());
         assert!(!c.has_mtp());
+    }
+
+    #[test]
+    fn first_dense_defaults_only_when_absent() {
+        let mut v: Value = serde_json::from_str(REAL).unwrap();
+        v.as_object_mut().unwrap().remove("first_k_dense_replace");
+        let c = BailingConfig::from_json(&v).unwrap();
+        assert_eq!(c.moe_layers(), (DEFAULT_FFN_DENSE..c.layers.len()).collect::<Vec<_>>());
+
+        for bad in [serde_json::json!("4"), serde_json::json!(4.0), serde_json::json!(-1), serde_json::json!(null)] {
+            let mut v: Value = serde_json::from_str(REAL).unwrap();
+            v["first_k_dense_replace"] = bad;
+            let e = BailingConfig::from_json(&v).unwrap_err();
+            assert!(e.contains("first_k_dense_replace"), "unexpected error: {e}");
+        }
+    }
+
+    #[test]
+    fn eos_token_ids_are_parsed_strictly() {
+        for bad in [
+            serde_json::json!("156895"),
+            serde_json::json!(156895.0),
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            serde_json::json!([156895, "156896"]),
+            serde_json::json!([null]),
+            serde_json::json!({ "id": 156895 }),
+        ] {
+            let mut v: Value = serde_json::from_str(REAL).unwrap();
+            v["eos_token_id"] = bad;
+            let e = BailingConfig::from_json(&v).unwrap_err();
+            assert!(e.contains("eos_token_id"), "unexpected error: {e}");
+        }
+
+        let mut v: Value = serde_json::from_str(REAL).unwrap();
+        v["eos_token_id"] = serde_json::json!([156895, 156896]);
+        assert_eq!(BailingConfig::from_json(&v).unwrap().eos, vec![156895, 156896]);
+        let mut v: Value = serde_json::from_str(REAL).unwrap();
+        v.as_object_mut().unwrap().remove("eos_token_id");
+        assert!(BailingConfig::from_json(&v).unwrap().eos.is_empty());
     }
 }

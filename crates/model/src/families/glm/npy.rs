@@ -55,7 +55,11 @@ pub fn parse(b: &[u8]) -> Result<Npy, String> {
     }
     let (hlen, off) = match b[6] {
         1 => (u16::from_le_bytes([b[8], b[9]]) as usize, 10),
-        _ => (u32::from_le_bytes([b[8], b[9], b[10], b[11]]) as usize, 12),
+        2 | 3 => {
+            let len: [u8; 4] = b.get(8..12).ok_or("truncated version 2/3 header length")?.try_into().unwrap();
+            (u32::from_le_bytes(len) as usize, 12)
+        }
+        v => return Err(format!("unsupported .npy version {v}.{}", b[7])),
     };
     let header = std::str::from_utf8(b.get(off..off + hlen).ok_or("truncated header")?).map_err(|e| e.to_string())?;
     let field = |key: &str| -> Result<&str, String> {
@@ -173,5 +177,13 @@ mod tests {
         b.truncate(b.len() - 3);
         assert!(parse(&b).is_err());
         assert!(parse(&encode("<c8", &[1], &[0u8; 8])).is_err(), "unsupported dtype");
+        for version in [2, 3] {
+            for len in 10..12 {
+                let b = [b"\x93NUMPY".as_slice(), &[version, 0], &[0; 8][..len - 8]].concat();
+                assert!(parse(&b).is_err(), "version {version}, {len} bytes must not panic");
+            }
+        }
+        let err = parse(b"\x93NUMPY\x04\x00\x00\x00").unwrap_err();
+        assert!(err.contains("unsupported .npy version 4.0"), "{err}");
     }
 }

@@ -65,6 +65,14 @@ mod ffi {
             vals: *mut c_void,
             s: *mut c_void,
         ) -> i32;
+        pub fn gb_nemo_glue_logprob_norm_f32(
+            logits: *const c_void,
+            rows: i32,
+            vocab: i32,
+            chosen: *const c_void,
+            out: *mut c_void,
+            s: *mut c_void,
+        ) -> i32;
         pub fn gb_nemo_glue_splice_rows(feats: *const c_void, src_row: i64, dst: *mut c_void, dst_row: i64, n: i64, s: *mut c_void) -> i32;
     }
 }
@@ -211,21 +219,55 @@ pub fn topk_f32(
     need(ws, topk_workspace_bytes(rows, vocab, count), 8, "ws");
     need(ids, rows * count * 4, 4, "ids");
     need(vals, rows * count * 4, 4, "vals");
+    // SAFETY: the buffer-size and alignment checks above establish the raw contract.
+    unsafe { topk_f32_raw(logits.ptr(), rows, vocab, count, ws.ptr(), ws.bytes(), ids.ptr(), vals.ptr(), st) }
+}
+
+/// Raw-pointer form of [`topk_f32`], for the compact log-probability readout's carved output buffers.
+/// The caller must uphold the same size and alignment requirements as [`topk_f32`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn topk_f32_raw(
+    logits: *const core::ffi::c_void,
+    rows: usize,
+    vocab: usize,
+    count: usize,
+    ws: *mut core::ffi::c_void,
+    ws_bytes: usize,
+    ids: *mut core::ffi::c_void,
+    vals: *mut core::ffi::c_void,
+    st: &Stream,
+) -> Result<(), CudaError> {
     let blocks = topk_blocks_per_row(rows, vocab);
     CudaError::check(unsafe {
-        ffi::gb_nemo_glue_topk(
-            logits.ptr(),
-            i(rows)?,
-            i(vocab)?,
-            i(count)?,
-            i(blocks)?,
-            ws.ptr(),
-            ws.bytes(),
-            ids.ptr(),
-            vals.ptr(),
-            st.raw(),
-        )
+        ffi::gb_nemo_glue_topk(logits, i(rows)?, i(vocab)?, i(count)?, i(blocks)?, ws, ws_bytes, ids, vals, st.raw())
     })
+}
+
+/// Compact chosen-token and top-k readout of f32 logits `[rows, vocab]`. `norm` receives `[lse, chosen_logit]` per row;
+/// the id/value and workspace buffers have the same contract as [`topk_f32_raw`]. Nothing is synchronised.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logprob_rows_f32(
+    logits: *const core::ffi::c_void,
+    rows: usize,
+    vocab: usize,
+    k: usize,
+    chosen: *const core::ffi::c_void,
+    norm: *mut core::ffi::c_void,
+    ids: *mut core::ffi::c_void,
+    vals: *mut core::ffi::c_void,
+    ws: *mut core::ffi::c_void,
+    ws_bytes: usize,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    if rows == 0 {
+        return Ok(());
+    }
+    if k == 0 || k > crate::logprob::MAX_TOP || k > vocab {
+        return Err(INVALID);
+    }
+    CudaError::check(unsafe { ffi::gb_nemo_glue_logprob_norm_f32(logits, i(rows)?, i(vocab)?, chosen, norm, st.raw()) })?;
+    // SAFETY: the caller upholds the raw top-k buffer contract; the norm launch is ordered before top-k on `st`.
+    unsafe { topk_f32_raw(logits, rows, vocab, k, ws, ws_bytes, ids, vals, st) }
 }
 
 /// Copies `n` rows of bf16 image features `[*, 4096]` starting at `src_row` over the f32 rows of `dst` starting at `dst_row`

@@ -161,6 +161,11 @@ pub trait DraftModel {
     /// The slot's tap book (host state, identical on every rank).
     fn mtp_book(&self, slot: usize) -> Option<TapBook>;
     fn mtp_draft_keyed(&mut self, asks: &[DraftAsk<'_>], keyed: &[Option<Sampling>]) -> Result<Vec<Option<Drafts>>, ModelError>;
+    /// Whether the last draft call's head was the restricted one (`GlmModel::mtp_last_head_restricted`; telemetry, the cost log). The
+    /// default: unknown.
+    fn mtp_last_head_restricted(&self) -> Option<bool> {
+        None
+    }
     /// A DFlash2 draft is loaded (`--draft`). A model without one (every rank group today) keeps the defaults.
     fn has_dflash(&self) -> bool {
         false
@@ -197,6 +202,9 @@ impl DraftModel for GlmModel {
     fn mtp_draft_keyed(&mut self, asks: &[DraftAsk<'_>], keyed: &[Option<Sampling>]) -> Result<Vec<Option<Drafts>>, ModelError> {
         GlmModel::mtp_draft_keyed(self, asks, keyed)
     }
+    fn mtp_last_head_restricted(&self) -> Option<bool> {
+        GlmModel::mtp_last_head_restricted(self)
+    }
 }
 
 /// A rank's runtime as the drafter needs it (the real one is `tp::GlmRank`; the CPU tests drive a recording mock).
@@ -204,6 +212,10 @@ pub trait GlmMtpRuntime: LockstepRuntime<Call = GlmCall> {
     fn mtp_book(&self, slot: usize) -> Option<TapBook>;
     fn mtp_draft_keyed(&mut self, asks: &[DraftAsk<'_>], keyed: &[Option<Sampling>]) -> Result<Vec<Option<Drafts>>, ModelError>;
     fn mtp_disable_slot(&mut self, slot: usize);
+    /// Whether this rank's last draft call's head was the restricted one (telemetry; every rank chooses alike). The default: unknown.
+    fn mtp_last_head_restricted(&self) -> Option<bool> {
+        None
+    }
     /// Rank 0's DFlash2 draft (`--draft`): it lives on rank 0 alone and reads rank 0's taps (every rank's streams are the single node's bits),
     /// so its calls are rank 0's own, never forwarded. The defaults: no draft (a follower, the CPU mocks).
     fn has_dflash(&self) -> bool {
@@ -243,6 +255,9 @@ impl<R: GlmMtpRuntime> DraftModel for TpLeader<R> {
     }
     fn mtp_book(&self, slot: usize) -> Option<TapBook> {
         self.inner().mtp_book(slot)
+    }
+    fn mtp_last_head_restricted(&self) -> Option<bool> {
+        self.inner().mtp_last_head_restricted()
     }
     /// Forwarded first (the follower enters the same NextN forwards and meets this rank in each depth's exchange), then run here; the
     /// follower's digest of its drafts must equal this rank's.

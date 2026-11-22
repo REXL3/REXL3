@@ -102,3 +102,47 @@ fn a_family_without_the_full_readout_refuses_prompt_logprobs_with_a_400() {
     let r = post(&s, json!({"model": "mock", "prompt": [5, 6, 7, 8], "max_tokens": 2}));
     assert_eq!(r.status, 200, "{}", r.body);
 }
+
+/// A backend that answers the readout in the compact form (each row reduced to its normaliser, its next token's logit and its
+/// top logits) gives the same response: the same shape, tokens, ids and order as the full-row form, the values to f32 rounding.
+/// One that serves the readout only still answers it, and its plain completions are unaffected.
+#[test]
+fn the_compact_form_of_the_readout_gives_the_same_response_shape() {
+    let ids: Vec<u32> = (0..17u32).map(|i| (i * 97 + 13) % 256).collect();
+    let k = 4;
+    let full = readout(&start(Opts::default()), &ids, k);
+    for readout_only in [false, true] {
+        let mut o = Opts::default();
+        o.mock.compact_rows = true;
+        o.mock.readout_only = readout_only;
+        let s = start(o);
+        let v = readout(&s, &ids, k);
+        let near = |a: &Value, b: &Value| (a.as_f64().unwrap() - b.as_f64().unwrap()).abs() < 1e-5;
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&v), keys(&full));
+        assert_eq!(keys(&v["choices"][0]), keys(&full["choices"][0]));
+        let (lp, flp) = (&v["choices"][0]["logprobs"], &full["choices"][0]["logprobs"]);
+        assert_eq!(keys(lp), keys(flp));
+        for key in ["tokens", "token_ids", "text_offset"] {
+            assert_eq!(lp[key], flp[key], "{key}");
+        }
+        assert_eq!(v["usage"], full["usage"]);
+        let (e, f) = (v["prompt_logprobs"].as_array().unwrap(), full["prompt_logprobs"].as_array().unwrap());
+        assert_eq!((e.len(), &e[0]), (ids.len(), &f[0]));
+        for i in 1..ids.len() {
+            assert_eq!(keys(&e[i]), keys(&f[i]), "entry {i}");
+            assert_eq!(
+                (&e[i]["position"], &e[i]["token_id"], &e[i]["top_ids"]),
+                (&f[i]["position"], &f[i]["token_id"], &f[i]["top_ids"])
+            );
+            assert!(near(&e[i]["logprob"], &f[i]["logprob"]) && near(&lp["token_logprobs"][i], &flp["token_logprobs"][i]));
+            for j in 0..k {
+                assert!(near(&e[i]["top_logprobs"][j], &f[i]["top_logprobs"][j]), "entry {i} top {j}");
+            }
+            assert_eq!(keys(&lp["top_logprobs"][i]), keys(&flp["top_logprobs"][i]), "entry {i}");
+        }
+        assert_eq!(readout(&s, &ids, k)["prompt_logprobs"], v["prompt_logprobs"], "a repeat is identical");
+        let r = post(&s, json!({"model": "mock", "prompt": [5, 6, 7, 8], "max_tokens": 2}));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+}

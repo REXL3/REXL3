@@ -84,7 +84,9 @@ fn t() -> TpTimeouts {
 }
 
 /// The group: rank 0 a `GlmTpBackend` (drafting and images) over a leader, rank 1 a follower thread with no tower; returns the run, rank
-/// 0's counters, its exchanges and the follower's call count.
+/// 0's counters, its exchanges and the follower's call count. With `lend` (images and the bytes their features must have), rank 0's tower
+/// borrows its scratch from rank 0's prefill scratch (`REXL3_GLM_TOWER_LEND`) and encodes those images on another thread throughout.
+#[allow(clippy::too_many_arguments)]
 fn group_run(
     dir: &Path,
     owns: [&ExpertOwnership; 2],
@@ -92,9 +94,18 @@ fn group_run(
     mutant: Option<MtpMutant>,
     image_token: u32,
     p: &[Prompt; 3],
+    lend: Option<Vec<(gb_vision::Preprocessed, Vec<u8>)>>,
 ) -> (Run, String, (u64, u64)) {
     let mut a = load(dir, Some(owns[0]), mode);
     let mut b = load(dir, Some(owns[1]), mode);
+    let hammer = lend.map(|jobs| {
+        let lease = a.lend_prefill_scratch().unwrap().expect("rank 0 has a prefill scratch");
+        let pack0 = GlmFamily::map_pack_owned(dir, owns[0]).unwrap();
+        let (enc, _, lent) = glm_encoder(dir, &pack0, 1024, Some(lease.clone()), false);
+        eprintln!("rank 0's tower: {:.1} MiB of its scratch lent", lent as f64 / 1048576.0);
+        assert!(lent > 0);
+        (Hammer::start(enc, jobs), lease)
+    });
     a.set_mtp_mutant(mutant);
     b.set_mtp_mutant(mutant);
     let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(600)).into_iter();
@@ -111,6 +122,13 @@ fn group_run(
     });
     assert!(be.take_error().is_none());
     be.leader.barrier().expect("the follower agreed with every call");
+    if let Some((h, lease)) = hammer {
+        let (encodes, bad, _) = h.finish();
+        let (taken, waited) = lease.counts();
+        eprintln!("{encodes} concurrent encodes on the lent scratch ({bad} differ); lease taken {taken:?}, waited {waited:?} (model, tower)");
+        assert_eq!(bad, 0, "an encode on the lent scratch differs from the own scratch's");
+        assert!(encodes > 0 && taken[0] > 0 && taken[1] > 0 && lease.is_free());
+    }
     let stats = stats_key(&be.spec.as_ref().unwrap().stats);
     let tp = be.leader.inner().m.tp().unwrap();
     let ex = (tp.exchanges, tp.exchanged_bytes);
@@ -197,7 +215,7 @@ fn image_prompts_with_mtp_drafting_on_two_ranks_equal_one_model_byte_for_byte() 
     // two ranks, each holding only its share (the NextN layer's experts too), the follower with no tower
     for (i, (name, mode)) in modes.into_iter().enumerate() {
         let t0 = std::time::Instant::now();
-        let (r, s, ex) = group_run(&dir, [&owns[0], &owns[1]], mode, None, image_token, &p);
+        let (r, s, ex) = group_run(&dir, [&owns[0], &owns[1]], mode, None, image_token, &p, None);
         eprintln!(
             "two ranks, {name} head, in {:.1?}: {} exchanges of {:.1} MiB in all on rank 0",
             t0.elapsed(),
@@ -231,10 +249,51 @@ fn image_prompts_with_mtp_drafting_on_two_ranks_equal_one_model_byte_for_byte() 
 
     // negative control (b): both ranks' drafters ignore the image rows: the group equals the one model's mutant, not the reference
     let (g, _, _) =
-        group_run(&dir, [&owns[0], &owns[1]], VocabMode::Restricted, Some(MtpMutant::PlaceholderImages), image_token, &p);
+        group_run(&dir, [&owns[0], &owns[1]], VocabMode::Restricted, Some(MtpMutant::PlaceholderImages), image_token, &p, None);
     let differ = g.lines.iter().zip(&reference[0].0.lines).filter(|(x, y)| x != y).count();
     assert!(differ > 0, "the group's drafter never read the image rows");
     assert_eq!(g, ph, "the mutant group differs from the mutant one model");
     eprintln!("negative control (b) (drafters without the image rows, both ranks): {differ} of {} lines differ; == the one model's mutant", g.lines.len());
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// V3 (`REXL3_GLM_TOWER_LEND`) with MTP drafting: the same group and script as above (restricted head) with rank 0's tower borrowing its
+/// scratch from rank 0's prefill scratch, which the trunk's prompt chunks AND the NextN layer's prefill of each chunk use, while another
+/// thread encodes the two images on it throughout. The lines (candidates and fp16 logits of every answering call, every round's drafts),
+/// keeps and speculation counters equal the one model's with the tower's own scratch; every encode gives the own scratch's bytes.
+#[test]
+#[ignore]
+fn image_prompts_with_mtp_drafting_and_a_lent_tower_on_two_ranks_equal_one_model_byte_for_byte() {
+    let Some(dir) = pack_dir() else { return };
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    let owns = [ExpertOwnership::range(E, 0, 2).unwrap(), ExpertOwnership::range(E, 1, 2).unwrap()];
+    let (ia, ib, image_token) = {
+        let pack0 = GlmFamily::map_pack_owned(&dir, &owns[0]).unwrap();
+        glm_vision_mtp_script::encode_two(&dir, &pack0)
+    };
+    // the images `encode_two` encodes, and the bytes the tower's own scratch gave them
+    let pp = glm_preprocessor(&dir, 1024);
+    let jobs: Vec<(gb_vision::Preprocessed, Vec<u8>)> = [(synth_rgb(448, 448, 1), &ia), (synth_rgb(336, 224, 2), &ib)]
+        .into_iter()
+        .map(|(rgb, im)| (pp.preprocess(&rgb).unwrap(), glm_feature_bytes(&im.features)))
+        .collect();
+    let p = glm_vision_mtp_script::prompts(image_token, &ia, &ib);
+    let mut m = load(&dir, None, VocabMode::Restricted);
+    m.set_graphs(false);
+    let mut be = GlmBackend::with_spec(m, spec_cfg()).with_chunk(CHUNK);
+    let reference = glm_vision_mtp_script::run(&mut be, &p, |b: &GlmBackend, rows| b.m.logits_host(0, rows).unwrap());
+    let rs = stats_key(&be.spec.as_ref().unwrap().stats);
+    drop(be);
+    assert!(drafted(&reference) > 0);
+    let (r, s, _) = group_run(&dir, [&owns[0], &owns[1]], VocabMode::Restricted, None, image_token, &p, Some(jobs));
+    assert_eq!(r, reference, "with a lent tower: drafts, keeps or lines differ from the one model's");
+    assert_eq!(s, rs, "with a lent tower: the speculation counters differ");
+    eprintln!(
+        "BYTE-IDENTICAL with MTP drafting and a lent tower: {} lines, {} drafts, keeps, counters; {rs}",
+        r.lines.len(),
+        drafted(&r)
+    );
     eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
 }

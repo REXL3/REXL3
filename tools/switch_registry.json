@@ -787,11 +787,29 @@
    "deprecated": false
   },
   {
+   "name": "REXL3_GLM_PLAN_PRICE_UNMODELLED",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/memory.rs:61",
+   "controls": "REXL3_GLM_PLAN_PRICE_UNMODELLED",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_ROCE_SITES",
+   "kind": "env",
+   "default": null,
+   "accepted": "all (default) | sized: only the RoCE size classes the rank's prefill chunk and slots reach",
+   "reader": "crates/model/src/families/glm/tp_boot.rs:555",
+   "controls": "REXL3_GLM_ROCE_SITES",
+   "deprecated": false
+  },
+  {
    "name": "REXL3_GLM_RESERVE_MARGIN_GIB",
    "kind": "env",
    "default": null,
    "accepted": null,
-   "reader": "crates/model/src/families/glm/memory.rs:62",
+   "reader": "crates/model/src/families/glm/memory.rs:82",
    "controls": "REXL3_GLM_RESERVE_MARGIN_GIB",
    "deprecated": false
   },
@@ -802,6 +820,15 @@
    "accepted": null,
    "reader": "crates/model/src/families/glm/tp_boot.rs:1107",
    "controls": "REXL3_GLM_SC410_DIR",
+   "deprecated": false
+  },
+  {
+   "name": "REXL3_GLM_TOWER_LEND",
+   "kind": "env",
+   "default": null,
+   "accepted": null,
+   "reader": "crates/model/src/families/glm/lend.rs:31",
+   "controls": "REXL3_GLM_TOWER_LEND",
    "deprecated": false
   },
   {

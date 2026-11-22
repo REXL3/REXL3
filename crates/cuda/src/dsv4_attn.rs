@@ -1856,6 +1856,7 @@ mod ffi {
                 start_pos: i32,
                 ratio: i32,
                 dtype: i32,
+                force_scalar: i32,
                 stream: *mut c_void,
             ) -> i32;
             /// `topk` best positions per row, ascending, `+ val_offset`, `-1` past the count, written at `col_offset`.
@@ -3180,6 +3181,7 @@ impl MlaDsv4 {
                                         (start_pos + r0) as i32,
                                         ratio as i32,
                                         f16,
+                                        0,
                                         st.raw(),
                                     )
                                 };
@@ -3676,6 +3678,7 @@ impl MlaDsv4 {
                                     (start_pos + r0) as i32,
                                     ratio as i32,
                                     f16,
+                                    0,
                                     st.raw(),
                                 )
                             };

@@ -38,6 +38,41 @@ pub const GRAPH_LIMIT: usize = 96;
 /// Instantiated graphs of NextN draft calls kept at once (their own cache beside the windows').
 pub const DRAFT_GRAPH_LIMIT: usize = 32;
 
+/// Draft graphs a one-slot budget keeps ([`GraphBudget::one_slot`]): a steady one-sequence decode cycles through the absorb of 1 ..= depth + 1
+/// rows and the chains of each depth in its regime, about a dozen keys; the rarer keys (a prompt's own absorb, a keyed pick) are evicted
+/// least recently used first and captured again when they come back. Speed only: a draft part replayed or run eagerly is the same bits.
+pub const ONE_SLOT_DRAFT_GRAPHS: usize = 16;
+
+/// The graph caches' limits of a model whose memory plan charges them (`GlmModel::set_graph_budget`): instantiated window and draft graphs
+/// kept at once. The default limits ([`GRAPH_LIMIT`], [`DRAFT_GRAPH_LIMIT`]) hold unless a budget is set. A lower limit changes which shapes
+/// replay a graph and which are captured again, never a bit (a window or a draft part through its graph is the eager launches' arithmetic:
+/// the module table, `glm_perf.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphBudget {
+    pub windows: usize,
+    pub drafts: usize,
+}
+
+impl GraphBudget {
+    /// The budget of a model serving ONE sequence slot whose drafts are at most `max_depth` tokens a round: every window shape that slot can
+    /// produce (a decode or verify window of 1 ..= `1 + max_depth` rows of the one sequence, every row's logits, either DSA regime:
+    /// `2 x (1 + max_depth)` keys, so no window graph is ever evicted) and [`ONE_SLOT_DRAFT_GRAPHS`] draft graphs.
+    pub fn one_slot(max_depth: usize) -> Self {
+        Self { windows: 2 * (1 + max_depth), drafts: ONE_SLOT_DRAFT_GRAPHS }
+    }
+
+    /// The budget a boot sets: [`GraphBudget::one_slot`] when the plan charges what it allocates (`priced`:
+    /// `memory::PRICE_UNMODELLED_ENV`) under `--prefix-cache pool` (one sequence slot only; both are in the tensor-parallel Hello through the
+    /// cache request label, `tp_boot::cache_request_label`, so every rank of a group runs the same limits and evicts alike), `None` (the
+    /// default limits) otherwise: every shipped profile.
+    pub fn for_boot(priced: bool, prefix_pool: bool, slots: usize, max_depth: usize) -> Option<GraphBudget> {
+        (priced && prefix_pool && slots == 1).then(|| Self::one_slot(max_depth))
+    }
+
+    /// The default limits (no budget).
+    pub const DEFAULT: GraphBudget = GraphBudget { windows: GRAPH_LIMIT, drafts: DRAFT_GRAPH_LIMIT };
+}
+
 /// `REXL3_GLM_DRAFT_GRAPHS`: whether a NextN draft call (its absorb, then its head and chain) runs through graphs of its own (`0` / `off`: eager,
 /// `1` / `on`: graphs). Unset: on for a rank of a tensor-parallel group, off on one node (whose draft calls keep their eager launches). Only
 /// with window graphs on; a fact of the TP Hello (`GlmFacts::draft_graphs`).
@@ -228,6 +263,10 @@ pub struct GraphStats {
     pub draft_captures: u64,
     pub draft_eager: u64,
     pub draft_capture_failures: u64,
+    /// Under a graph budget only (`GlmModel::set_graph_budget`): the most device memory one new window / draft graph took, measured as the
+    /// device's free memory before its capture less after its first replay (0 without a budget, or before the first capture).
+    pub max_window_graph_bytes: u64,
+    pub max_draft_graph_bytes: u64,
 }
 
 /// The side streams of a layer's branches (non-blocking) and the events that order them with the main stream. A layer forks its branches after the
@@ -306,6 +345,10 @@ pub(super) struct GraphCache {
     /// The stream captures run on (non-blocking: a capture on the model's blocking stream would order with the legacy default stream).
     cap: Option<Stream>,
     pub stats: GraphStats,
+    /// The limits ([`GraphBudget::DEFAULT`] unless `GlmModel::set_graph_budget` set one) and whether they were set: a budgeted cache also
+    /// measures what each new graph took (`GraphStats::max_window_graph_bytes`, `max_draft_graph_bytes`).
+    budget: GraphBudget,
+    budgeted: bool,
 }
 
 impl GraphCache {
@@ -325,6 +368,8 @@ impl GraphCache {
             tick: 0,
             cap: Stream::new_nonblocking().ok(),
             stats: GraphStats::default(),
+            budget: GraphBudget::DEFAULT,
+            budgeted: false,
         }
     }
 }
@@ -449,6 +494,7 @@ impl GlmModel {
         }
         // second sighting: capture
         self.make_room()?;
+        let before = self.graph_free_before()?;
         let t = Instant::now();
         match self.capture_window(plan, b, head, max_pos) {
             Ok(g) => {
@@ -456,7 +502,21 @@ impl GlmModel {
                 self.graphs.stats.capture_ms += t.elapsed().as_secs_f64() * 1e3;
                 let r = g.launch(&self.stream);
                 self.graphs.slots.insert(key, Slot::Ready(g, tick));
-                r.map_err(ModelError::from)
+                r.map_err(ModelError::from)?;
+                if let Some(took) = self.graph_took(before)? {
+                    let m = &mut self.graphs.stats.max_window_graph_bytes;
+                    if took > *m {
+                        *m = took;
+                        eprintln!(
+                            "rexl3 event=glm_graph_bytes kind=window rows={} sparse={} max_kib={} evictions={}",
+                            key.rows,
+                            key.sparse,
+                            took / 1024,
+                            self.graphs.stats.evictions
+                        );
+                    }
+                }
+                Ok(())
             }
             Err(e) => {
                 if let Some(fatal) = e.fatal() {
@@ -562,6 +622,7 @@ impl GlmModel {
             }
         }
         self.make_draft_room()?;
+        let before = self.graph_free_before()?;
         let t = Instant::now();
         let captured = {
             match self.graphs.cap.take() {
@@ -587,7 +648,22 @@ impl GlmModel {
                 self.graphs.stats.capture_ms += t.elapsed().as_secs_f64() * 1e3;
                 let r = g.launch(&self.stream);
                 self.graphs.draft_slots.insert(key, Slot::Ready(g, tick));
-                r.map_err(ModelError::from)
+                r.map_err(ModelError::from)?;
+                if let Some(took) = self.graph_took(before)? {
+                    let m = &mut self.graphs.stats.max_draft_graph_bytes;
+                    if took > *m {
+                        *m = took;
+                        eprintln!(
+                            "rexl3 event=glm_graph_bytes kind=draft chain={} rows={} depth={} max_kib={} evictions={}",
+                            key.chain,
+                            key.rows,
+                            key.depth,
+                            took / 1024,
+                            self.graphs.stats.evictions
+                        );
+                    }
+                }
+                Ok(())
             }
             Err(e) => {
                 if let Some(fatal) = e.fatal() {
@@ -621,10 +697,40 @@ impl GlmModel {
         }
     }
 
+    /// Set the graph caches' limits (a memory plan that charges them, `tp_boot::graph_budget_of`). Graphs already instantiated past a lower
+    /// limit are evicted as new ones are captured. Speed only, never a bit.
+    pub fn set_graph_budget(&mut self, budget: GraphBudget) {
+        self.graphs.budget = budget;
+        self.graphs.budgeted = true;
+        eprintln!("rexl3 event=glm_graph_budget windows={} drafts={}", budget.windows, budget.drafts);
+    }
+
+    /// The limits the graph caches run with.
+    pub fn graph_budget(&self) -> GraphBudget {
+        self.graphs.budget
+    }
+
+    /// Under a budget: the device's free memory before a capture, the stream drained first (`None` without a budget: nothing measured).
+    fn graph_free_before(&self) -> Result<Option<u64>, ModelError> {
+        if !self.graphs.budgeted {
+            return Ok(None);
+        }
+        self.stream.sync()?;
+        Ok(Some(gb_cuda::rt::mem_info()?.0 as u64))
+    }
+
+    /// Under a budget: what the graph just captured and replayed once took (the free memory before its capture less after the replay drained).
+    fn graph_took(&self, before: Option<u64>) -> Result<Option<u64>, ModelError> {
+        let Some(before) = before else { return Ok(None) };
+        self.stream.sync()?;
+        let after = gb_cuda::rt::mem_info()?.0 as u64;
+        Ok(Some(before.saturating_sub(after)))
+    }
+
     /// [`GlmModel::make_room`] for the draft graphs.
     fn make_draft_room(&mut self) -> Result<(), ModelError> {
         let ready = self.graphs.draft_slots.values().filter(|s| matches!(s, Slot::Ready(..))).count();
-        if ready < DRAFT_GRAPH_LIMIT {
+        if ready < self.graphs.budget.drafts {
             return Ok(());
         }
         self.stream.sync()?;
@@ -648,7 +754,7 @@ impl GlmModel {
     /// still executing must not be destroyed).
     fn make_room(&mut self) -> Result<(), ModelError> {
         let ready = self.graphs.slots.values().filter(|s| matches!(s, Slot::Ready(..))).count();
-        if ready < GRAPH_LIMIT {
+        if ready < self.graphs.budget.windows {
             return Ok(());
         }
         self.stream.sync()?;
@@ -672,6 +778,27 @@ impl GlmModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one-slot budget holds every window key one sequence slot produces (a decode or verify window of 1 ..= 1 + depth rows, every row's
+    /// logits, either regime), so no window graph of such a server is evicted; it applies only under the opt-in and the pool-page cache at one
+    /// slot.
+    #[test]
+    fn the_one_slot_budget_holds_every_window_shape_of_one_slot() {
+        for depth in [0usize, 1, 4, crate::families::glm::dflash::MAX_DEPTH] {
+            let b = GraphBudget::one_slot(depth);
+            let keys: std::collections::HashSet<GraphKey> =
+                (1..=1 + depth).flat_map(|rows| [0usize, 1 << 20].map(|pos| key_of(rows, 1, pos, Head::AllRows))).collect();
+            assert_eq!(keys.len(), b.windows, "depth {depth}");
+            assert_eq!(b.drafts, ONE_SLOT_DRAFT_GRAPHS);
+            assert!(b.windows <= GRAPH_LIMIT && b.drafts <= DRAFT_GRAPH_LIMIT, "a budget never raises a limit: {b:?}");
+        }
+        assert_eq!(GraphBudget::one_slot(crate::families::glm::alloc::MTP_MAX_DEPTH), GraphBudget { windows: 10, drafts: 16 });
+        assert_eq!(GraphBudget::for_boot(true, true, 1, 4), Some(GraphBudget::one_slot(4)));
+        assert_eq!(GraphBudget::for_boot(true, false, 1, 4), None, "no budget without the pool-page cache: the default limits");
+        assert_eq!(GraphBudget::for_boot(true, true, 2, 4), None);
+        assert_eq!(GraphBudget::for_boot(false, true, 1, 4), None, "no budget without the opt-in: the shipped pool-page profile");
+        assert_eq!(GraphBudget::DEFAULT, GraphBudget { windows: GRAPH_LIMIT, drafts: DRAFT_GRAPH_LIMIT });
+    }
 
     #[test]
     fn a_windows_key_is_every_host_value_the_launches_bake_in() {

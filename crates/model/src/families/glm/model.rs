@@ -39,7 +39,7 @@ pub mod mtp;
 pub mod snapshot;
 pub mod tp;
 pub use dflash::{DflashAsk, DflashState};
-pub use graphs::{GraphKey, GraphMutant, GraphStats, Wait};
+pub use graphs::{GraphBudget, GraphKey, GraphMutant, GraphStats, Wait};
 pub use mtp::{
     strip_copy_bytes, sub_head_bytes, vocab_ranges, BookError, ChainPick, DraftAsk, Drafts, HeadList, MtpCapture, MtpMutant,
     SubHead, TapBook, VocabMode, MTP_SHARE,
@@ -338,6 +338,11 @@ pub struct GlmModel {
     /// `REXL3_GLM_PROFILE_SLICES` (`profile_slices.rs`): the forward calls a rank's runtime brackets with the profiler API. Host
     /// counters only; inert without the setting.
     pub(in crate::families::glm) slices: crate::families::glm::profile_slices::SliceProfiler,
+    /// Rank 0's tower borrows four buffers of the routed experts' prefill scratch (`lend.rs`, `REXL3_GLM_TOWER_LEND`): the lease over
+    /// them, taken by every forward that reaches the prefill scratch (`pf_enter`). `None` (every shipped profile): nothing is lent.
+    lease: Option<std::sync::Arc<super::lend::ScratchLease>>,
+    /// The lease is held by this model's current call (a nested user of the prefill scratch takes nothing more).
+    pf_leased: bool,
 }
 
 fn cu(b: &DevBuf) -> *const c_void {
@@ -536,6 +541,8 @@ impl GlmModel {
             p2_side_on: p2_shared_side_on(),
             p2_kda_chunked: true,
             slices: crate::families::glm::profile_slices::SliceProfiler::from_env()?,
+            lease: None,
+            pf_leased: false,
             cfg,
             dev,
         };
@@ -543,6 +550,47 @@ impl GlmModel {
         // before any chunk can run it
         model.set_prefill_contract(super::contract::current())?;
         Ok(model)
+    }
+
+    /// Lends the four large buffers of the routed experts' prefill scratch (`PrefillScratch::lendable`) to a borrower (rank 0's vision
+    /// tower, `lend.rs`): from now on every forward that reaches the prefill scratch takes the returned lease. `None` when the model has
+    /// no prefill scratch (a chunk of `alloc::MAX_ROWS` rows or fewer). Once per model.
+    pub fn lend_prefill_scratch(&mut self) -> Result<Option<std::sync::Arc<super::lend::ScratchLease>>, ModelError> {
+        if self.lease.is_some() {
+            return Err(ModelError::Config("the prefill scratch is lent already".into()));
+        }
+        let Some(pf) = self.s.pf.as_ref() else { return Ok(None) };
+        let regions = pf.moe.lendable().iter().map(|b| b.subview(0, b.bytes())).collect();
+        let l = super::lend::ScratchLease::new(regions)?;
+        self.lease = Some(l.clone());
+        Ok(Some(l))
+    }
+
+    /// The lease over the lent prefill scratch (`None`: nothing lent).
+    pub fn scratch_lease(&self) -> Option<&std::sync::Arc<super::lend::ScratchLease>> {
+        self.lease.as_ref()
+    }
+
+    /// Takes the lease (when the prefill scratch is lent and this call does not hold it already) before work that reaches the prefill
+    /// scratch is queued; [`GlmModel::pf_leave`] gives it back.
+    fn pf_enter(&mut self) -> Result<Option<super::lend::Held>, ModelError> {
+        if self.pf_leased {
+            return Ok(None);
+        }
+        let Some(l) = self.lease.clone() else { return Ok(None) };
+        let h = l.acquire(super::lend::Party::Model, &self.stream)?;
+        self.pf_leased = true;
+        Ok(Some(h))
+    }
+
+    /// Gives back what [`GlmModel::pf_enter`] took, after the call's work `r` is queued (whatever its outcome).
+    fn pf_leave<T>(&mut self, h: Option<super::lend::Held>, r: Result<T, ModelError>) -> Result<T, ModelError> {
+        let Some(h) = h else { return r };
+        self.pf_leased = false;
+        let rel = h.release(&self.stream);
+        let v = r?;
+        rel?;
+        Ok(v)
     }
 
     /// Every allocation the model owns beyond the weights, by the names of `alloc::AllocPlan` and in bytes, summed over the real buffers.
@@ -965,6 +1013,15 @@ impl GlmModel {
     /// records for `commit`; a [`Mode::Prefill`] takes 1..=128 consecutive rows of ONE sequence and commits them layer by layer. With a
     /// head, the logits are left in the scratch (see [`GlmModel::candidates_of`]).
     pub fn forward(&mut self, b: &RowBatch, mode: Mode, head: Head) -> Result<(), ModelError> {
+        // a prompt chunk that reaches the prefill scratch (`run`'s `big || p2`) holds the lease over it while its work is queued
+        let pf = mode == Mode::Prefill
+            && (b.rows > alloc::MAX_ROWS || (!self.snap_cuts.is_empty() && self.s.pf.is_some()) || self.prefill.p2_prefill(true));
+        let h = if pf { self.pf_enter()? } else { None };
+        let r = self.forward_unleased(b, mode, head);
+        self.pf_leave(h, r)
+    }
+
+    fn forward_unleased(&mut self, b: &RowBatch, mode: Mode, head: Head) -> Result<(), ModelError> {
         let rows = b.rows;
         match mode {
             Mode::Window if rows == 0 || rows > self.window_rows => {
@@ -2213,6 +2270,11 @@ impl GlmModel {
                 }
                 Op::LmHead if big && head == Head::AllRows => {
                     // the logits of every row of a big chunk, in pieces of the head's 128 rows, into the debug buffer
+                    if let Some((a, b)) = cfg.lm_strips {
+                        return Err(ModelError::Request(format!(
+                            "all-row logits of a chunk above 128 rows read the whole lm_head, and this rank holds only its strips {a}..{b} (lm-held)"
+                        )));
+                    }
                     let dl = dump_logits.as_mut().ok_or_else(|| {
                         ModelError::Request("all-row logits of a chunk above 128 rows need enable_dump_logits".into())
                     })?;
@@ -2253,6 +2315,13 @@ impl GlmModel {
                     match tp.as_mut().filter(|t| t.split_bits() & tp::SPLIT_LM != 0) {
                         // a rank of a vocabulary split: its half of the head, the peer's half swapped in (`model/tp.rs`)
                         Some(t) => t.split_lm_head(&dev.lm_head, &s.hidden, &mut s.logits, n, &mut s.ws, st)?,
+                        // a model that holds only a vocabulary half (`lm-held`) never runs it as the whole head
+                        None if cfg.lm_strips.is_some() => {
+                            return Err(ModelError::Config(format!(
+                                "this model holds only the lm_head strips {:?} (lm-held) and runs them only with the lm split",
+                                cfg.lm_strips
+                            )))
+                        }
                         None => dev.lm_head.forward(&s.hidden, &mut s.logits, n, Dtype::F16, Dtype::F16, &mut s.ws, st)?,
                     }
                 }

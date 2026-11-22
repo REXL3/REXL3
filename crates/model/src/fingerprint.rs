@@ -52,22 +52,30 @@ pub const VALIDATED_MINICPMV4_7: &[ValidatedPair] = &[
 ];
 
 /// GLM-5.3-Flash with the DFlash2 draft, as (name, target fingerprint, draft fingerprint): the 2.25 bpw target of [`VALIDATED_TEXT`] with the
-/// published `incoai/GLM-5.3-Flash-DFlash2` checkpoint as downloaded (revision bf582e4eacc1810f76656d1811693ff6c6737d2a, bf16; the draft's
-/// own licence applies, CC BY-NC-ND 4.0: the operator obtains it, nothing of it is shipped). The draft fingerprint was computed by this code
+/// published `incoai/GLM-5.3-Flash-DFlash2` checkpoint as downloaded (revision 6cc6c481eee930a5139619ed919f78726371adbc, bf16; the draft is
+/// Apache-2.0 since that revision: the operator obtains it, nothing of it is shipped). Its `model.safetensors` and `config.json` are
+/// byte-identical to the earlier revision bf582e4e that the fingerprint was first taken from. The draft fingerprint was computed by this code
 /// (`rexl3-serve --print-fingerprints`) on a local copy whose `model.safetensors` is the Hugging Face object of that revision; its shard is
 /// pinned in [`VALIDATED_GLM53_DRAFT_SHARDS`]. It is the only GLM draft listed: any other draft, an operator's EXL3 quantization of it
 /// included, is another fingerprint, is not listed, and loads by its structure (`draft::check_draft_pack`, `structural (glm53-flash)`).
-pub const VALIDATED_GLM53_DRAFT: &[ValidatedPair] = &[(
-    "GLM-5.3-Flash-EXL3-2.25bpw-sm121 + GLM-5.3-Flash-DFlash2 (bf16, as published)",
-    "sha256:96a51ffaaddfad22d1ab6f862f405254fcd26473aec059fb5ad93ca9603f52c5",
-    GLM53_DFLASH2_FP,
-)];
+pub const VALIDATED_GLM53_DRAFT: &[ValidatedPair] = &[
+    (
+        "GLM-5.3-Flash-EXL3-2.25bpw-sm121 + GLM-5.3-Flash-DFlash2 (bf16, as published)",
+        "sha256:96a51ffaaddfad22d1ab6f862f405254fcd26473aec059fb5ad93ca9603f52c5",
+        GLM53_DFLASH2_FP,
+    ),
+    ("GLM-5.3-Flash-SAGE-REXL3-2.48bpw + GLM-5.3-Flash-DFlash2 (bf16, as published)", GLM53_FLASH_SAGE_2_48_FP, GLM53_DFLASH2_FP),
+];
 
 /// The published GLM-5.3-Flash DFlash2 checkpoint's fingerprint (see [`VALIDATED_GLM53_DRAFT`]).
 pub const GLM53_DFLASH2_FP: &str = "sha256:5b5a90b996abd72222798bf0c72784657f338f28b1ab052a17e03586b7da3cee";
+/// The GLM-5.3-Flash SAGE REXL3 2.48 bpw pack, validated serially and with the published DFlash2 draft.
+/// SAGE is our own mixed-precision quantization method for EXL3. The method is not published.
+pub const GLM53_FLASH_SAGE_2_48: &str = "vcruz305/GLM-5.3-Flash-SAGE-REXL3-2.48bpw";
+pub const GLM53_FLASH_SAGE_2_48_FP: &str = "sha256:641fb6d0504645ccc56359ff54c4a3bfe2d05e75381beacbe624b37b42f664ae";
 
-/// The shard of the published GLM-5.3-Flash DFlash2 checkpoint: SHA-256 = its Hugging Face LFS object id at revision bf582e4e, matched by
-/// sha256sum of the local bytes, which the CRC-32 was taken from (zlib.crc32).
+/// The shard of the published GLM-5.3-Flash DFlash2 checkpoint: SHA-256 = its Hugging Face LFS object id at revision 6cc6c481 (the same
+/// object as at bf582e4e), matched by sha256sum of the local bytes, which the CRC-32 was taken from (zlib.crc32).
 pub const VALIDATED_GLM53_DRAFT_SHARDS: &[(&str, &[PinnedShard])] = &[(
     GLM53_DFLASH2_FP,
     &[("model.safetensors", "b038e1d9d1e7833fa3880c2c0135ba9b673013f03da1b29fb831931584759dac", 0x8efaaff4)],
@@ -79,8 +87,10 @@ pub const VALIDATED_GLM53_DRAFT_SHARDS: &[(&str, &[PinnedShard])] = &[(
 /// selector f16; quantized twice with byte-identical files. A `--draft` that is not listed is still served: a draft cannot change an
 /// output under exact verification, so it is accepted on its structure (`draft::check_draft` at `DraftGeom::FLASH_NEXT`), and this entry
 /// only names the pair this release was measured with.
-pub const VALIDATED_FLASH_NEXT_DRAFT: &[ValidatedPair] =
-    &[("Qwen3.8-Flash-Next-EXL3-3.05bpw + Qwen3.8-Flash-Next-DFlash2 REXL3 4.00bpw", QFN305_FP, FLASH_NEXT_DFLASH2_Q4_FP)];
+pub const VALIDATED_FLASH_NEXT_DRAFT: &[ValidatedPair] = &[
+    ("Qwen3.8-Flash-Next-EXL3-3.05bpw + Qwen3.8-Flash-Next-DFlash2 REXL3 4.00bpw", QFN305_FP, FLASH_NEXT_DFLASH2_Q4_FP),
+    ("CYBER-FROST-3.8-SAGE-REXL3-3.35bpw + Qwen3.8-Flash-Next-DFlash2 REXL3 4.00bpw", CF335_FP, FLASH_NEXT_DFLASH2_Q4_FP),
+];
 
 /// The fingerprint of REXL3's 4.00 bpw EXL3 Qwen3.8-Flash-Next DFlash2 draft (see [`VALIDATED_FLASH_NEXT_DRAFT`]).
 pub const FLASH_NEXT_DFLASH2_Q4_FP: &str = "sha256:515c6507e33235b4b3eb65852194ad87f325faa87b8312a06f03868209411af7";
@@ -134,6 +144,13 @@ pub const DSV41_R0B0T_FP: &str = "sha256:ea479b4b6f7365d019805abd084ef7a154782a8
 pub const QFN305: &str = "Qwen3.8-Flash-Next-EXL3-3.05bpw";
 pub const QFN305_FP: &str = "sha256:9e31f4ee36ba86dbe5eb5b263492216e6231e1808a220de2d42483e349b30824";
 
+/// CYBER-FROST 3.8 at 3.35 bits/parameter average: nine weight shards, the 6-bit
+/// n-gram table and the in-pack MTP mixer sidecar at Hugging Face revision
+/// 33be4227ff69c85cbb94f940abe7f22ad3b504e1. The fingerprint and CRC-32s were
+/// computed on the GB10 copy; every LFS file matched its published SHA-256 first.
+pub const CF335: &str = "CYBER-FROST-3.8-SAGE-REXL3-3.35bpw";
+pub const CF335_FP: &str = "sha256:656af44a88db8434ab2ca36798097cde1416931da7ed7d3c73485937395ee450";
+
 /// Packs validated without a draft: (name, target fingerprint). GLM-5.3-Flash's serial text forward is validated against the ExLlamaV3
 /// oracle (`docs/GLM53.md`, "Whole-model oracle and tolerances") and against itself (a window equals the serial steps, bit for bit). The
 /// Nemotron packs are here although they are not text-only: the serve path asks this list for every pack booted without `--draft`
@@ -172,6 +189,8 @@ pub const VALIDATED_TEXT: &[ValidatedText] = &[
         "sha256:32167cfae738efe503ca13af3c7f107bb683aa2e73b5714849e3759721108f9b",
     ),
     (QFN305, QFN305_FP),
+    (GLM53_FLASH_SAGE_2_48, GLM53_FLASH_SAGE_2_48_FP),
+    (CF335, CF335_FP),
 ];
 
 /// The name of the text-only pack with this fingerprint, if this release was validated on it.
@@ -429,6 +448,46 @@ pub const VALIDATED_SHARDS: &[(&str, &[PinnedShard])] = &[
             ("model-00013-of-00015.safetensors", "23b1b6cecb855b54e1a318c72a6c0a20ff08ff7edfaa0b6b61652c8db369dafc", 0x568d83c9),
             ("model-00014-of-00015.safetensors", "7c79ea6fce9bef3ba730f1a724cc54b689431ac91bc1b940ec70fb0428aa5d74", 0x8b1f2ae5),
             ("model-00015-of-00015.safetensors", "ef2a16fe5dfb4a2a9dc4e23f1ccda476733fed78f4f4c026af336f479ecd6eec", 0xf0e56bf2),
+        ],
+    ),
+    // GLM-5.3-Flash SAGE REXL3 2.48 bpw: all 15 shards at revision 7d0de24624020fc4f07923572be2cef591a4d1ed.
+    // Every local shard matched its published Hugging Face LFS SHA-256 before its CRC-32 was taken.
+    (
+        GLM53_FLASH_SAGE_2_48_FP,
+        &[
+            ("model-00001-of-00015.safetensors", "af8f75edf32eb690bb01de8fb51fb713a64a12edb501caf92bd4739f472714b8", 0xb0935846),
+            ("model-00002-of-00015.safetensors", "6eacd347c9900abf4730b261c7c2460f846d9cc97f8fd3c396439334b4537b23", 0x270bfd6f),
+            ("model-00003-of-00015.safetensors", "82f90827aee1474a1e16527c93bfcc2c152778390ab57faf6f048f1f7995094b", 0x10bffe5e),
+            ("model-00004-of-00015.safetensors", "db3ad0785a8dc10101775c0c729914e62324046a8c7b6ce08f5b9f71aa30edce", 0x757362b8),
+            ("model-00005-of-00015.safetensors", "748741e7623ae41e111237664cb431187d327a7cdb4542cf3937a2bca69f30d9", 0x7de806a6),
+            ("model-00006-of-00015.safetensors", "b9c09a72a843a56751ce89a81aec752dacbae2b557d559fbd7306681b37a5738", 0xafec6d7f),
+            ("model-00007-of-00015.safetensors", "0d84c748fd58604e9a2330a94af40f38104a29297683f3b34f7ff6dc3ecbfedf", 0xabbb6830),
+            ("model-00008-of-00015.safetensors", "252df16da50e5a96e5e1e95ca4e4e1d182517a169ff0acf3bbe0d7231a71c52c", 0xf9f127e8),
+            ("model-00009-of-00015.safetensors", "fa3aace8277a415611b8072b9112cfc2402ff22a04527d381e045b1b84d094a7", 0xe6846021),
+            ("model-00010-of-00015.safetensors", "22c57f4074165ee222a11d979a8ae33ed68e83f2e6247da51bbbb9a31b110a87", 0x96be94ae),
+            ("model-00011-of-00015.safetensors", "1aa70407715d2021815b9e4d3f94e7c55f715c010d5eadc767ba733fa6688b65", 0x882bee45),
+            ("model-00012-of-00015.safetensors", "5af7e6ae4dad51caead0cf0fa59c5eeb092f4a8b7b94ffd9fc7227527a3c51a4", 0x8385904b),
+            ("model-00013-of-00015.safetensors", "df36b8b9cb1db1c81959bd8c092017697941dd64cad9c46e2bfde8a7cc42f567", 0x4ceb807f),
+            ("model-00014-of-00015.safetensors", "aa844d54cc8c3d3d881af38426f063bdbdc42a9ae5992b836aaf16f7b985b9b2", 0x205113af),
+            ("model-00015-of-00015.safetensors", "dfaa46128f99bab6072ff5f602c442fa2aa1048db69207c3b347e83433ea19ae", 0x9789377b),
+        ],
+    ),
+    // CYBER-FROST 3.8 SAGE REXL3 3.35bpw: all nine indexed weight shards at
+    // revision 33be4227ff69c85cbb94f940abe7f22ad3b504e1. SHA-256 values are the
+    // published Hugging Face LFS object IDs, matched by direct-I/O hashing on
+    // the GB10 before the CRC-32s in this block were recorded.
+    (
+        CF335_FP,
+        &[
+            ("model-00001-of-00009.safetensors", "be0d1d8d46b381c7773032eca4a276230656b8a8fb76bb93cc48d380b17f770e", 0xee1e1c63),
+            ("model-00002-of-00009.safetensors", "8a824c66af56cd7b3a135c30c141882fc7d74150dba0346250eaf1c92aaf3b29", 0x0b01c026),
+            ("model-00003-of-00009.safetensors", "5978717cc1c548b786205f3c18f641bb0a64a5b03ff30a2b71ac29bb4b5a4990", 0xbbbb2be5),
+            ("model-00004-of-00009.safetensors", "c2089b61257939579556202c583c6ba9a13610611f47e09c6cea53e325cad2cb", 0xb55468cc),
+            ("model-00005-of-00009.safetensors", "3c3d8c56d1119cd165940b8c230e5b31e2a877a0980711f8535270adf49722ff", 0x6a3c55ce),
+            ("model-00006-of-00009.safetensors", "01effe611bf96146e8e99d20b41303443e9e776a7752068cb4104de39cf9d1d0", 0xe892c7b2),
+            ("model-00007-of-00009.safetensors", "a34cef88bb4724fa9b18f2ef5d52e664bcde8e577f33836b956f37243ec5f74f", 0x9ff9e28c),
+            ("model-00008-of-00009.safetensors", "ee02a5f7c4dc00aece9566aec080f333872adbe4a57e618b3711a68a4cdbca10", 0xa0438527),
+            ("model-00009-of-00009.safetensors", "a659ed2baf73b5df538b73a035bff17c9df1cee0aa0ecec4831589a7e2cd141a", 0x2c39ed9f),
         ],
     ),
     // RED-SNOW-5.3-FLASH 4.91bpw: the 36 shards of vcruz305's pack at revision f6b8963784254095a54944f2963b2925fcf4b199. SHA-256 column = the
@@ -804,6 +863,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sage_248_glm_pack_is_validated_serially_and_with_the_published_draft() {
+        let (pair, target, draft) = VALIDATED_GLM53_DRAFT[1];
+        assert!(VALIDATED.iter().all(|(_, t, d)| *t != target && *d != target));
+        assert_eq!(target, GLM53_FLASH_SAGE_2_48_FP);
+        assert_eq!(draft, GLM53_DFLASH2_FP);
+        assert_eq!(validated_text(target), Some(GLM53_FLASH_SAGE_2_48));
+        assert_eq!(validated_pack(target, None), Some(GLM53_FLASH_SAGE_2_48));
+        assert_eq!(validated_pack(target, Some(draft)), Some(pair));
+        assert_eq!(validation_line(target, Some(draft)), format!("validated {pair}"));
+        assert_eq!(validated_pack(target, Some("sha256:other")), None);
+        let shards = pinned_shards(target);
+        assert_eq!(shards.len(), 15);
+        for (i, (file, sha, _)) in shards.iter().enumerate() {
+            assert_eq!(*file, format!("model-{:05}-of-00015.safetensors", i + 1));
+            assert!(is_hex(sha, 64), "{file}: {sha}");
+        }
+    }
+
+    #[test]
     fn the_glm_target_with_the_published_dflash2_draft_is_validated_and_nothing_else_with_it() {
         let (name, t, d) = VALIDATED_GLM53_DRAFT[0];
         assert_eq!(t, VALIDATED_TEXT[0].1, "the pair's target is the GLM text pack");
@@ -885,6 +963,26 @@ mod tests {
         // wrong packs are refused: an unknown target is not validated and the report says what to pass
         assert_eq!(validated_pack("sha256:other", None), None);
         assert_eq!(validation_line("sha256:other", None), "validated no (serving needs --allow-unvalidated-pack)");
+    }
+
+    #[test]
+    fn the_cyberfrost_335_pack_is_validated_and_all_nine_shards_are_pinned() {
+        assert!(is_fingerprint(CF335_FP));
+        assert_eq!(validated_text(CF335_FP), Some(CF335));
+        assert_eq!(validated_pack(CF335_FP, None), Some(CF335));
+        assert_eq!(validation_line(CF335_FP, None), format!("validated {CF335}"));
+        assert_eq!(validated_pack(CF335_FP, Some("sha256:draft")), None);
+        assert_eq!(validated_pack("sha256:other", None), None);
+
+        let pins = pinned_shards(CF335_FP);
+        assert_eq!(pins.len(), 9);
+        for (index, (name, sha, _)) in pins.iter().enumerate() {
+            assert_eq!(*name, format!("model-{:05}-of-00009.safetensors", index + 1));
+            assert_eq!(sha.len(), 64);
+            assert!(sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        }
+        assert!(VALIDATED_TEXT.iter().filter(|(_, fp)| *fp == CF335_FP).count() == 1);
+        assert!(VALIDATED.iter().all(|(_, target, draft)| *target != CF335_FP && *draft != CF335_FP));
     }
 
     #[test]

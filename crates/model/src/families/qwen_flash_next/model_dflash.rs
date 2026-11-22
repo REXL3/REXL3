@@ -10,7 +10,7 @@
 //! and slot, at the first of a draft round, a flush, or the next window's preparation, always before the next forward overwrites the taps.
 
 use super::FlashNextModel;
-use crate::draft::{Absorb, Draft, DraftReq, TAPS};
+use crate::draft::{Absorb, Draft, DraftReq, Picked, TAPS};
 use crate::error::ModelError;
 use crate::families::qwen_flash_next::dflash::{tap_of, CtxBook, WINDOW};
 use gb_cuda::dflash2::DraftCtxLayout;
@@ -62,10 +62,26 @@ pub fn tap_buffer_bytes(rows: usize, hidden: usize) -> u64 {
     (rows * TAPS * hidden * 2) as u64
 }
 
+/// Greedy walks stop paying target verify rows after the first selector margin below two.
+/// Sampled walks stay complete: this cutoff was calibrated only for greedy decoding.
+const GREEDY_MIN_MARGIN: f32 = 2.0;
+
+/// Keep at least the first pick, but do not pay target verify rows beyond the first low-margin pick.
+fn truncate_low_margin(mut p: Picked, sampling: Sampling) -> Picked {
+    if sampling.temperature == 0.0 && !p.tokens.is_empty() {
+        let keep = p.margin.iter().enumerate().find(|(_, &m)| m < GREEDY_MIN_MARGIN).map_or(p.tokens.len(), |(i, _)| i + 1);
+        p.tokens.truncate(keep);
+        p.score.truncate(keep);
+        p.margin.truncate(keep);
+        p.lattice = None;
+    }
+    p
+}
+
 impl FlashNextModel {
     /// Give the model a DFlash2 draft. Must come before the first forward: every forward (and every captured window graph) carries the
     /// tap launches from then on. A model drafts with its MTP head or with a draft, not both.
-    pub fn enable_dflash(&mut self, draft: Draft, weight_bytes: u64) -> Result<(), ModelError> {
+    pub fn enable_dflash(&mut self, mut draft: Draft, weight_bytes: u64, sub_head_planned: u64) -> Result<(), ModelError> {
         if self.w.mtp.is_some() {
             return Err(ModelError::Config(
                 "a Flash-Next model drafts with its MTP head or with a DFlash2 draft, not both".into(),
@@ -100,6 +116,26 @@ impl FlashNextModel {
                 self.w.lm_head.k, self.w.lm_head.n, self.cfg.vocab
             )));
         }
+        let vocab = crate::costs::DraftVocab::from_env()?;
+        let mut added = 0;
+        if let Some(ranges) = vocab.ranges() {
+            added = draft.restrict_vocab(&self.w.lm_head, &ranges)?;
+            if vocab == crate::costs::DraftVocab::Auto {
+                draft.set_adaptive(Some(crate::costs::AUTO_MIN_IN_SET));
+            }
+            let kept: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
+            eprintln!(
+                "rexl3 event=draft_vocab set={} columns={kept}/{} added_mib={}",
+                vocab.name(),
+                self.cfg.vocab,
+                added / (1 << 20)
+            );
+        }
+        if added as u64 != sub_head_planned {
+            return Err(ModelError::Config(format!(
+                "the DFlash2 restricted sub-head plan and allocation disagree: planned {sub_head_planned} bytes, allocated {added}"
+            )));
+        }
         let rows = self.rows;
         self.dflash = Some(DflashState {
             draft,
@@ -107,7 +143,7 @@ impl FlashNextModel {
             books: vec![CtxBook::new(); self.opts.slots],
             from: vec![0; self.opts.slots],
             absorbed_window: BTreeSet::new(),
-            weight_bytes,
+            weight_bytes: weight_bytes + added as u64,
             absorbed: 0,
             rounds: 0,
         });
@@ -257,14 +293,15 @@ impl FlashNextModel {
                 p: a.tokens.len() - 1,
                 sampling: s,
                 want: a.depth.clamp(1, crate::draft::DRAFTS),
-                coverage: 1.0,
+                coverage: self.dflash.as_ref().map_or(1.0, |d| d.draft.coverage(&a.tokens[a.tokens.len().saturating_sub(64)..])),
             })
             .collect();
         let FlashNextModel { dflash, w, stream, cfg, .. } = self;
         let d = dflash.as_mut().expect("checked by dflash_ready");
         let mut out = Vec::with_capacity(reqs.len());
         for chunk in reqs.chunks(d.draft.max_seqs) {
-            out.extend(d.draft.propose_batch(&w.embed, &w.lm_head, cfg.vocab, chunk, stream)?);
+            let picked = d.draft.propose_batch_scored(&w.embed, &w.lm_head, cfg.vocab, chunk, stream)?;
+            out.extend(picked.into_iter().zip(chunk).map(|(p, r)| truncate_low_margin(p, *r.sampling).tokens));
         }
         d.rounds += 1;
         Ok(out)
@@ -310,5 +347,27 @@ impl FlashNextModel {
             None => CtxBook { ok: false, lo: len, end: len },
         };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod margin_tests {
+    use super::*;
+    use crate::draft::Picked;
+
+    #[test]
+    fn margin_truncation_is_automatic_for_greedy_and_sampled_walks_stay_complete() {
+        let p = Picked { tokens: vec![10, 11, 12, 13], score: vec![0.0; 4], margin: vec![8.0, 1.0, 7.0, 0.0], lattice: None };
+        let greedy = Sampling { temperature: 0.0, ..Sampling::default() };
+        let sampled = Sampling { temperature: 1.0, ..Sampling::default() };
+        assert_eq!(truncate_low_margin(p.clone(), greedy).tokens, vec![10, 11]);
+        assert_eq!(truncate_low_margin(p, sampled).tokens, vec![10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn a_greedy_walk_always_keeps_its_first_draft() {
+        let p = Picked { tokens: vec![10, 11], score: vec![0.0; 2], margin: vec![1.0, 0.0], lattice: None };
+        let greedy = Sampling { temperature: 0.0, ..Sampling::default() };
+        assert_eq!(truncate_low_margin(p, greedy).tokens, vec![10]);
     }
 }

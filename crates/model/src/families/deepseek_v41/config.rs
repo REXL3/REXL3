@@ -489,6 +489,12 @@ impl DeepseekV41Config {
                 return Err(format!("config.json: `{tp}index_source_layer_ids` names layer {l}, past the {layers} trunk layers"));
             }
         }
+        if indexer.candidate_source_layer_id >= layers {
+            return Err(format!(
+                "config.json: `{tp}candidate_source_layer_id` names layer {}, past the {layers} trunk layers",
+                indexer.candidate_source_layer_id
+            ));
+        }
 
         let hc = HcConfig {
             mult: positive(t, tp, "hc_mult")?,
@@ -512,6 +518,11 @@ impl DeepseekV41Config {
                 engram.layer_ids.len(),
                 engram.num_embeddings.len()
             ));
+        }
+        for &l in &engram.layer_ids {
+            if l >= layers {
+                return Err(format!("config.json: `{tp}engram_layer_ids` names layer {l}, past the {layers} trunk layers"));
+            }
         }
 
         let dspark = DsparkConfig {
@@ -795,6 +806,8 @@ mod tests {
         );
         bad(&|t| t["kv_source_layer_ids"] = serde_json::json!([2, 8, 14, 40]), "kv_source_layer_ids");
         bad(&|t| t["index_source_layer_ids"] = serde_json::json!([2, 40]), "index_source_layer_ids");
+        bad(&|t| t["candidate_source_layer_id"] = serde_json::json!(40), "candidate_source_layer_id");
+        bad(&|t| t["engram_layer_ids"] = serde_json::json!([1, 40]), "engram_layer_ids` names layer 40");
         bad(&|t| t["engram_num_embeddings"] = serde_json::json!([1]), "engram_num_embeddings");
         bad(&|t| t["dspark_target_layer_ids"] = serde_json::json!([37]), "dspark_target_layer_ids");
         bad(&|t| t["head_dim"] = serde_json::json!(0), "head_dim");

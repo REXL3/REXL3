@@ -44,7 +44,8 @@ fn output_affecting_unsupported_fields_are_refused_by_name() {
         // shapes are the above-cap and non-numeric ones, refused by name below.
         ("top_logprobs", json!(21)),
         ("top_logprobs", json!("x")),
-        ("parallel_tool_calls", json!(false)),
+        // `parallel_tool_calls` is taken as a boolean (`parallel_tool_calls_field.rs`); any other type is refused by name
+        ("parallel_tool_calls", json!("false")),
         ("logprobs", json!("yes")),
         ("logit_bias", json!([])),
         ("echo", json!(true)),

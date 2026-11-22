@@ -1410,6 +1410,15 @@ GB_EXPORT int gb_ling_kda_prefill_prep_gate_fgg(const void* qkv, const void* x, 
 // null, seq 0, rows accepted, conv shift off the bf16 projection buffer + parity
 // flip). Every element computes the source kernels' expressions, so all outputs
 // are bit-identical; only the launch count changes.
+//
+// The parity flip waits for the whole grid. Every CTA reads `parity[slot]` when it starts, to pick the state half it
+// reads (`rd`) and the half it writes (`wr`). The flip used to be made by head 0's last CTA as soon as head 0 was done.
+// A CTA of a later head that the GPU had not started by then read the flipped parity: it ran its head's recurrence
+// from the half being written and wrote the half the next chunk reads. That left one head of one KDA layer with another
+// state now and then (X141). Small chunks made it likely: head 0 finishes in microseconds, before the last CTAs of a
+// 2 x heads grid are dispatched. Now each head's last CTA posts to a grid-wide self-resetting counter, `head_cnt[heads]`,
+// after that head's epilogue. The `heads`-th arrival flips the parity. Every CTA of the grid has then started and read
+// the parity, because a head's last CTA arrives only after both CTAs of its head have.
 // ---------------------------------------------------------------------------
 constexpr int P2_C = 16;    // rows a chunk
 constexpr int P2_LD = 140;
@@ -1783,7 +1792,16 @@ __global__ void __launch_bounds__(VS * 2) ling_kda_prefill_chunk_norm_commit_ker
 #pragma unroll
         for (int i = 0; i < KEEP; ++i) pool[(size_t)i * conv_dim + ch] = nw[i];
     }
-    if (head == 0 && threadIdx.x == 0) parity[slot] ^= 1;
+    // the parity flip, once every head's last CTA is here (so every CTA of the grid has read `parity[slot]`)
+    __syncthreads();
+    __threadfence();
+    if (threadIdx.x == 0) {
+        const int prev = atomicAdd(head_cnt + heads, 1);
+        if (prev == heads - 1) {
+            head_cnt[heads] = 0;
+            parity[slot] ^= 1;
+        }
+    }
 }
 
 GB_EXPORT int gb_ling_kda_prefill_chunk_norm_commit(const float* q, const float* k, const void* v, const float* g,

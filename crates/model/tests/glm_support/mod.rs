@@ -369,3 +369,98 @@ pub fn p2_expected_kda_runs(m: &gb_model::families::glm::model::GlmModel) -> u64
     let mla = m.cfg.mla_layers();
     (0..m.layers()).filter(|l| !mla.contains(l)).count() as u64
 }
+
+// ------------------------------------------------------------------------------------------------ the lent tower (`REXL3_GLM_TOWER_LEND`)
+
+/// A deterministic synthetic RGB image: gradients, a checkerboard and a disc, so the tower sees structure, not noise (as `glm_tp_vision`'s).
+pub fn synth_rgb(width: usize, height: usize, seed: u32) -> gb_vision::Rgb {
+    let mut data = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let (fx, fy) = (x as f64 / width as f64, y as f64 / height as f64);
+            let disc = ((fx - 0.5).powi(2) + (fy - 0.45).powi(2)).sqrt() < 0.25;
+            let check = ((x / 32) + (y / 32) + seed as usize) % 2 == 0;
+            let r = if disc { 230 } else { (fx * 200.0) as u8 };
+            let g = if check { 180 } else { (fy * 160.0) as u8 };
+            let b = ((fx + fy) * 100.0) as u8 ^ (seed as u8).wrapping_mul(37);
+            data.extend_from_slice(&[r, g, b]);
+        }
+    }
+    gb_vision::Rgb { width, height, data }
+}
+
+/// The f32 feature bytes of an encoded image (`GlmImageFeatures`).
+pub fn glm_feature_bytes(f: &Arc<dyn std::any::Any + Send + Sync>) -> Vec<u8> {
+    let g = f.downcast_ref::<gb_model::families::glm::vision_serve::GlmImageFeatures>().unwrap();
+    let mut out = vec![0u8; g.tokens * 4096 * 4];
+    g.buf.download_range(0, &mut out).unwrap();
+    out
+}
+
+/// The server's preprocessing of the pack in `dir` at `tokens` LM tokens an image.
+pub fn glm_preprocessor(dir: &Path, tokens: usize) -> Arc<dyn gb_vision::preprocessor::ImagePreprocessor> {
+    let mut o = gb_model::serve::ServeOptions::new(dir.to_path_buf());
+    o.max_image_tokens = tokens;
+    o.vision = Some(Default::default());
+    gb_model::families::glm::image_preprocessor(dir, &o).unwrap().expect("the pack has a vision tower")
+}
+
+/// A tower of `pack` for images of `tokens` LM tokens, its scratch lent from `lease` (`None`: its own), as the server's encoder.
+pub fn glm_encoder(
+    dir: &Path,
+    pack: &gb_model::families::glm::GlmPack,
+    tokens: usize,
+    lease: Option<Arc<gb_model::families::glm::lend::ScratchLease>>,
+    unleased: bool,
+) -> (gb_model::families::glm::vision_serve::GlmEncoder, u64, u64) {
+    use gb_model::families::glm::vision::{GlmVisionTower, TowerOptions};
+    use gb_model::families::glm::vision_serve::{FeatureBudget, GlmEncoder};
+    let opts = TowerOptions { lend: lease, ..TowerOptions::new(tokens * 4, 8 * GIB) };
+    let mut t = GlmVisionTower::load(pack, dir, &opts).unwrap();
+    t.unleased = unleased;
+    let (own, lent) = (t.own_scratch_bytes(), t.lent_scratch_bytes());
+    let pp = glm_preprocessor(dir, tokens);
+    (GlmEncoder::new(t, FeatureBudget::new(8 * GIB), &pp.id()).unwrap(), own, lent)
+}
+
+/// Encodes on a thread of its own, over and over until [`Hammer::finish`], each image of `jobs` (its preprocessing and the feature bytes it
+/// must give): what a server's image requests do beside the engine thread's forwards. Counts the encodes and the encodes whose features
+/// differ from the expected bytes.
+pub struct Hammer {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<(usize, usize, gb_model::families::glm::vision_serve::GlmEncoder)>>,
+}
+
+impl Hammer {
+    pub fn start(
+        mut enc: gb_model::families::glm::vision_serve::GlmEncoder,
+        jobs: Vec<(gb_vision::Preprocessed, Vec<u8>)>,
+    ) -> Hammer {
+        use gb_model::serve::ImageEncoder;
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let (mut n, mut bad) = (0usize, 0usize);
+            'run: loop {
+                for (pre, want) in &jobs {
+                    if s.load(Ordering::Relaxed) {
+                        break 'run;
+                    }
+                    let e = enc.encode(pre).unwrap();
+                    n += 1;
+                    if glm_feature_bytes(&e.features) != *want {
+                        bad += 1;
+                    }
+                }
+            }
+            (n, bad, enc)
+        });
+        Hammer { stop, thread: Some(thread) }
+    }
+
+    /// Stops after the encode in flight: `(encodes, encodes whose features differed, the encoder)`.
+    pub fn finish(mut self) -> (usize, usize, gb_model::families::glm::vision_serve::GlmEncoder) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.take().unwrap().join().expect("the encoding thread")
+    }
+}

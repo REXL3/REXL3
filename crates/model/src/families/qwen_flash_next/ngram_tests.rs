@@ -197,3 +197,54 @@ fn repeated_warm_shares_one_worker_and_stays_idempotent() {
     assert!(warm_preflight(true, Some(&table)).is_ok());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_long_gather_on_several_threads_equals_the_one_thread_gather() {
+    let (dir, table, _) = open_large();
+    let per = table.heads * table.words;
+    // a prompt chunk of 1,000 positions after 2 context tokens, with varied ids (the rows land all over the table)
+    let history: Vec<u32> = (0..1002u32).map(|i| i.wrapping_mul(2_654_435_761) % 151_000 + 3).collect();
+    let n = history.len() - 2;
+    assert!(n >= GATHER_PARALLEL_FROM);
+    let mut threaded = vec![0u16; n * per];
+    table.gather(&history, 2, &mut threaded).unwrap();
+    let mut serial = vec![0u16; n * per];
+    table.gather_rows(&history, 2, 0, &mut serial).unwrap();
+    assert_eq!(threaded, serial, "the threaded gather differs from the one-thread gather");
+    assert!(serial.iter().any(|&w| w != 0), "the rows read are not all zeros (the comparison is not vacuous)");
+    // a short gather (a decode window) stays on one thread and is the same rows
+    let mut short = vec![0u16; 10 * per];
+    table.gather(&history[..12], 2, &mut short).unwrap();
+    assert_eq!(short, serial[..10 * per]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_read_ahead_returns_at_once_touches_only_pages_and_drops_a_second_call_or_a_short_history() {
+    let (dir, table, _) = open_large();
+    let per = table.heads * table.words;
+    let history: Vec<u32> = (0..1002u32).map(|i| i.wrapping_mul(2_654_435_761) % 151_000 + 3).collect();
+    let n = history.len() - 2;
+    let mut serial = vec![0u16; n * per];
+    table.gather_rows(&history, 2, 0, &mut serial).unwrap();
+    // a history shorter than a threaded gather's is not read ahead
+    table.readahead(history[..2 + GATHER_PARALLEL_FROM - 1].to_vec());
+    assert!(!READAHEAD_BUSY.load(Ordering::Acquire), "a short history started a read-ahead");
+    table.readahead(history.clone());
+    // a second read-ahead while the first runs is dropped (the flag stays the first's), and a gather that runs meanwhile
+    // reads the same rows
+    table.readahead(history.clone());
+    let mut during = vec![0u16; n * per];
+    table.gather(&history, 2, &mut during).unwrap();
+    assert_eq!(during, serial, "a gather beside a read-ahead differs from the one-thread gather");
+    let start = std::time::Instant::now();
+    while READAHEAD_BUSY.load(Ordering::Acquire) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "the read-ahead worker never finished");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let mut after = vec![0u16; n * per];
+    table.gather(&history, 2, &mut after).unwrap();
+    assert_eq!(after, serial, "a gather after a read-ahead differs from the one-thread gather");
+    assert!(serial.iter().any(|&w| w != 0));
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -1,6 +1,7 @@
 //! The engine's text-only Flash-Next backend. The model owns all device state; this layer
 //! chooses prompt-wide arithmetic, slices on an absolute grid and translates errors.
 use super::dflash::ctx_from;
+use super::graph_cache::GraphStats;
 use super::model::{DflashAsk, FlashNextModel};
 use super::prefix::{self, SliceRequest, SliceResult, SnapshotArena};
 use super::spec::{DraftSpec, Pick};
@@ -8,6 +9,7 @@ use crate::error::ModelError;
 use crate::forward::{Candidates, PrefillPath};
 use crate::rows::RowBatch;
 use gb_engine::prefix::{PrefixCaps, PrefixHandle};
+use gb_engine::score::RowRecords;
 use gb_engine::{Backend, BackendError, CutStep, ImageSpan, PrefillStep, Proposal, ProposeRequest, RowOutput, RowRequest};
 use std::collections::BTreeMap;
 
@@ -57,6 +59,9 @@ pub trait FlashNextRuntime {
     fn has_dflash(&self) -> bool {
         false
     }
+    /// The tokens of the chunk after the one about to be prefilled (two context tokens, then its positions): a runtime with an
+    /// n-gram table reads their pages ahead while the chunk runs. The default does nothing.
+    fn ple_readahead(&mut self, _history: &[u32]) {}
     /// The first prompt position of `slot`'s prompt the draft must absorb (`dflash::ctx_from`), before each prefill slice.
     fn set_dflash_from(&mut self, _slot: usize, _from: usize) {}
     /// Whether `slot` may draft for a sequence of `tokens` tokens (the last one not yet fed).
@@ -66,6 +71,24 @@ pub trait FlashNextRuntime {
     /// One DFlash2 round for these sequences (each [`FlashNextRuntime::dflash_ready`]): their drafts, in ask order.
     fn dflash_draft(&mut self, _asks: &[DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
         Err(ModelError::Config("this runtime has no DFlash2 draft".into()))
+    }
+    /// Whether this runtime reads out the log-probability records of a prefill chunk ([`FlashNextRuntime::chunk_row_records`]),
+    /// which is what the `prompt_logprobs` readout needs. The single-node model does; a runtime that does not say so (a
+    /// tensor-parallel group) has the readout refused by name.
+    fn row_records_supported(&self) -> bool {
+        false
+    }
+    /// [`FlashNextModel::chunk_row_records`]: the records of the rows of the prefill chunk that just ran.
+    fn chunk_row_records(&mut self, _chosen: &[i32], _out: &mut RowRecords) -> Result<(), ModelError> {
+        Err(ModelError::Request("this Flash-Next runtime does not read out prompt log-probabilities".into()))
+    }
+    /// The full-vocabulary logits of the last row of the prefill chunk that just ran.
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        Err(ModelError::Request("this Flash-Next runtime does not read out prompt log-probabilities".into()))
+    }
+    /// The counters of the runtime's window and chain graph caches; `None` for a runtime that keeps none.
+    fn graph_stats(&self) -> Option<GraphStats> {
+        None
     }
 }
 
@@ -81,6 +104,9 @@ impl FlashNextRuntime for FlashNextModel {
     }
     fn end_slot(&mut self, slot: usize) {
         self.end_slot(slot)
+    }
+    fn ple_readahead(&mut self, history: &[u32]) {
+        self.ple_readahead(history)
     }
     fn prefill_chunk(&mut self, b: &RowBatch, path: PrefillPath, want: Option<usize>) -> Result<Option<Candidates>, ModelError> {
         self.prefill_chunk(b, path, want)
@@ -137,6 +163,18 @@ impl FlashNextRuntime for FlashNextModel {
     fn dflash_draft(&mut self, asks: &[DflashAsk<'_>]) -> Result<Vec<Vec<u32>>, ModelError> {
         self.dflash_draft(asks)
     }
+    fn row_records_supported(&self) -> bool {
+        true
+    }
+    fn chunk_row_records(&mut self, chosen: &[i32], out: &mut RowRecords) -> Result<(), ModelError> {
+        self.chunk_row_records(chosen, out)
+    }
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        self.chunk_last_row_logits()
+    }
+    fn graph_stats(&self) -> Option<GraphStats> {
+        Some(self.graph_stats())
+    }
 }
 
 pub struct FlashNextBackend<M: FlashNextRuntime = FlashNextModel> {
@@ -153,6 +191,8 @@ pub struct FlashNextBackend<M: FlashNextRuntime = FlashNextModel> {
     prefix: Option<(SnapshotArena, String)>,
     /// The DFlash2 draft's arbiter (`spec.rs`), made at the first draft round of a runtime that drafts with one.
     spec: Option<DraftSpec>,
+    /// The `prompt_logprobs` readouts in flight, by slot (`Backend::score_begin`): the records of the rows scored so far.
+    records: BTreeMap<usize, RowRecords>,
 }
 
 fn nan_row(n: usize) -> RowOutput {
@@ -197,6 +237,7 @@ impl<M: FlashNextRuntime> FlashNextBackend<M> {
             fatal: None,
             prefix: None,
             spec: None,
+            records: BTreeMap::new(),
         }
     }
 
@@ -282,6 +323,10 @@ impl<M: FlashNextRuntime> FlashNextBackend<M> {
         self.m.flush()?;
         self.m.set_dflash_from(slot, ctx_from(prompt.len(), &[], done));
         let end = next_chunk_end(done, prompt.len(), self.effective_chunk());
+        if end < prompt.len() && end >= 2 {
+            let after = next_chunk_end(end, prompt.len(), self.effective_chunk());
+            self.m.ple_readahead(&prompt[end - 2..after]);
+        }
         let c = self.run_chunk(
             slot,
             done,
@@ -295,6 +340,32 @@ impl<M: FlashNextRuntime> FlashNextBackend<M> {
 }
 
 impl<M: FlashNextRuntime> FlashNextBackend<M> {
+    /// One slice of a `prompt_logprobs` readout: the chunk a plain prefill would run next (the same absolute grid, the same
+    /// forward), then the records of its rows, read out while the collapsed trunk rows are still on the device. No snapshot
+    /// is taken or restored (the readout is submitted without the prefix cache) and the MTP head does not run: nothing is
+    /// generated from this slot, and the head would overwrite the rows.
+    fn score_slice_inner(&mut self, slot: usize, prompt: &[u32], done: usize) -> Result<gb_engine::score::ScoreStep, ModelError> {
+        let n = prompt.len();
+        if done >= n {
+            return Err(ModelError::Request("empty or completed score slice".into()));
+        }
+        if done == 0 {
+            self.m.begin_slot(slot)?;
+            self.spec_begin(slot);
+        }
+        self.m.flush()?;
+        self.m.set_dflash_from(slot, ctx_from(n, &[], done));
+        let end = next_chunk_end(done, n, self.effective_chunk());
+        let b = RowBatch::from_requests(&[RowRequest { slot, first_position: done as u64, tokens: prompt[done..end].to_vec() }]);
+        self.m.prefill_chunk(&b, PrefillPath::for_prompt(n), None)?;
+        // row `i` predicts token `i + 1`; the prompt's last row has none
+        let chosen: Vec<i32> = (done..end).map(|i| prompt.get(i + 1).map_or(-1, |&t| t as i32)).collect();
+        let rec = self.records.get_mut(&slot).ok_or_else(|| ModelError::Request("no readout was begun in this slot".into()))?;
+        self.m.chunk_row_records(&chosen, rec)?;
+        let row = if end == n { Some(self.m.chunk_last_row_logits()?) } else { None };
+        Ok(gb_engine::score::ScoreStep { done: end, row, captured: Vec::new() })
+    }
+
     /// A new sequence in `slot`: the draft arbiter's estimates for it start again.
     fn spec_begin(&mut self, slot: usize) {
         if let Some(s) = self.spec.as_mut() {
@@ -372,6 +443,43 @@ impl<M: FlashNextRuntime> Backend for FlashNextBackend<M> {
     /// Row-invariant slicing: the GDN prefill is chunk-invariant (`gb_cuda::gdn::prefill`), the pinned prefill GEMM row invariant and the
     /// prefill path keyed on the prompt's total, so the engine's slices go on the absolute grid of the limit with the same bits (the
     /// off-grid cuts of the prefix cache rely on the same property).
+    /// The teacher-forced readout only: last-row scoring (`score_supported`) is not served by this family.
+    fn score_rows_supported(&self) -> bool {
+        self.m.row_records_supported()
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        self.records.remove(&slot);
+        if all_rows && self.m.row_records_supported() {
+            self.records.insert(slot, RowRecords::new(gb_engine::score::RECORD_TOP.min(self.m.vocab_size())));
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<RowRecords> {
+        self.records.remove(&slot)
+    }
+    fn score_slice(
+        &mut self,
+        slot: usize,
+        prompt: &[u32],
+        done: usize,
+        _cuts: &[usize],
+    ) -> Result<gb_engine::score::ScoreStep, BackendError> {
+        if let Some(e) = self.fatal.clone() {
+            return Err(e);
+        }
+        if !self.records.contains_key(&slot) {
+            return Err(gb_engine::score::unsupported_backend());
+        }
+        self.score_slice_inner(slot, prompt, done).map_err(|e| {
+            self.records.remove(&slot);
+            if e.is_fatal() {
+                self.record(&format!("prompt readout of slot {slot}"), &e);
+            } else {
+                self.m.end_slot(slot);
+            }
+            // a recoverable error fails this request alone, through the returned value (not `take_error`)
+            self.fatal.clone().unwrap_or_else(|| BackendError::retryable(format!("prompt readout of slot {slot}: {e}")))
+        })
+    }
     fn set_prefill_row_limit(&mut self, rows: Option<usize>) -> bool {
         self.deadline_rows = rows.map(|r| r.max(1));
         true
@@ -598,6 +706,7 @@ impl<M: FlashNextRuntime> Backend for FlashNextBackend<M> {
         self.m.commit(slot, keep);
     }
     fn release(&mut self, slot: usize) {
+        self.records.remove(&slot); // a readout that was cancelled or failed leaves its records behind
         self.last_acc.remove(&slot);
         self.spec_begin(slot);
         if !self.dead() {
@@ -607,6 +716,10 @@ impl<M: FlashNextRuntime> Backend for FlashNextBackend<M> {
 
     fn propose_batch(&mut self, reqs: &[ProposeRequest<'_>]) -> Vec<Option<Vec<u32>>> {
         self.propose_batch_scored(reqs).into_iter().map(|p| p.map(|p| p.tokens)).collect()
+    }
+
+    fn graph_counters(&self) -> Option<gb_engine::GraphCounters> {
+        self.m.graph_stats().map(|s| s.counters())
     }
 
     fn propose_batch_scored(&mut self, reqs: &[ProposeRequest<'_>]) -> Vec<Option<Proposal>> {

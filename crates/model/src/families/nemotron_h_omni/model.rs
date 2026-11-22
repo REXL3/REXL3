@@ -178,6 +178,18 @@ pub const MAX_WINDOW_ROWS: usize = MAX_PREFILL_ROWS;
 /// The most candidates per row a step returns.
 pub const MAX_CANDIDATES: usize = 64;
 
+/// `(start, rows, download_full_row)` for each compact-readout LM-head tile. Only the final tile may carry a full row.
+#[doc(hidden)]
+pub fn readout_tile_plan(rows: usize, need_last_logits: bool) -> Vec<(usize, usize, bool)> {
+    (0..rows)
+        .step_by(WINDOW_ROWS)
+        .map(|at| {
+            let n = (rows - at).min(WINDOW_ROWS);
+            (at, n, need_last_logits && at + n == rows)
+        })
+        .collect()
+}
+
 /// Bytes of one slot of one Mamba layer's S pool (f32 `[128][128][64]`).
 pub const S_SLOT_BYTES: usize = S_SLOT_ELEMS * 4;
 /// Bytes of one slot of one Mamba layer's conv pool (bf16 `[3][10240]`).
@@ -670,6 +682,8 @@ pub struct Bufs {
     pub topk_ws: DevBuf,
     pub topk_ids: DevBuf,
     pub topk_vals: DevBuf,
+    /// Chosen next-token ids for one 64-row compact-readout tile, i32 `[64]`. Kept separate from the top-k ids it overlaps.
+    pub chosen_dev: DevBuf,
     /// The workspace of `Exl3Weights::forward`: the largest `workspace_bytes(rows)` of any layer's linear.
     pub ws: DevBuf,
     // ---- tensor parallelism (`tp_arm.rs`): `None` on a single rank, which allocates and runs none of it ----
@@ -1707,6 +1721,7 @@ impl NemotronModel {
             topk_ws: DevBuf::zeroed(topk_workspace_bytes(r, vocab, MAX_CANDIDATES))?,
             topk_ids: DevBuf::zeroed(r * MAX_CANDIDATES * 4)?,
             topk_vals: DevBuf::zeroed(r * MAX_CANDIDATES * 4)?,
+            chosen_dev: DevBuf::zeroed(WINDOW_ROWS * 4)?,
             // the EXL3 linears take at most LINEAR_ROWS rows a call (`linear_rows` cuts a wider step): the workspace is that wide
             // (under P2 the prefill linear takes the whole slice: its fp16 rotated input, `rows x K x 2` at the widest K of 8,192)
             ws: DevBuf::zeroed(super::contract::workspace_bytes(w.max_workspace_bytes(r.min(LINEAR_ROWS)), r))?,
@@ -1955,6 +1970,7 @@ impl NemotronModel {
                 &b.topk_ws,
                 &b.topk_ids,
                 &b.topk_vals,
+                &b.chosen_dev,
                 &b.ws,
                 &c.keep,
                 &self.ids,
@@ -2091,6 +2107,134 @@ impl NemotronModel {
                 *l = 0;
             }
         }
+    }
+
+    /// Whether this model can reduce prompt rows on its own device. Tensor-parallel readout is refused before a score slot is reserved.
+    pub fn row_records_supported(&self) -> bool {
+        self.core.tp.topology().is_single()
+    }
+
+    /// Run one text prefill slice without the MTP prefill hook. The final-normed rows remain in `bufs.xn` and the slot is committed.
+    fn prefill_no_mtp(&mut self, slot: usize, start: usize, tokens: &[u32], head: Head) -> Result<(), ModelError> {
+        self.check_alive()?;
+        let b = RowBatch::from_requests(&[gb_engine::RowRequest { slot, tokens: tokens.to_vec(), first_position: start as u64 }]);
+        let lim =
+            StepLimits { max_rows: self.core.opts.prefill_rows, max_context: self.core.opts.max_context, vocab: self.vocab };
+        let seqs = plan_step(&b, &lim, &self.slots)?;
+        self.window.forget(slot);
+        self.fold_lagged(&[slot])?;
+        match self.forward(&b, Kind::Prefill, &seqs, head, MAX_CANDIDATES, false) {
+            Ok(_) => {
+                self.slots.advance(slot, tokens.len())?;
+                Ok(())
+            }
+            Err(e) => {
+                self.slots.poison(slot);
+                self.note(&e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Prefill one chunk and append compact prompt-log-probability records in 64-row LM-head tiles. No draft head runs.
+    /// Intermediate tiles download only their compact records; `need_last_logits` permits one full-row download, on the final tile.
+    pub fn prefill_readout(
+        &mut self,
+        slot: usize,
+        start: usize,
+        tokens: &[u32],
+        chosen: &[i32],
+        need_last_logits: bool,
+        out: &mut gb_engine::score::RowRecords,
+    ) -> Result<Vec<f32>, ModelError> {
+        const TILE: usize = 64;
+        const { assert!(gb_engine::score::RECORD_TOP + 2 <= MAX_CANDIDATES) };
+        let (vocab, k) = (self.vocab, out.k);
+        if !self.row_records_supported() {
+            return Err(ModelError::Request("Nemotron prompt_logprobs is not built on a tensor-parallel group".into()));
+        }
+        if tokens.is_empty() || tokens.len() != chosen.len() || k == 0 || k > gb_engine::score::RECORD_TOP || k > vocab {
+            return Err(ModelError::Request(format!("a Nemotron readout of {} rows and top {k} of {vocab}", tokens.len())));
+        }
+        self.prefill_no_mtp(slot, start, tokens, Head::None)?;
+        // A generation prefill holds this scope through Head::Row. Keep the readout head on the same tensor-core arithmetic.
+        let _p2 = super::contract::prefill_scope(true);
+        let (ids_at, norm_at) = (TILE * 4, TILE * gb_engine::score::RECORD_TOP * 4);
+        let mut last_logits = Vec::new();
+        for (at, n, full_row) in readout_tile_plan(tokens.len(), need_last_logits) {
+            let c = &mut self.core;
+            upload_ordered(&mut c.bufs.chosen_dev, &chosen[at..at + n], &c.stream)?;
+            let x = c.bufs.xn.subview(at * HIDDEN * 4, n * HIDDEN * 4);
+            tp_arm::lm_head_logits(
+                &*c.tp,
+                (&c.w.lm_head).into(),
+                &x,
+                &mut c.bufs.logits,
+                c.bufs.tp_logits.as_mut(),
+                n,
+                vocab,
+                true,
+                &mut c.bufs.ws,
+                &c.stream,
+            )?;
+            // SAFETY: f32 logits `[n, vocab]`; chosen i32 `[n]` is dedicated; the carved norm/id/value regions fit 64 rows.
+            unsafe {
+                gb_cuda::nemotron_glue::logprob_rows_f32(
+                    c.bufs.logits.ptr().cast_const(),
+                    n,
+                    vocab,
+                    k,
+                    c.bufs.chosen_dev.ptr().cast_const(),
+                    c.bufs.topk_vals.ptr_at(norm_at),
+                    c.bufs.topk_ids.ptr_at(ids_at),
+                    c.bufs.topk_vals.ptr(),
+                    c.bufs.topk_ws.ptr(),
+                    c.bufs.topk_ws.bytes(),
+                    &c.stream,
+                )
+            }?;
+            c.stream.sync()?;
+            let (mut norm, mut ids, mut vals) = (vec![0f32; n * 2], vec![0i32; n * k], vec![0f32; n * k]);
+            c.bufs.topk_vals.download_range(norm_at, &mut norm)?;
+            c.bufs.topk_ids.download_range(ids_at, &mut ids)?;
+            c.bufs.topk_vals.download_range(0, &mut vals)?;
+            out.lse.extend(norm.chunks_exact(2).map(|p| p[0]));
+            out.chosen.extend(norm.chunks_exact(2).map(|p| p[1]));
+            out.top_ids.extend(ids.into_iter().map(|t| t as u32));
+            out.top_logits.extend(vals);
+            if full_row {
+                let mut raw = vec![0f32; vocab];
+                c.bufs.logits.download_range((n - 1) * vocab * 4, &mut raw)?;
+                last_logits = raw;
+            }
+        }
+        Ok(last_logits)
+    }
+
+    /// Independent full-logit prefill used by the real-pack readout oracle. This intentionally downloads every row.
+    /// The LM head uses the same 64-row tiling as the compact readout: EXL3's wider call is mathematically equivalent but not bit-identical.
+    #[doc(hidden)]
+    pub fn prefill_logits_rows(&mut self, slot: usize, start: usize, tokens: &[u32]) -> Result<Vec<f32>, ModelError> {
+        self.prefill_no_mtp(slot, start, tokens, Head::None)?;
+        let _p2 = super::contract::prefill_scope(true);
+        for (at, n, _) in readout_tile_plan(tokens.len(), false) {
+            let c = &mut self.core;
+            let x = c.bufs.xn.subview(at * HIDDEN * 4, n * HIDDEN * 4);
+            let mut y = c.bufs.logits.subview(at * self.vocab * 4, n * self.vocab * 4);
+            tp_arm::lm_head_logits(
+                &*c.tp,
+                (&c.w.lm_head).into(),
+                &x,
+                &mut y,
+                c.bufs.tp_logits.as_mut(),
+                n,
+                self.vocab,
+                true,
+                &mut c.bufs.ws,
+                &c.stream,
+            )?;
+        }
+        self.core.bufs.logits.to_vec().map(|v| v[..tokens.len() * self.vocab].to_vec()).map_err(ModelError::from)
     }
 
     /// One prefill slice (`b`: rows of one or more sequences, each continuing its slot from its committed length). The Mamba state is
@@ -2591,6 +2735,20 @@ impl NemotronRuntime for NemotronModel {
     }
     fn has_mtp(&self) -> bool {
         self.has_mtp()
+    }
+    fn row_records_supported(&self) -> bool {
+        NemotronModel::row_records_supported(self)
+    }
+    fn prefill_readout(
+        &mut self,
+        slot: usize,
+        start: usize,
+        tokens: &[u32],
+        chosen: &[i32],
+        need_last_logits: bool,
+        out: &mut gb_engine::score::RowRecords,
+    ) -> Result<Vec<f32>, ModelError> {
+        NemotronModel::prefill_readout(self, slot, start, tokens, chosen, need_last_logits, out)
     }
     fn head_form(&self) -> super::spec::HeadForm {
         self.mtp_head_form()

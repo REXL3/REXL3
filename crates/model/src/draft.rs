@@ -20,6 +20,7 @@ use core::ffi::c_void;
 use gb_cuda::dflash2::{self, DraftCache, DraftCtxLayout, GateDtype, WalkSampling};
 use gb_cuda::exl3_linear::{linear_workspace_bytes, prefill_scratch_bytes, Dtype, Exl3Weights};
 use gb_cuda::mla_gated;
+use gb_cuda::rt::HostStage;
 use gb_cuda::{glue, DevBuf, Stream};
 
 pub const BLOCK: usize = 8;
@@ -248,6 +249,38 @@ pub struct Absorb {
     pub pos0: usize,
 }
 
+/// Remember a stage's stream and catch accidental cross-stream reuse in debug builds.
+fn bind_stage_stream(stage_stream: &mut Option<usize>, stream: &Stream) {
+    let raw = stream.raw() as usize;
+    let previous = stage_stream.replace(raw);
+    debug_assert_eq!(previous.unwrap_or(raw), raw, "a draft HostStage must stay on one stream");
+}
+
+/// Queue one absorb's position and slot arrays in the model stream's order.
+///
+/// A draft belongs to one model stream. Retire the previous absorb's host buffers before reusing the stage: without this
+/// `sync`, `HostStage` must retain another pair of buffers on every call, and those buffers grow without bound over a long
+/// sequence. Stream order already makes the two device arrays safe to overwrite. At steady state the stage owns two spare
+/// buffers, reused by every absorb. Exposed for the integration test of this shared Generic Qwen / GLM / Flash-Next path.
+#[doc(hidden)]
+pub fn stage_absorb_indices(
+    stage: &mut HostStage,
+    stage_stream: &mut Option<usize>,
+    ctx_pos: &mut DevBuf,
+    ctx_slot: &mut DevBuf,
+    pos: &[i32],
+    slots: &[i32],
+    stream: &Stream,
+) -> Result<(), ModelError> {
+    bind_stage_stream(stage_stream, stream);
+    if stage.queued() != 0 {
+        stage.sync(stream)?;
+    }
+    stage.upload(ctx_pos, pos, stream)?;
+    stage.upload(ctx_slot, slots, stream)?;
+    Ok(())
+}
+
 /// One sequence in a draft round: the anchor token (the last one, not yet fed) at position `p` of `slot`, and the
 /// request's sampling (the walk draws with the target's keyed sampler on sampled requests).
 #[derive(Clone, Copy, Debug)]
@@ -335,6 +368,9 @@ pub struct Draft {
     vproj: DevBuf,
     ctx_pos: DevBuf,
     ctx_slot: DevBuf,
+    /// Host bytes of absorb's stream-ordered position and slot uploads, retired at the next absorb.
+    absorb_stage: HostStage,
+    absorb_stage_stream: Option<usize>,
     ws: DevBuf,
     pws: DevBuf,
     attn_ws: DevBuf,
@@ -372,6 +408,9 @@ pub struct Draft {
     walk: DevBuf,
     /// i32 `[max_seqs + 1]`: where each sequence's picks start in the packed head rows
     row_off: DevBuf,
+    /// Host bytes of a round's small stream-ordered uploads, retired by the round's final sync.
+    propose_stage: HostStage,
+    propose_stage_stream: Option<usize>,
     sub: Option<SubHead>,
     /// With a restricted vocabulary: `Some(min)` runs the restricted head only in rounds where every sequence has at least `min` of
     /// its recent tokens inside the set (text the set cannot reach gets the full head), `None` runs it every round.
@@ -405,6 +444,8 @@ fn load_linear<'p>(
     if (g.k, g.n) != (k, n) {
         return Err(ModelError::Config(format!("draft {name}: expected K={k} N={n}, found K={} N={}", g.k, g.n)));
     }
+    // the draft's EXL3 projections run the whole-width decode and prefill paths only
+    crate::weights::refuse_half_width(&format!("draft {name}"), g, "the DFlash draft")?;
     let w = ctx.group(pack, name)?;
     *bytes += w.weight_bytes();
     Ok(DraftLinear::Exl3(w))
@@ -614,6 +655,8 @@ impl Draft {
             vproj: z(max_ctx_rows * KV_HEADS * HEAD_DIM * 2)?,
             ctx_pos: z(max_ctx_rows * 4)?,
             ctx_slot: z(max_ctx_rows * 4)?,
+            absorb_stage: HostStage::new(),
+            absorb_stage_stream: None,
             ws: z(ws_bytes)?,
             pws: z(pws_bytes)?,
             attn_ws: z(dflash2::attn_workspace_bytes(max_seqs, DraftCtxLayout::WINDOW, Q_HEADS, block))?,
@@ -648,6 +691,8 @@ impl Draft {
             margin: z(nd * 4)?,
             walk: z(max_seqs * std::mem::size_of::<WalkSampling>())?,
             row_off: z((max_seqs + 1) * 4)?,
+            propose_stage: HostStage::new(),
+            propose_stage_stream: None,
             sub: None,
             adaptive_min: None,
             restrict_times: None,
@@ -792,8 +837,15 @@ impl Draft {
             slots.extend(std::iter::repeat_n(a.slot as i32, a.n));
         }
         let n = total;
-        self.ctx_pos.upload(&pos)?;
-        self.ctx_slot.upload(&slots)?;
+        stage_absorb_indices(
+            &mut self.absorb_stage,
+            &mut self.absorb_stage_stream,
+            &mut self.ctx_pos,
+            &mut self.ctx_slot,
+            &pos,
+            &slots,
+            stream,
+        )?;
         let Draft { geom, fc, hidden_norm, layers, cache, fc_in, ctx, kproj, vproj, ctx_pos, ctx_slot, ws, pws, .. } = self;
         let (hidden, fcw) = (geom.hidden, geom.fc_in());
         let mut at = 0usize;
@@ -859,6 +911,24 @@ impl Draft {
         Ok(self.propose_batch_scored(embed, head, vocab, reqs, stream)?.into_iter().map(|p| p.tokens).collect())
     }
 
+    /// Bytes a restricted DFlash2 vocabulary sub-head owns: its packed LM-head strip copy, bf16 logits and EXL3 workspace.
+    /// `max_rows` is the draft round's `max_seqs * (block - 1)`, the same row count the allocation uses.
+    pub fn restricted_vocab_plan_bytes(
+        token_ranges: &[(usize, usize)],
+        k: usize,
+        n: usize,
+        bits: usize,
+        hidden: usize,
+        max_rows: usize,
+    ) -> Result<usize, ModelError> {
+        let strips = vocab_strips(token_ranges, n)?;
+        let columns: usize = strips.iter().map(|&(lo, hi)| (hi - lo) * 128).sum();
+        let weights = k * columns * bits * 2 / 16 + 2 * (k + columns);
+        let logits = max_rows * columns * 2;
+        let workspace = linear_workspace_bytes(max_rows, hidden, columns, bits);
+        Ok(weights + logits + workspace)
+    }
+
     /// Restrict the draft's vocabulary head to the target `head`'s columns of these token-id ranges (each `(first id, end id)`,
     /// widened to whole 128-column strips; overlapping or touching ranges merge; at most 4 remain and at least 64 strips must).
     /// The kept columns are bit-identical to the full head's, so the drafts are the full draft's whenever its choices lie inside
@@ -874,6 +944,12 @@ impl Draft {
         let logits = DevBuf::zeroed(max_rows * w.n * 2)?;
         let ws = DevBuf::zeroed(linear_workspace_bytes(max_rows, self.geom.hidden, w.n, w.bits))?;
         let bytes = w.weight_bytes() + logits.bytes() + ws.bytes();
+        let planned = Self::restricted_vocab_plan_bytes(token_ranges, head.k, head.n, head.bits, self.geom.hidden, max_rows)?;
+        if bytes != planned {
+            return Err(ModelError::Config(format!(
+                "the restricted draft sub-head plan and allocation disagree: planned {planned} bytes, allocated {bytes}"
+            )));
+        }
         self.sub = Some(SubHead { w, ranges, logits, ws });
         self.restrict_times =
             Some(RestrictTimes { strips: strip_times, buffers: t1.elapsed().as_secs_f64(), total: t0.elapsed().as_secs_f64() });
@@ -967,13 +1043,18 @@ impl Draft {
         for &w in &wants {
             row_off.push(row_off.last().unwrap() + w as i32);
         }
-        self.ids.upload(&ids)?;
-        self.pos.upload(&pos)?;
-        self.anchor.upload(&anchors)?;
-        self.slot_a.upload(&slots)?;
-        self.p_a.upload(&ps)?;
-        self.walk.upload(&walks)?;
-        self.row_off.upload(&row_off)?;
+        bind_stage_stream(&mut self.propose_stage_stream, stream);
+        if self.propose_stage.queued() != 0 {
+            // An earlier error may have skipped the round's final sync; retire those buffers before their reuse.
+            self.propose_stage.sync(stream)?;
+        }
+        self.propose_stage.upload(&mut self.ids, &ids, stream)?;
+        self.propose_stage.upload(&mut self.pos, &pos, stream)?;
+        self.propose_stage.upload(&mut self.anchor, &anchors, stream)?;
+        self.propose_stage.upload(&mut self.slot_a, &slots, stream)?;
+        self.propose_stage.upload(&mut self.p_a, &ps, stream)?;
+        self.propose_stage.upload(&mut self.walk, &walks, stream)?;
+        self.propose_stage.upload(&mut self.row_off, &row_off, stream)?;
         // the restricted head runs when there is one and, if it is adaptive, when every sequence is writing text it can reach
         let use_sub = self.sub.is_some() && self.adaptive_min.is_none_or(|min| reqs.iter().all(|r| r.coverage >= min));
         let capture = self.capture_lattice;
@@ -1207,7 +1288,7 @@ impl Draft {
                 stream,
             )?;
         }
-        stream.sync()?;
+        self.propose_stage.sync(stream)?;
         let mut t = vec![0i32; nd];
         out_tokens.download(&mut t)?;
         let mut c = vec![0f32; nd];
@@ -1742,5 +1823,36 @@ mod tests {
         assert!(vocab_strips(&[(0, 248321)], 248320).is_err(), "past the head");
         let five: Vec<(usize, usize)> = (0..5).map(|i| (i * 20_000, i * 20_000 + 12_800)).collect();
         assert!(vocab_strips(&five, 248320).is_err(), "more than four ranges");
+    }
+
+    /// A draft projection stored at a half-integer width (odd k2) is refused when the draft is loaded, by the projection's name and
+    /// width, before anything is read or allocated: the draft's EXL3 linears run the whole-width decode and prefill paths only. A whole
+    /// width passes the check (whatever the upload then does on this machine).
+    #[test]
+    fn a_half_width_draft_projection_is_refused_at_load_by_name_and_width() {
+        let (k, n) = (4096usize, 512usize);
+        for k2 in [3u8, 5, 7, 4, 8] {
+            let name = "layers.0.self_attn.k_proj";
+            let mut ck = Checkpoint::default();
+            let mut g = group(name, k, n);
+            g.bits = gb_exl3::Bits::from_twice(k2).unwrap();
+            ck.groups.insert(name.into(), g);
+            let pack = Pack { ck };
+            let mut ctx = LoadCtx::new(crate::loadctx::LoadMode::Serial);
+            let mut bytes = 0usize;
+            let r = load_linear(&mut ctx, &pack, name, k, n, &mut bytes);
+            if k2 % 2 == 0 {
+                if let Err(e) = r {
+                    assert!(!e.to_string().contains("half-integer"), "k2 = {k2} must pass the check: {e}");
+                }
+                continue;
+            }
+            let msg = r.err().unwrap_or_else(|| panic!("k2 = {k2} must be refused")).to_string();
+            let bits = k2 as f64 / 2.0;
+            assert!(msg.contains(&format!("draft {name}: an EXL3 tensor at {bits} bits per weight")), "{msg}");
+            assert!(msg.contains(&format!("k2 = {k2}")) && msg.contains("not servable by the DFlash draft"), "{msg}");
+            assert!(msg.contains(&format!("({} or {} bits)", k2 / 2, k2 / 2 + 1)), "{msg}");
+            assert_eq!(bytes, 0);
+        }
     }
 }

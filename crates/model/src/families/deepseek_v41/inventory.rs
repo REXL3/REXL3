@@ -946,6 +946,7 @@ mod tests {
         t.insert("compress_ratios".into(), serde_json::json!([2, 2]));
         t.insert("kv_source_layer_ids".into(), serde_json::json!([0]));
         t.insert("index_source_layer_ids".into(), serde_json::json!([0, 1]));
+        t.insert("candidate_source_layer_id".into(), 0.into());
         t.insert("engram_layer_ids".into(), serde_json::json!([]));
         t.insert("engram_num_embeddings".into(), serde_json::json!([]));
         t.insert("dspark_target_layer_ids".into(), serde_json::json!([]));
@@ -1076,6 +1077,7 @@ mod tests {
         t.insert("compress_ratios".into(), serde_json::json!([2, 2, 2]));
         t.insert("kv_source_layer_ids".into(), serde_json::json!([0]));
         t.insert("index_source_layer_ids".into(), serde_json::json!([0, 1]));
+        t.insert("candidate_source_layer_id".into(), 0.into());
         t.insert("engram_layer_ids".into(), serde_json::json!([]));
         t.insert("engram_num_embeddings".into(), serde_json::json!([]));
         t.insert("dspark_target_layer_ids".into(), serde_json::json!([1]));
@@ -1165,6 +1167,7 @@ mod tests {
         t.insert("compress_ratios".into(), serde_json::json!([2, 1]));
         t.insert("kv_source_layer_ids".into(), serde_json::json!([0, 1]));
         t.insert("index_source_layer_ids".into(), serde_json::json!([0, 1]));
+        t.insert("candidate_source_layer_id".into(), 0.into());
         t.insert("engram_layer_ids".into(), serde_json::json!([]));
         t.insert("engram_num_embeddings".into(), serde_json::json!([]));
         t.insert("dspark_target_layer_ids".into(), serde_json::json!([]));

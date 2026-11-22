@@ -2,6 +2,7 @@
 //! weights of the 27B pack's shapes (`common::exl3_synth`): the pinned cuBLAS path (`Exl3Weights::forward_prefill_pinned`, what a Qwen prompt
 //! chunk ran before) against the fused kernel, with the bf16 activations and bf16 outputs the model passes.
 //!
+//! * `the_fused_gemm_never_takes_a_half_integer_width`: `glm_p2::supported` refuses every odd `k2` and takes the whole widths 2 to 8 bits.
 //! * `fused_rows_are_bit_identical_in_any_call_on_the_qwen_shapes`: a row's bits do not depend on the call's width, its boundary or the row order.
 //! * `the_chain_order_equals_the_pinned_cublas_path_bit_for_bit_on_the_qwen_shapes`: the fused GEMM (single-chain K order, what the model
 //!   runs) gives the pinned path's bf16 output bit for bit on every shape at 1 to 4,096 rows: the switch changes speed and nothing else.
@@ -22,7 +23,7 @@ use gb_cuda::exl3_linear::{Dtype, Exl3Weights};
 use gb_cuda::glm_p2::{self, Variant};
 use gb_cuda::{device_available, DevBuf, Stream};
 use gb_exl3::f16::{f16_to_f64, f64_to_f16};
-use gb_exl3::Codebook;
+use gb_exl3::{Bits, Codebook};
 
 macro_rules! gpu {
     () => {
@@ -78,6 +79,25 @@ fn upload(x: &[u16]) -> DevBuf {
     let mut d = DevBuf::zeroed_view(x.len() * 2).unwrap();
     d.upload(x).unwrap();
     d
+}
+
+/// The fused GEMM never takes a half-integer width (an odd `k2`: 1.5, 2.5, 3.5 bits): it reads `bits = k2 / 2` (truncated) bits a weight,
+/// so a 2.5-bit layer would be decoded as a 2-bit one and the prefill would return wrong values without an error. Every width EXL3
+/// stores is checked on a Qwen shape: the whole widths from 2 to 8 bits are taken, 1 bit and every half width are not (2.5 and 3.5 bits
+/// are the widths whose truncated `bits` the kernel would accept).
+#[test]
+fn the_fused_gemm_never_takes_a_half_integer_width() {
+    gpu!();
+    let (k, n) = (5120, 1024);
+    for k2 in Bits::ALL_TWICE {
+        let mut g = synth_group(k, n, 1, Codebook::Mul1, 3);
+        g.group.bits = Bits::from_twice(k2).unwrap();
+        g.trellis = vec![0i16; (k / 16) * (n / 16) * 8 * k2 as usize];
+        let w = Exl3Weights::from_loaded(&g).unwrap();
+        assert_eq!(w.k2, k2 as usize);
+        let want = k2 % 2 == 0 && (4..=16).contains(&k2);
+        assert_eq!(glm_p2::supported(&w), want, "k2 = {k2} ({} bits)", k2 as f64 / 2.0);
+    }
 }
 
 #[test]

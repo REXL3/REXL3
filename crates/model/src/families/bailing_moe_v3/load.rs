@@ -224,7 +224,8 @@ fn read_range(path: &Path, off: u64, len: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Allocate the plan's device regions, zeroed (every byte a plan item does not write, alignment padding included, stays zero).
+/// Allocate the plan's device regions, zeroed (every byte a plan item does not write, alignment padding included, stays zero). The
+/// fill has landed when this returns.
 fn allocate(plan: &LoadPlan) -> Result<Regions, ModelError> {
     let mut bufs = BTreeMap::new();
     for r in plan.device_regions() {
@@ -232,6 +233,10 @@ fn allocate(plan: &LoadPlan) -> Result<Regions, ModelError> {
             .map_err(|e| ModelError::Config(format!("cudaMalloc {} ({} bytes): {e}", r.kind, r.bytes)))?;
         bufs.insert(r.id, b);
     }
+    // each fill is an asynchronous `cudaMemset` on the legacy default stream, and the pipelined loader copies on non-blocking streams,
+    // which do not wait for that stream: unordered, a fill still running can overwrite a copy that has already landed in its region.
+    // The wait is what is left of the fills after the allocations (about 8 ms on the 106 GiB pack; 5.3 ms a GiB were it all left).
+    gb_cuda::rt::device_sync().map_err(|e| ModelError::Config(format!("device sync after the zero fill: {e}")))?;
     Ok(Regions { bufs })
 }
 

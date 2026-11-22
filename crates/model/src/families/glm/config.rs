@@ -276,6 +276,10 @@ pub struct GlmConfig {
     pub vision: Option<GlmVisionConfig>,
     /// `None` when the pack ships no processor config (the vision pipeline must then refuse to start).
     pub processor: Option<GlmProcessorConfig>,
+    /// The 128-column strips `[lo, hi)` of the `lm_head` a tensor-parallel rank holds when it keeps only its vocabulary half
+    /// (`REXL3_GLM_TP_SPLIT` with `lm-held`, set by the rank planner, `tp_boot`; [`GlmConfig::with_lm_rank`]); `None` everywhere else, where
+    /// the whole head is placed. The mapper places only those strips (`StripCut`); the group is still claimed whole.
+    pub lm_strips: Option<(usize, usize)>,
 }
 
 // ---------------------------------------------------------------------------------------------------------------- parsing
@@ -574,6 +578,7 @@ impl GlmConfig {
             pad_token_id,
             vision,
             processor: None,
+            lm_strips: None,
         })
     }
 
@@ -790,6 +795,23 @@ impl GlmConfig {
         }
         let mut c = self.clone();
         c.kda.rank = Some((rank * heads / 2, (rank + 1) * heads / 2));
+        Ok(c)
+    }
+
+    /// This configuration for rank `rank` of a two-rank group that holds only its vocabulary half of the `lm_head` (`lm-held`): strips
+    /// `[rank * strips / 2, (rank + 1) * strips / 2)` of the head's `vocab / 128`, the halves the `lm` split computes (`model/tp.rs`).
+    /// Refused unless the vocabulary halves into whole 128-column strips.
+    pub fn with_lm_rank(&self, rank: usize, ranks: usize) -> Result<GlmConfig, String> {
+        if ranks != 2 || rank >= ranks || self.vocab % 256 != 0 || self.lm_strips.is_some() {
+            return Err(format!(
+                "the lm_head's vocabulary halves take rank 0 or 1 of two ranks and a vocabulary of whole 128-column strip pairs (rank {rank} of {ranks}, vocabulary {}{})",
+                self.vocab,
+                if self.lm_strips.is_some() { ", already a rank's" } else { "" }
+            ));
+        }
+        let half = self.vocab / 256;
+        let mut c = self.clone();
+        c.lm_strips = Some((rank * half, (rank + 1) * half));
         Ok(c)
     }
 

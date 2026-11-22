@@ -1,0 +1,7 @@
+## Breaking changes and upgrade notes
+
+- **Ling-3.1-Flash-1019 thinks by default.** `ling31-single-262k` passes `--default-reasoning-effort on`. A request that names neither `chat_template_kwargs.enable_thinking` nor `reasoning_effort` is served as if it sent `enable_thinking: true`: the reasoning comes back in `reasoning_content` and the answer is clean. Reasoning tokens count against `max_tokens`, so a client that relied on the old default with a small `max_tokens` should raise it or turn thinking off. `GET /v1/models` shows the default under `reasoning.default`.
+- **The Ling-3.1-Flash-1019 262,144-token boot plans from exact free memory with a 1.5 GiB floor.** It was 2 GiB, from a figure rounded down to a whole GiB. The full window needs about 114.7 GiB of `MemAvailable` when the plan reads it, so start on an idle host with about 115.9 GiB free. A boot below that is still refused by name, and the engine never starts at a smaller window.
+- **`./launch.sh stop` can exit 24 (`STOPPED_FORCED`).** Scripts that treated any non-zero exit of `stop` as a failure to stop should accept it: the server has stopped, but not gracefully.
+- **Driver and package warnings.** `DRIVER_NOT_YET_QUALIFIED`, `DEPENDENCY_NOT_YET_QUALIFIED`, `NATIVE_NOT_YET_QUALIFIED` and `REBOOT_PENDING` are warnings, and the command continues. Results on a version newer than the qualified ones are not covered by this release's qualification evidence.
+- Each runtime moves to a new version, and `LATEST` moves with it. The earlier versions stay in the tree and keep verifying.

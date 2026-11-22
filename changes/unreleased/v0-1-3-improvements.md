@@ -1,0 +1,13 @@
+## New features and improvements
+
+- **Host packages are checked by known-working versions.** Each runtime's dependency lock states a tested floor and the versions the release was qualified on for `cuda-cudart-13-0`, `libcublas-13-0`, and `libnccl2` in the two-node runtimes.
+  - A later version of the same major version is accepted with `DEPENDENCY_NOT_YET_QUALIFIED` instead of being refused, so a routine `apt upgrade` (for example `libnccl2` 2.30.7 to 2.32.6) no longer stops `doctor`, `install-deps` or the two-node launcher.
+  - The CUDA runtime, driver CUDA version and cuBLAS reported by `rexl3-serve --version` are judged the same way (`NATIVE_NOT_YET_QUALIFIED`); the binary's own build identity stays exact.
+  - A package on `apt-mark hold` reads as installed.
+  - Two-node profiles still refuse nodes whose versions differ from each other.
+  - Still refused, with what to do in the message: a version below its tested floor, another major version, an NCCL build for another CUDA major version, and an Ubuntu release other than 24.04.
+  - `doctor` reports `host_policy`, `dependency_qualification` and `host_versions`.
+- **A pending restart is a warning (`REBOOT_PENDING`), not a stop.** A driver upgraded without a restart is refused by name (`DRIVER_MODULE_MISMATCH`).
+- **Reproducible engine build.** `cargo build --release --locked` of one commit gives byte-identical `rexl3-serve`, `rexl3-cluster`, `rexl3-router`, `exl3-inspect` and `rexl3-quant` in any directory, for any user, from an empty or a used target directory, when the Rust, CUDA and host compiler versions match. The nodes of a cluster may each build their own binaries; `rexl3-cluster check` compares their sha256 as before. `docs/REPRODUCIBLE_BUILDS.md` lists what must match. The v0.1.3 release binary was built independently on four GB10 nodes with identical results.
+- **Qwen3.8-Flash-Next decode and prefill.** Decode windows of one to four rows stage only the window's rows for the MoE gate/up, which fits two CTAs per SM. Measured on one GB10 with the shipped argv, 512-token greedy answers at 39-, 4,026- and 35,708-token prompts: decode +0.6 to +0.8% with MTP and +2.9 to +4.0% without speculation. Prefill reads the next chunk's n-gram table pages ahead and runs the routed-expert GEMMs as ring-fed launches. Output bits are unchanged.
+- **GLM-5.3-Flash DFlash2 draft licence.** The draft role of the GLM-5.3-Flash lock pins `incoai/GLM-5.3-Flash-DFlash2` at its Apache-2.0 revision `6cc6c481`. The files are the same as the earlier revision, so the locked hashes are unchanged, and the runtime's notices state the Apache-2.0 licence.

@@ -15,3 +15,8 @@
 - **DeepSeek-V4.1 `fp16` KV prefill (#110, still open).** The `fp16` index-score kernel is vectorized, with served outputs unchanged. Measured in the review of the change, on a development build and not on the release binary: one GB10, the `dsv41-single-262k` argv and environment with `--kv-dtype fp16` and `--prefix-cache off`, a 33,015-token prompt, median of 3 runs, prompt tokens divided by time to first token. `fp16` prefill was 1,293 tok/s, against 653 tok/s before the change and 1,451 tok/s for `q4` on the same host and build, so part of the gap remains. No shipped profile uses `fp16`, and this release does not qualify it (see Known issues). Reported by @Weschera.
 - **DeepSeek-V4.1 image rows (#112, still open).** Image rows now select the vision-language router bias instead of the text-row bias. This does not resolve the report: image input stays off in both DeepSeek-V4.1 profiles (see Known issues). Reported by @Weschera, with a cross-family control from @ExileAI.
 - **GLM two-node split `lm-held`, opt-in.** The engine gains a tensor-parallel split in which each rank holds only its vocabulary half of the output head instead of the whole head. No shipped profile turns it on. It is our own implementation, motivated by @justincasey's two-node RED-SNOW-5.3-Flash patch and measurements in #95.
+- Discrete GPU memory planning, half-bit EXL3 loading and cache page eviction.
+- Ada (sm_89) groundwork: PDL instructions guarded to sm_90 and later, sm_89 EXL3 plans included, and the Ada prefill fallback and capability caches hardened. Ada is not qualified for v0.1.3.
+- Flash-Next HCG, HCX and QSA kernels use L2 tiling and shared KV.
+- Owned-MoE collectives compacted, and NCCL scatter-gather used.
+- DFlash2 absorb uploads are ordered on model streams.

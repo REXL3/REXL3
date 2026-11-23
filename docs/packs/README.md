@@ -13,6 +13,7 @@ folder. The
 | --- | --- | --- |
 | Qwen3.8-27B | `runtimes/qwen3.8/qwen3.8-27b/` | [qwen3.8-27b.md](qwen3.8-27b.md) |
 | Qwen3.8-Flash-Next | `runtimes/qwen3.8/qwen3.8-flash-next/` | [qwen3.8-flash-next.md](qwen3.8-flash-next.md) |
+| CYBER-FROST-3.8 | `runtimes/qwen3.8/cyber-frost-3.8/` | [cyber-frost-3.8.md](cyber-frost-3.8.md) |
 | GLM-5.3-Flash (single node) | `runtimes/glm-5.3/glm-5.3-flash/` | [glm-5.3-flash.md](glm-5.3-flash.md) |
 | GLM-5.3-Flash (two nodes) | `runtimes/glm-5.3/glm-5.3-flash-tp2/` | [glm-5.3-flash-tp2.md](glm-5.3-flash-tp2.md) |
 | RED-SNOW-5.3-Flash (two nodes) | `runtimes/glm-5.3/red-snow-5.3-flash-tp2/` | [red-snow-5.3-flash-tp2.md](red-snow-5.3-flash-tp2.md) |

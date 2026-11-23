@@ -1,4 +1,4 @@
-//! Apache-2.0. Fixed-label HTTP and engine telemetry. No content or request identifiers in metrics.
+//! AGPL-3.0-only. Fixed-label HTTP and engine telemetry. No content or request identifiers in metrics.
 use crate::http::AppState;
 use crate::latency::Hist;
 use axum::{

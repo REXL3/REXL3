@@ -26,11 +26,13 @@ import urllib.request
 try:
     from . import release_evidence as e
     from . import model_layout as m
-    from .release_manifest import validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES
+    from .release_manifest import (validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES,
+                                   evidence_published)
 except ImportError:
     import release_evidence as e
     import model_layout as m
-    from release_manifest import validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES
+    from release_manifest import (validate_manifest, shared_engine_sources, shared_source_name, SOURCE_ARCHIVES,
+                                  evidence_published)
 
 DEV_REPO = 'REXL3/REXL3-dev'
 API = 'https://api.github.com'
@@ -259,7 +261,14 @@ def model_assets(manifest, repo_root=None):
     A manifest with ``engine.source_archives`` publishes each named engine corresponding-source
     archive once: every model maps to one of them by its sealed digest and size, and no model
     keeps a per-model engine-source asset. A manifest without the key is unchanged.
+
+    A manifest with ``evidence_assets: "dev-release"`` publishes no per-model evidence archive: the
+    archives stay on the development release, where download_dev_assets still verifies each one
+    against its sealed approval. A manifest without the key is unchanged.
     """
+    kinds = ('bundle', 'source', 'engine-source', 'evidence')
+    if not evidence_published(manifest):
+        kinds = kinds[:-1]
     names = set(manifest['engine']['artifacts'])
     shared_sources = dict(shared_engine_sources(manifest, repo_root))
     names.update(shared_sources.values())
@@ -282,7 +291,7 @@ def model_assets(manifest, repo_root=None):
     for item in manifest['models']:
         prefix = asset_prefix(item)
         names.add(f'{prefix}-approval.json')
-        for kind in ('bundle', 'source', 'engine-source', 'evidence'):
+        for kind in kinds:
             if kind == 'engine-source' and (item['family'], item['model'], item['version']) in shared_sources:
                 continue
             names.add(f'{prefix}-{kind}.tar.gz')
@@ -353,6 +362,10 @@ def download_dev_assets(api, manifest, repo_root):
     Legacy approve-* releases retain their exact inventory checks. A unified release
     supplies one prefixed approval per model; only that approval's bound archives are
     selected. Separate evidence stages and per-model verification remain mandatory.
+
+    With ``evidence_assets: "dev-release"`` in the manifest nothing above changes: every evidence
+    archive is still downloaded, extracted and verified against its sealed approval. Only the last
+    step differs: the verified archive is not copied into the upload directory.
     """
     root = Path(repo_root)
     registry = e.load_registry(root / 'runtimes/templates/APPROVALS.json')
@@ -361,6 +374,7 @@ def download_dev_assets(api, manifest, repo_root):
     release_cache = {}
     byte_cache = {}
     source_archives = manifest['engine'].get(SOURCE_ARCHIVES)
+    publish_evidence = evidence_published(manifest)
     original_api = api
 
     class DownloadCache:
@@ -464,6 +478,9 @@ def download_dev_assets(api, manifest, repo_root):
         (work / (prefix + '-approval.json')).write_bytes(approval.read_bytes())
         for kind, field in (('bundle', 'bundle'), ('source', 'source_asset'), ('engine-source', 'engine_source_asset'),
                             ('evidence', 'evidence_asset')):
+            if kind == 'evidence' and not publish_evidence:
+                # Verified above against the sealed approval; it stays on the development release.
+                continue
             archive = doc[field]['archive']
             shared = archive == e.shared_engine_source_name(tag)
             target = work / (archive if shared else f'{prefix}-{kind}.tar.gz')
@@ -586,6 +603,9 @@ def cut(api, repo, version, mode, repo_root='.'):
     immutable_releases(api, repo)
     manifest = check_local_main(repo_root, version, api=api)
     if mode == 'dry':
+        if not evidence_published(manifest):
+            print('EVIDENCE_ON_DEV_RELEASE the manifest keeps the per-model evidence archives on the development '
+                  'release: --publish verifies each one against its sealed approval and does not upload it')
         print(f'DRY_RUN_OK would tag {version} at {merge_commit} and publish the release with the verified dev assets')
         return 0
     # --publish: create the tag (ruleset must currently allow exactly this tag), draft release, upload, verify, publish.

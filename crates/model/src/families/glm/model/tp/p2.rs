@@ -68,6 +68,12 @@ pub(in crate::families::glm) struct P2Exchange {
     zero_copy_swaps: u64,
 }
 
+/// Bytes of device memory the P2 exchange of a rank of `cfg` holds at `rows` prompt rows a chunk (the model's scratch rows): the two groups'
+/// fp32 parts, `2 x rows x hidden x 4` ([`P2Exchange::new`]). For a memory plan made before the load (`rank_extras`).
+pub(in crate::families::glm) fn parts_bytes(cfg: &crate::families::glm::GlmConfig, rows: usize) -> u64 {
+    2 * (rows * cfg.hidden * 4) as u64
+}
+
 impl P2Exchange {
     pub(in crate::families::glm) fn new(max_rows: usize, hidden: usize) -> Result<Self, ModelError> {
         let b = || DevBuf::zeroed(max_rows * hidden * 4);

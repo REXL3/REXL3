@@ -20,11 +20,11 @@ import sys
 try:
     from . import release_evidence as e
     from . import model_layout as m
-    from .release_manifest import validate_manifest
+    from .release_manifest import validate_manifest, evidence_published, manifest_approvals
 except ImportError:
     import release_evidence as e
     import model_layout as m
-    from release_manifest import validate_manifest
+    from release_manifest import validate_manifest, evidence_published, manifest_approvals
 
 FRAGMENT_HEADINGS = {
     'Highlights': 'HIGHLIGHTS',
@@ -80,18 +80,43 @@ def parse_fragments(fragments_dir):
     return collected
 
 
-def supported_models_table(manifest):
+EVIDENCE_NOT_PUBLISHED = 'not a release asset; see Assets and checksums'
+
+
+def held_evidence(manifest, repo_root):
+    """{(family, model, version): (archive, sha256, bytes, dev release tag)} for a manifest that keeps
+    its evidence archives on the development release; None for a manifest that publishes them.
+
+    Every value is read from the sealed approval on the checkout, pinned to the manifest's approval
+    hash: the notes never describe an unpublished archive from the manifest's free text.
+    """
+    if evidence_published(manifest):
+        return None
+    e.require(repo_root is not None, 'evidence archives kept on the development release need the production tree')
+    held = {}
+    for key, approval in manifest_approvals(manifest, repo_root):
+        asset = approval['evidence_asset']
+        tag = approval.get('approve_tag')
+        e.validate_request(approval.get('runtime_id'), tag, approval.get('version'))
+        held[key] = (asset['archive'], asset['sha256'], asset['bytes'], tag)
+    return held
+
+
+def supported_models_table(manifest, repo_root=None):
+    held = held_evidence(manifest, repo_root)
     rows = ['| Model | Architecture | Pack | Context | Speculative decoding | Prefix cache | Vision | Evidence |',
             '| --- | --- | --- | --- | --- | --- | --- | --- |']
     for item in manifest['models']:
         rows.append(f"| {item['family']}/{item['model']} | {item.get('architectures','')} | "
                     f"{item.get('pack_format','')} | {item.get('context','')} | "
                     f"{item.get('speculative_decoding','')} | {item.get('prefix_cache','')} | "
-                    f"{item.get('vision','')} | {item.get('evidence','')} |")
+                    f"{item.get('vision','')} | "
+                    f"{item.get('evidence','') if held is None else EVIDENCE_NOT_PUBLISHED} |")
     return '\n'.join(rows)
 
 
-def assets_section(manifest):
+def assets_section(manifest, repo_root=None):
+    held = held_evidence(manifest, repo_root)
     lines = []
     for name, digest in manifest['engine']['artifacts'].items():
         lines.append(f'- `{name}` sha256 `{digest}`')
@@ -99,7 +124,17 @@ def assets_section(manifest):
         lines.append(f"- `{name}` sha256 `{record['sha256']}` ({record['bytes']} bytes): engine corresponding source, "
                      'published once for every model whose sealed approval names this digest')
     for item in manifest['models']:
-        lines.append(f"- {item['family']}/{item['model']} {item['version']}: approval sha256 `{item['approval_sha256']}`")
+        line = f"- {item['family']}/{item['model']} {item['version']}: approval sha256 `{item['approval_sha256']}`"
+        if held is not None:
+            archive, digest, size, tag = held[(item['family'], item['model'], item['version'])]
+            line += (f'; qualification evidence `{archive}` sha256 `{digest}` ({size} bytes), bound by the sealed '
+                     f'approval and held on the private development release `{tag}`')
+        lines.append(line)
+    if held is not None:
+        lines.append('- The qualification evidence archives are not published with this release and cannot be '
+                     'downloaded from it. Each one is verified against its sealed approval when the release is '
+                     'cut, stays on the private development release and is available to the maintainers. The '
+                     'sealed approval records its name, sha256, size and file inventory.')
     return '\n'.join(lines) or 'None.'
 
 
@@ -145,8 +180,8 @@ def render(template_text, version, manifest, fragments, repo_root=None):
         body = '\n'.join(fragments[placeholder]).strip()
         template_text = template_text.replace('{{' + placeholder + '}}', body or 'None.')
     template_text = template_text.replace('{{VERSION}}', version)
-    template_text = template_text.replace('{{SUPPORTED_MODELS}}', supported_models_table(manifest))
-    template_text = template_text.replace('{{ASSETS}}', assets_section(manifest))
+    template_text = template_text.replace('{{SUPPORTED_MODELS}}', supported_models_table(manifest, repo_root))
+    template_text = template_text.replace('{{ASSETS}}', assets_section(manifest, repo_root))
     template_text = template_text.replace('{{PROVENANCE}}', provenance_section(manifest, repo_root))
     if '{{' in template_text:
         raise ValueError('unresolved template placeholder')

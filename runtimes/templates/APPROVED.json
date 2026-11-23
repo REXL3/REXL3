@@ -3,7 +3,8 @@
   "templates": {
     "v1": [
       "sha256:b97918f80561f9d28eced8154abc225ecd5fdf5cca579e0702a646eef6ccdc1d",
-      "sha256:1a13b3e24965ffa6aa806c3e0db0e02109f253af823fe6a69e753e98ef21da8e"
+      "sha256:1a13b3e24965ffa6aa806c3e0db0e02109f253af823fe6a69e753e98ef21da8e",
+      "sha256:4ee34195f95c706c9dfb6820fbae229f6c19c76a1d0b46dc13a26fe0fa775f4a"
     ]
   }
 }

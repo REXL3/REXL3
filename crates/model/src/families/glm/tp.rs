@@ -824,6 +824,9 @@ impl GlmMtpRuntime for GlmRank {
             self.m.mtp_disable_slot(slot);
         }
     }
+    fn mtp_last_head_restricted(&self) -> Option<bool> {
+        self.m.mtp_last_head_restricted()
+    }
     fn has_dflash(&self) -> bool {
         self.m.has_dflash()
     }

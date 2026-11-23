@@ -606,6 +606,9 @@ impl Case for AttnCase {
     fn eager_after_perturb(&mut self, st: &Stream) -> Result<(), CudaError> {
         // `idx.max_pos` still describes the captured positions: the eager reference needs an index built for the new ones
         self.fresh = Some(RowIndex::from_host(&self.next.0, &self.next.1).unwrap());
+        // the fresh index is written on the legacy stream (`DevBuf::from_slice`): settle before the non-blocking probe stream
+        // reads it, as production code does (`uploads_visible` in families/nemotron_h_omni/mtp.rs)
+        settle();
         self.launch(st)
     }
     fn read(&mut self) -> Vec<u32> {
@@ -707,6 +710,9 @@ impl Case for AttnLongCase {
     }
     fn eager_after_perturb(&mut self, st: &Stream) -> Result<(), CudaError> {
         self.fresh = Some(RowIndex::from_host(&self.next.0, &self.next.1).unwrap());
+        // the fresh index is written on the legacy stream (`DevBuf::from_slice`): settle before the non-blocking probe stream
+        // reads it, as production code does (`uploads_visible` in families/nemotron_h_omni/mtp.rs)
+        settle();
         self.launch(st)
     }
     fn read(&mut self) -> Vec<u32> {

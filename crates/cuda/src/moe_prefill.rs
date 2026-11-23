@@ -51,7 +51,7 @@ use crate::rt::{CudaError, DevBuf, Stream};
 use core::ffi::c_void;
 
 #[allow(non_snake_case)]
-mod ffi {
+pub(crate) mod ffi {
     use core::ffi::c_void;
     crate::launchers! {
         pub fn gb_moe_pf_plan(
@@ -298,17 +298,32 @@ impl PrefillScratch {
             plan_cnt: DevBuf::zeroed(get("plan_cnt"))?,
             plan_cls: DevBuf::zeroed(get("plan_cls"))?,
             plan_parallel: false,
-            xs_g: DevBuf::zeroed(get("xs_g"))?,
-            xs_u: DevBuf::zeroed(get("xs_u"))?,
-            xd: DevBuf::zeroed(get("xd"))?,
-            y_pairs: DevBuf::zeroed(get("y_pairs"))?,
+            // the four large buffers are views of a block of their own (the same one cudaMalloc and memset each): a GLM rank 0 lends
+            // them to its vision tower between prompt chunks (`lendable`)
+            xs_g: DevBuf::zeroed_view(get("xs_g"))?,
+            xs_u: DevBuf::zeroed_view(get("xs_u"))?,
+            xd: DevBuf::zeroed_view(get("xd"))?,
+            y_pairs: DevBuf::zeroed_view(get("y_pairs"))?,
         })
+    }
+
+    /// The four large buffers, `[y_pairs, xs_g, xs_u, xd]`: each a view of a block of its own, so a borrower can take sub-views of
+    /// them. Their bytes are a prefill forward's temporaries (nothing in them is read before it is written within one forward), which
+    /// is what lets a GLM rank 0 lend them to its vision tower under a lease (`gb_model::families::glm::lend`).
+    pub fn lendable(&self) -> [&DevBuf; 4] {
+        [&self.y_pairs, &self.xs_g, &self.xs_u, &self.xd]
     }
 
     /// Select the parallel plan builder (`gb_moe_pf_plan_parallel`) instead of the single-block `plan_kernel`.
     /// Both produce bit-identical spair / items / nitems; this only changes how the plan is computed. Off by default.
     pub fn use_parallel_plan(&mut self, on: bool) {
         self.plan_parallel = on;
+    }
+
+    /// Whether the parallel plan builder is selected: the one that leaves each expert's tile offset and pair count in the scratch
+    /// (`plan_toff`, `plan_cnt`), which the Flash-Next ring-fed expert GEMMs launch from.
+    pub(crate) fn parallel_plan(&self) -> bool {
+        self.plan_parallel
     }
 
     /// Run the currently selected planner on `pick` and return the plan arrays (spair, items as `i32` int4 bytes,

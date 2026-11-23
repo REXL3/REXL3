@@ -1,4 +1,4 @@
-//! Apache-2.0. Fixed, unlabelled histograms: 1ms * 2^k (k=0..23), +Inf.
+//! AGPL-3.0-only. Fixed, unlabelled histograms: 1ms * 2^k (k=0..23), +Inf.
 //! Ceiling buckets (not floor-log2); seconds exposed, saturating nanosecond sum.
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};

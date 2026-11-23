@@ -10,7 +10,7 @@ use gb_model::families::bailing_moe_v3::engine::{
     PlanRefused, Planned, BOOT_OVERHEAD_BYTES,
 };
 use gb_model::families::bailing_moe_v3::memory;
-use gb_model::families::bailing_moe_v3::spill::{SpillConfig, SpillMeta, SpillStore, SPILL_STAGING_BYTES};
+use gb_model::families::bailing_moe_v3::spill::{SpillConfig, SpillIo, SpillMeta, SpillStore, SPILL_STAGING_BYTES};
 use gb_model::memory::MemoryOptions;
 use gb_model::plan::{CacheRequest, MemoryPlan, AUTO_CACHE_CAP_BYTES};
 
@@ -42,7 +42,7 @@ fn the_spill_store_plan_reaches_the_whole_262k_window_at_the_two_gib_floor() {
     }
     let c = cfg();
     let host = gb_model::hostmem::MemInfo { available: (N4 * GIB as f64) as u64, ..Default::default() };
-    let free = gb_model::hostmem::planning_free(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
+    let free = gb_model::hostmem::planning_free_exact(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
     let base = MemoryOptions { prefill_rows: 4096, mtp: true, ..MemoryOptions::serving_defaults() };
     let at = |rows: usize| profile_at(&c, &base, rows);
     let spill = SpillConfig {
@@ -87,6 +87,62 @@ fn the_spill_store_plan_reaches_the_whole_262k_window_at_the_two_gib_floor() {
         gib(sel.plan.planned_bytes(1)),
         gib(sel.free),
     );
+}
+
+/// The shipped `ling31-single-262k` (`runtimes/ling-3.1/ling-3.1-flash-1019/profile.json`: 262,144 tokens, one slot, MTP, `--prefix-cache on`
+/// on the NVMe spill store, `--prefill-chunk 512`, `REXL3_MEMORY_FLOOR_GIB=2`) planned from `free_after_weights` bytes (what
+/// `build_engine` hands `plan_boot`: the planning reading less the weights, less `BOOT_OVERHEAD_BYTES`).
+fn boot_262k(free_after_weights: u64) -> Result<Planned, PlanRefused> {
+    let c = cfg();
+    let base = MemoryOptions { prefill_rows: 512, mtp: true, ..MemoryOptions::serving_defaults() };
+    let at = |rows: usize| profile_at(&c, &base, rows);
+    let spill = SpillConfig {
+        dir: std::env::temp_dir().join("ling-plan-spill-262k"),
+        quota_bytes: 64 << 30,
+        staging_bytes: SPILL_STAGING_BYTES,
+    };
+    plan_boot(&PlanInputs {
+        cfg: &c,
+        base,
+        profile_at: &at,
+        free_after_weights,
+        floor_bytes: family_floor_bytes(2 * GIB),
+        slots: 1,
+        kv_tokens_cap: 262_144,
+        cache: ON,
+        snapshot_bytes: snapshot_fixed_bytes(&c, true),
+        window_tokens: 262_144,
+        in_place: true,
+        with_mtp: true,
+        spill: Some(spill),
+    })
+}
+
+#[test]
+fn the_shipped_262k_profile_needs_nine_gib_of_memavailable_after_the_weights() {
+    if !gb_cuda::rt::kernels_built() {
+        eprintln!("not run: this build has no CUDA kernels");
+        return;
+    }
+    // The memory the shipped 262,144-token profile asks of a GB10: the plan's own items (the 262,144-token pool and a
+    // page for the slot, the slot state, the scratch and window records, the after-plan reserve and the spill store's staging buffer) and
+    // the 2 GiB floor need 6.95-6.96 GiB once the weights and `BOOT_OVERHEAD_BYTES` are out, so 8.95-8.96 GiB of `MemAvailable` after the
+    // weights, which the whole-GiB planning quantum rounds up to 9 GiB. With the 106.25 GiB pack that is 115.25 GiB at the plan.
+    assert!(boot_262k((6.95 * GIB as f64) as u64).is_err(), "6.95 GiB after the weights and the overhead is short");
+    let p = boot_262k((6.96 * GIB as f64) as u64).expect("6.96 GiB holds the profile");
+    assert_eq!(p.chosen.plan.kv_tokens, 262_144, "the pool holds the whole window");
+    // Not asserted here: that the plan's items and the floor fit in what it was given. The spill store's staging buffer
+    // (`SPILL_STAGING_BYTES`, 64 MiB) replaces the RAM cache after the pool is sized (`engine::judge`), so at this edge the plan
+    // prices up to 64 MiB more than the spare it left.
+    assert!(p.chosen.plan.planned_bytes(1) + 2 * GIB <= p.chosen.free + SPILL_STAGING_BYTES as u64, "within the staging buffer");
+    let quantized = |after_weights: u64| {
+        let host = gb_model::hostmem::MemInfo { available: after_weights, ..Default::default() };
+        gb_model::hostmem::planning_free(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES)
+    };
+    assert!(boot_262k(quantized(9 * GIB)).is_ok(), "9 GiB after the weights boots");
+    // one MiB less plans from 8 GiB: the pool falls to 173,056 tokens and the boot is refused by name, never booted short
+    let e = boot_262k(quantized(9 * GIB - MIB)).err().expect("refused").to_string();
+    assert!(e.contains("the KV pool holds 173056 tokens, below the 262144-token window"), "{e}");
 }
 
 /// The profile's plan on a node with `free_after_weights` bytes free once the weights are resident (the embedding table read in place
@@ -196,18 +252,19 @@ fn the_cache_shrinks_smoothly_then_disables_or_the_plan_refuses() {
 
 // ---- the boot planner on the real profile: the stock nodes' figures
 
-/// `MemAvailable` once the 106.3 GiB weights are resident, on the nodes the Ling profile was booted on (`ling31_plan free_gib` plus the
-/// 0.3 GiB after-plan reserve the line has already taken out): N4 9.8, N3 8.2 (2026-11-02), N2 6.6 (it holds 2 GiB of huge pages).
-const N4: f64 = 10.1;
-const N3: f64 = 8.5;
-const N2: f64 = 6.9;
+/// `MemAvailable` once the 106.3 GiB weights are resident, as the boots on those nodes planned it: they read 10.1 (N4), 8.5 (N3,
+/// 2026-11-02) and 6.9 GiB (N2, which holds 2 GiB of huge pages) and planned from the whole GiB below, as the boot did then. The boot now
+/// plans from the exact bytes; these cases keep the figures those boots planned from.
+const N4: f64 = 10.0;
+const N3: f64 = 8.0;
+const N2: f64 = 6.0;
 
 /// The shipped profile's boot (`--max-model-len`, one slot, MTP, `--prefix-cache on`, floor 3) on a node with `after_weights_gib` free once the
 /// weights are resident, for a requested `--prefill-chunk`: what `build_engine` plans, through the same `plan_boot`.
 fn boot(after_weights_gib: f64, window: u64, requested_chunk: usize) -> Result<Planned, PlanRefused> {
     let c = cfg();
     let host = gb_model::hostmem::MemInfo { available: (after_weights_gib * GIB as f64) as u64, ..Default::default() };
-    let free = gb_model::hostmem::planning_free(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
+    let free = gb_model::hostmem::planning_free_exact(0, Some(&host)).saturating_sub(BOOT_OVERHEAD_BYTES);
     let base = MemoryOptions { prefill_rows: requested_chunk, mtp: true, ..MemoryOptions::serving_defaults() };
     let at = |rows: usize| profile_at(&c, &base, rows);
     plan_boot(&PlanInputs {
@@ -370,5 +427,68 @@ fn explicit_abort_paths_return_the_spill_store_to_a_reusable_state() {
     store.read_exact_into(&mut out).unwrap();
     store.finish_read().unwrap();
     assert_eq!(out, payload);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Pages of `path` resident in the page cache (`mincore` over a read-only mapping that is never touched).
+#[cfg(target_os = "linux")]
+fn cached_pages(path: &std::path::Path) -> usize {
+    use std::os::fd::AsRawFd;
+    let f = std::fs::File::open(path).unwrap();
+    let len = f.metadata().unwrap().len() as usize;
+    let mut vec = vec![0u8; len.div_ceil(4096)];
+    // SAFETY: a fresh read-only shared mapping of `len` bytes of an open file, queried with `mincore` into one byte per page and
+    // unmapped; nothing dereferences it.
+    unsafe {
+        let addr = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, f.as_raw_fd(), 0);
+        assert_ne!(addr, libc::MAP_FAILED);
+        assert_eq!(libc::mincore(addr, len, vec.as_mut_ptr() as _), 0);
+        libc::munmap(addr, len);
+    }
+    vec.iter().filter(|&&b| b & 1 == 1).count()
+}
+
+/// The store the server opens (`SpillStore::open`, the served 64 MiB staging) on a disk filesystem moves a two-block snapshot
+/// bit-exactly without the page cache: a buffered snapshot write asked for 2 MiB page-cache folios, which a GB10 serving beside
+/// its weights could only get by direct reclaim, and that reclaim swapped the server's heap out.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_served_spill_store_moves_snapshots_without_the_page_cache() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ling31-spill-direct-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut store =
+        SpillStore::open(SpillConfig { dir: dir.clone(), quota_bytes: GIB, staging_bytes: SPILL_STAGING_BYTES }).unwrap();
+    assert_eq!(store.io(), SpillIo::Direct, "a disk filesystem takes the served store's direct I/O");
+    let payload: Vec<u8> =
+        (0..SPILL_STAGING_BYTES + 12_345).map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 11) as u8).collect();
+    let path = write_spill_snapshot(&mut store, 6, &payload);
+    assert_eq!(cached_pages(&path), 0, "the snapshot write left nothing in the page cache");
+    store.begin_read(&path, SPILL_META).unwrap();
+    let mut out = vec![0; payload.len()];
+    store.read_exact_into(&mut out).unwrap();
+    store.finish_read().unwrap();
+    assert!(out == payload, "the two-block payload reads back bit-exact");
+    assert_eq!(cached_pages(&path), 0, "the snapshot read left nothing in the page cache");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Off Linux (no `O_DIRECT`) the store the server opens falls back to the page cache and still moves a two-block snapshot
+/// bit-exactly.
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn off_linux_the_served_spill_store_falls_back_to_buffered_io() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ling31-spill-buffered-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut store =
+        SpillStore::open(SpillConfig { dir: dir.clone(), quota_bytes: GIB, staging_bytes: SPILL_STAGING_BYTES }).unwrap();
+    assert_eq!(store.io(), SpillIo::Buffered, "no direct I/O off Linux");
+    let payload: Vec<u8> =
+        (0..SPILL_STAGING_BYTES + 12_345).map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 11) as u8).collect();
+    let path = write_spill_snapshot(&mut store, 6, &payload);
+    store.begin_read(&path, SPILL_META).unwrap();
+    let mut out = vec![0; payload.len()];
+    store.read_exact_into(&mut out).unwrap();
+    store.finish_read().unwrap();
+    assert!(out == payload, "the two-block payload reads back bit-exact");
     std::fs::remove_dir_all(dir).unwrap();
 }

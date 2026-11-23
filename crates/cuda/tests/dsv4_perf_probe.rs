@@ -91,6 +91,7 @@ fn probe_all_dsv41_kernels() {
                             o_in: i32,
                             dtype: i32,
                             use_classic: i32,
+                            force_mma: i32,
                             stream: *mut core::ffi::c_void,
                         ) -> i32;
                     }
@@ -103,6 +104,7 @@ fn probe_all_dsv41_kernels() {
                         groups as i32,
                         o_lora as i32,
                         o_in as i32,
+                        0,
                         0,
                         0,
                         st.raw(),
@@ -746,6 +748,7 @@ fn probe_detailed_breakdown() {
                         start_pos: i32,
                         ratio: i32,
                         dtype: i32,
+                        force_scalar: i32,
                         stream: *mut core::ffi::c_void,
                     ) -> i32;
                 }
@@ -763,6 +766,7 @@ fn probe_detailed_breakdown() {
                     1.0 / 1024.0f32.sqrt(),
                     pos as i32,
                     1,
+                    0,
                     0,
                     st.raw(),
                 );
@@ -948,6 +952,7 @@ fn probe_mla_prefill_breakdown() {
                         o_in: i32,
                         dtype: i32,
                         use_classic: i32,
+                        force_mma: i32,
                         stream: *mut core::ffi::c_void,
                     ) -> i32;
                 }
@@ -960,6 +965,7 @@ fn probe_mla_prefill_breakdown() {
                     8,
                     1024,
                     4096,
+                    0,
                     0,
                     0,
                     st.raw(),

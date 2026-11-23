@@ -180,6 +180,23 @@ pub fn dead_ids(ids: &[i32], splice: &[Dsv41Splice]) -> Vec<i32> {
     out
 }
 
+/// The router's view of a chunk that holds image spans: one byte a row, nonzero exactly where
+/// `model.py`'s `token_types >= 0` selects `bias_vl` instead of the text-path `bias`.
+pub fn image_mask_rows(rows: usize, splice: &[Dsv41Splice]) -> Option<Vec<u8>> {
+    if splice.is_empty() {
+        return None;
+    }
+    let mut out = vec![0u8; rows];
+    for sp in splice {
+        for r in sp.dst..sp.dst + sp.n {
+            if r < out.len() {
+                out[r] = 1;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The tower as the server's image encoder (`serve::ImageEncoder`): one image at a time, on the caller's thread
 /// (the `VisionService` serializes encodes), over the tower's own stream. The rows come back to the host — the
 /// prefill splice reads them there ([`Dsv41Splice::block`]).
@@ -350,6 +367,18 @@ mod tests {
         assert_eq!(dead[3 + span_len..], ids[3 + span_len..], "the text after");
         // and no ids at all change without a span
         assert_eq!(dead_ids(&ids, &[]), ids);
+    }
+
+    /// The same span selects the VL router bias: only its rows are nonzero, and a text chunk has no mask upload.
+    #[test]
+    fn the_router_mask_marks_exactly_the_image_span_rows() {
+        let sp = Dsv41Splice::whole(feats(2, 2), 3).unwrap();
+        let span_len = sp.n;
+        let mask = image_mask_rows(12, &[sp]).unwrap();
+        assert_eq!(&mask[..3], &[0, 0, 0]);
+        assert_eq!(&mask[3..3 + span_len], vec![1; span_len]);
+        assert_eq!(&mask[3 + span_len..], vec![0; 12 - 3 - span_len]);
+        assert!(image_mask_rows(12, &[]).is_none());
     }
 
     /// The features' key changes with the pixels, the canvas and the preprocessing.

@@ -36,6 +36,7 @@
 #include <stdint.h>
 
 #include "common.cuh"
+#include "cuda_caps.cuh"
 
 namespace {
 
@@ -66,8 +67,16 @@ struct NmProj {
 // stream drains, and does only work that needs nothing the predecessor writes (weight prefetch) before pdl_wait(), which returns once
 // the predecessor has completed and its writes are visible. pdl_trigger() lets the successor launch (it does so when every block of the
 // grid has triggered or exited). Both are no-ops for a kernel that was launched without the attribute.
-__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
-__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+__device__ __forceinline__ void pdl_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void pdl_trigger() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+}
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
 // Invalidate the 128-byte line at p in L2 without writing it back (p 128-byte aligned): for scratch that is dead.
 __device__ __forceinline__ void discard_l2(const void* p) { asm volatile("discard.global.L2 [%0], 128;" ::"l"(p) : "memory"); }
@@ -1263,7 +1272,7 @@ static int launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, cudaStrea
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr;
-    cfg.numAttrs = g_pdl ? 1 : 0;
+    cfg.numAttrs = g_pdl && gbx_cuda::device_supports_pdl() ? 1 : 0;
     const cudaError_t e = cudaLaunchKernelEx(&cfg, kernel, static_cast<KArgs>(args)...);
     return e != cudaSuccess ? (int)e : GB_CHECK_LAUNCH();
 }

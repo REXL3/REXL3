@@ -191,6 +191,7 @@ pub struct Metrics {
     pub decision_prompt_tokens: AtomicU64,
     pub decisions_cached_tokens: AtomicU64,
     score_supported: std::sync::atomic::AtomicBool,
+    score_rows_supported: std::sync::atomic::AtomicBool,
     pub observability: crate::observability::Observability,
     /// Requests admitted to the engine (they got a slot).
     pub requests: AtomicU64,
@@ -350,9 +351,12 @@ impl EngineHandle {
         if !self.metrics.ready_complete() {
             return Err(Refusal::NotReady);
         }
-        if !self.score_supported() {
-            let e = if req.all_rows { gb_engine::score::rows_unsupported() } else { gb_engine::score::unsupported() };
-            return Err(Refusal::Rejected(e));
+        // two capabilities: the teacher-forced readout (`all_rows`) and last-row scoring
+        if req.all_rows && !self.metrics.score_rows_supported.load(Ordering::Acquire) {
+            return Err(Refusal::Rejected(gb_engine::score::rows_unsupported()));
+        }
+        if !req.all_rows && !self.score_supported() {
+            return Err(Refusal::Rejected(gb_engine::score::unsupported()));
         }
         if self.metrics.inbox.fetch_add(1, Ordering::AcqRel) >= self.inbox_cap() {
             self.metrics.inbox.fetch_sub(1, Ordering::AcqRel);
@@ -627,6 +631,7 @@ pub fn spawn_with(make: Box<dyn FnOnce() -> Box<dyn ServeEngine> + Send>, cfg: R
                 let engine = held.engine.as_mut().expect("the engine is held until the closure ends");
                 m.set_ready_complete(true);
                 m.score_supported.store(engine.score_supported(), Ordering::Release);
+                m.score_rows_supported.store(engine.score_rows_supported(), Ordering::Release);
                 snapshot(engine.as_ref(), &m);
                 m.set_request_limit(engine.request_limit()); // before the server turns ready: no accepted request sees the window alone
                 gb_engine::boot::mark("ready", None);

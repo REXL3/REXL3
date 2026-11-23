@@ -123,7 +123,9 @@ A release holds the assets of **every** model in it. For each model there is an 
 `-source.tar.gz`, `-engine-source.tar.gz` and `-evidence.tar.gz` archives with the same prefix, and the
 engine artifacts, are not needed to run a model. A release may publish the engine source once for all
 its models, as `rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz`, in place of one `-engine-source.tar.gz`
-per model; the release notes list it under "Assets and checksums". `<runtime-id>` is the prefix of your model's asset
+per model; the release notes list it under "Assets and checksums". A release may also keep its
+`-evidence.tar.gz` archives off the release page; its notes then say so and give each archive's
+sha256. `<runtime-id>` is the prefix of your model's asset
 names on the release page (the [README](../README.md) lists the runtime ids). Download
 only your model's two files, into a fresh directory each time:
 

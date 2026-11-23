@@ -10,6 +10,11 @@
 //! device's figure is logged and nothing else. The floor, the engine reserve and the slot state still come out of it exactly once
 //! (`plan::plan_memory_cached`), the loader keeps checking it before each region (`families::glm::load::allocate`), and an allocation the
 //! driver refuses anyway ends the boot with [`allocation_refusal`], never with a bare CUDA code.
+//!
+//! That is the unified-memory rule (`cudaDevAttrIntegrated` == 1, the GB10). On a discrete GPU the device has its own VRAM and
+//! `cudaMalloc` cannot reclaim the host's page cache, so a plan sized from `MemAvailable` alone can ask the device for more than it has
+//! (the boot then dies in `cudaMalloc`). The device-aware [`planning_free_on`] keeps the host's figure binding on an integrated device and
+//! sizes from the smaller of the device's free and the host's on a discrete one.
 
 use std::fmt::Display;
 
@@ -86,10 +91,41 @@ pub const PLAN_QUANTUM: u64 = 1 << 30;
 
 /// The bytes a plan is sized from once the weights are resident: the host's `MemAvailable`, or the device's own free figure where the host reports
 /// none, rounded down to [`PLAN_QUANTUM`]. Never the smaller of the two: the device's figure only misses the page cache, which `cudaMalloc` reclaims
-/// on demand.
+/// on demand. This is the integrated-device rule (the GB10): [`planning_free_on`] is the device-aware variant a discrete-GPU family must use.
 pub fn planning_free(cuda_free: u64, host: Option<&MemInfo>) -> u64 {
-    let free = host.map_or(cuda_free, |h| h.available);
-    free - free % PLAN_QUANTUM
+    planning_free_on(cuda_free, host, true)
+}
+
+/// [`planning_free`] for an explicit device class. `integrated` is `cudaDevAttrIntegrated` == 1 (the device shares the host's memory, as on the
+/// GB10): a plan is sized from the host's `MemAvailable` alone, and the device's own free figure is only the kernel's `MemFree`, which is not the
+/// bound. On a discrete device (`integrated` == false) the device has its own VRAM: `cudaMalloc` cannot reclaim the host's page cache, so a plan
+/// sized from `MemAvailable` can ask the device for more than it has and die in allocation. The plan is sized from the smaller of the device's
+/// free bytes and the host's `MemAvailable`. The GiB rounding of [`PLAN_QUANTUM`] exists for the host-side jitter of the unified-memory rule
+/// (whole-GiB swings of `MemAvailable` between boots of one state); a discrete GPU's free figure is its VRAM and is exact, and rounding it down
+/// throws away up to a GiB of the small headroom a 24/32/48 GiB card has left after the weights (the 24 GiB card of the small-fit plan: free
+/// 2.69 GiB -> planned 2.00), so the discrete path keeps the exact bytes. Byte-identical to [`planning_free`] at `integrated` == true.
+pub fn planning_free_on(cuda_free: u64, host: Option<&MemInfo>, integrated: bool) -> u64 {
+    let free = match (host, integrated) {
+        (Some(h), true) => h.available,
+        (Some(h), false) => h.available.min(cuda_free),
+        (None, _) => cuda_free,
+    };
+    if integrated {
+        free - free % PLAN_QUANTUM
+    } else {
+        free
+    }
+}
+
+/// The integrated-device reading of [`planning_free`] without the [`PLAN_QUANTUM`] rounding: the host's `MemAvailable` to the byte, or the
+/// device's free figure where the host reports none. For a family whose plan is a few GiB wide on a full box, where the up-to-a-GiB the
+/// rounding leaves unplanned decides whether the shipped window fits at all (Ling-3.1 on one GB10: 6-10 GiB after the 106 GiB pack). Such a
+/// plan moves with `MemAvailable` between boots; the family must refuse a pool short of its window rather than boot smaller.
+pub fn planning_free_exact(cuda_free: u64, host: Option<&MemInfo>) -> u64 {
+    match host {
+        Some(h) => h.available,
+        None => cuda_free,
+    }
 }
 
 fn gib(b: u64) -> f64 {
@@ -97,12 +133,18 @@ fn gib(b: u64) -> f64 {
 }
 
 /// The `rexl3 event=memory_view` line: what the plan was sized from and what the device would have said, so a boot's capacity can be read against
-/// the box's state (the A/B of `docs/EVAL_RESULTS.md` is made of these lines).
+/// the box's state (the A/B of `docs/EVAL_RESULTS.md` is made of these lines). The integrated-device form ([`planning_free`]).
 pub fn memory_view_line(cuda_free: u64, host: Option<&MemInfo>, floor: u64) -> String {
-    let planned = planning_free(cuda_free, host);
+    memory_view_line_on(cuda_free, host, floor, true)
+}
+
+/// [`memory_view_line`] for an explicit device class (see [`planning_free_on`] for `integrated`).
+pub fn memory_view_line_on(cuda_free: u64, host: Option<&MemInfo>, floor: u64, integrated: bool) -> String {
+    let planned = planning_free_on(cuda_free, host, integrated);
+    let from = if integrated { "mem_available" } else { "cuda_free_min_mem_available" };
     match host {
         Some(h) => format!(
-            "rexl3 event=memory_view cuda_free_gib={:.1} mem_free_gib={:.1} mem_available_gib={:.1} cached_gib={:.1} planned_from=mem_available plan_free_gib={:.1} floor_gib={:.1}",
+            "rexl3 event=memory_view cuda_free_gib={:.1} mem_free_gib={:.1} mem_available_gib={:.1} cached_gib={:.1} planned_from={from} plan_free_gib={:.1} floor_gib={:.1}",
             gib(cuda_free),
             gib(h.free),
             gib(h.available),
@@ -117,6 +159,52 @@ pub fn memory_view_line(cuda_free: u64, host: Option<&MemInfo>, floor: u64) -> S
             gib(floor)
         ),
     }
+}
+
+/// [`memory_view_line`] for a plan sized by [`planning_free_exact`]: the same fields, with `plan_free_gib` the unrounded figure (two decimals)
+/// and `planned_from=mem_available_exact`, so the line states what the plan was really sized from.
+pub fn memory_view_line_unrounded(cuda_free: u64, host: Option<&MemInfo>, floor: u64) -> String {
+    let planned = planning_free_exact(cuda_free, host);
+    match host {
+        Some(h) => format!(
+            "rexl3 event=memory_view cuda_free_gib={:.1} mem_free_gib={:.1} mem_available_gib={:.2} cached_gib={:.1} planned_from=mem_available_exact plan_free_gib={:.2} floor_gib={:.1}",
+            gib(cuda_free),
+            gib(h.free),
+            gib(h.available),
+            gib(h.cached),
+            gib(planned),
+            gib(floor)
+        ),
+        None => format!(
+            "rexl3 level=warn event=memory_view cuda_free_gib={:.1} planned_from=cuda_free reason=\"/proc/meminfo has no MemAvailable\" plan_free_gib={:.2} floor_gib={:.1}",
+            gib(cuda_free),
+            gib(planned),
+            gib(floor)
+        ),
+    }
+}
+
+/// The `rexl3 event=memory_view_exact` line of a tensor-parallel rank's plan (`glm::tp_boot::plan_rank`): the same reading as
+/// [`memory_view_line`] in MiB with three decimals, and what the whole-GiB rounding of [`planning_free`] left out of the plan
+/// (`rounding_remainder_mib`: free memory the plan never counts), so a rank's allocations can be read against the plan to the MiB. The
+/// single node's `memory_view` line is unchanged.
+pub fn memory_view_exact_line(cuda_free: u64, host: Option<&MemInfo>, floor: u64) -> String {
+    let planned = planning_free(cuda_free, host);
+    let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+    let (from, read) = match host {
+        Some(h) => ("mem_available", h.available),
+        None => ("cuda_free", cuda_free),
+    };
+    let host_part = host.map_or(String::new(), |h| {
+        format!(" mem_free_mib={:.3} mem_available_mib={:.3} cached_mib={:.3}", mib(h.free), mib(h.available), mib(h.cached))
+    });
+    format!(
+        "rexl3 event=memory_view_exact cuda_free_mib={:.3}{host_part} planned_from={from} plan_free_mib={:.3} rounding_remainder_mib={:.3} floor_mib={:.3}",
+        mib(cuda_free),
+        mib(planned),
+        mib(read - planned),
+        mib(floor)
+    )
 }
 
 /// The boot error for an allocation the device refused although the plan fits: what was being allocated, what the plan asked for, and what the host
@@ -160,6 +248,7 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
 
     /// anonymized host-c after 83 GiB of buffered reads (2026-10-03): the device sees 30 GiB free, the kernel 113.6 GiB available.
     const DIRTY: &str = "MemTotal:       127600812 kB\nMemFree:        31498240 kB\nMemAvailable:  119132160 kB\nBuffers:          580808 kB\nCached:         86212608 kB\nSwapCached:            0 kB\n";
@@ -196,6 +285,35 @@ mod tests {
         assert_eq!(planning_free(100 * GIB, Some(&MemInfo { available: 40 * GIB, ..clean })), 40 * GIB);
         // no host figure: the device's
         assert_eq!(planning_free(33 * GIB, None), 33 * GIB);
+    }
+
+    #[test]
+    fn a_discrete_device_plans_from_the_smaller_of_the_device_and_the_host() {
+        // RTX-class box after the weights are resident: the device reports 51 GiB free of its own VRAM,
+        // the host still reports 116 GiB of MemAvailable. A plan sized from MemAvailable alone would ask
+        // the device for ~115 GiB and die in cudaMalloc; the discrete rule binds the device's figure.
+        let h = MemInfo { total: 121 * GIB, free: 12 * GIB, available: 116 * GIB, cached: 80 * GIB };
+        assert_eq!(planning_free_on(51 * GIB, Some(&h), false), 51 * GIB);
+        // the host is the bound when it is the smaller figure
+        assert_eq!(planning_free_on(70 * GIB, Some(&h), false), 70 * GIB);
+        // the discrete rule keeps the exact bytes: the GiB rounding would cost up to a GiB of the small
+        // headroom a 24/32/48 GiB card has after the weights (free 2.69 GiB -> planned 2.00 alone costs
+        // the 24 GiB card its whole boot at the new floor)
+        assert_eq!(planning_free_on(51 * GIB - 1, Some(&h), false), 51 * GIB - 1);
+        assert_eq!(planning_free_on(51 * GIB + 1, Some(&h), false), 51 * GIB + 1);
+        // no host figure: the device's, integrated or not
+        assert_eq!(planning_free_on(33 * GIB, None, false), 33 * GIB);
+        assert_eq!(planning_free_on(33 * GIB, None, true), 33 * GIB);
+    }
+
+    #[test]
+    fn an_integrated_device_keeps_the_host_only_rule_byte_identical() {
+        // the GB10: cudaMalloc reclaims the host's page cache, so the device's free figure never binds
+        let h = MemInfo { total: 121 * GIB, free: 12 * GIB, available: 116 * GIB, cached: 80 * GIB };
+        assert_eq!(planning_free_on(30 * GIB, Some(&h), true), 116 * GIB);
+        // at integrated == true the device-aware rule IS the old rule, to the byte
+        assert_eq!(planning_free_on(30 * GIB, Some(&h), true), planning_free(30 * GIB, Some(&h)));
+        assert_eq!(planning_free_on(70 * GIB, Some(&h), true), planning_free(70 * GIB, Some(&h)));
     }
 
     #[test]

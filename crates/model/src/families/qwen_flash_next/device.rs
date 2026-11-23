@@ -506,10 +506,24 @@ impl FlashNextWeights {
             ModelError::Config(format!("Qwen3.8-Flash-Next pack: {} problems: {}", errs.len(), head.join("; ")))
         })?;
         let pack = Pack::open(dir)?;
+        Self::load_from(dir, cfg, &pack, &map, warm, mtp, progress)
+    }
+
+    /// [`FlashNextWeights::load_with`] from a pack the caller has already opened and bound: `pack` is the pack in `dir` and `map` its
+    /// [`WeightMap`] for `cfg` (what `Pack::open(dir)` and `WeightMap::from_dir(dir, cfg)` return), so the boot does not scan it again.
+    pub fn load_from(
+        dir: &Path,
+        cfg: &FlashNextConfig,
+        pack: &Pack,
+        map: &WeightMap,
+        warm: bool,
+        mtp: bool,
+        progress: impl FnMut(usize, usize),
+    ) -> Result<Self, ModelError> {
         let mut want = Wanted::new(cfg);
         want.mtp &= mtp;
         let mut ctx = LoadCtx::from_env();
-        let mut staged = stage(&mut ctx, &pack, dir, &map, &want)?;
+        let mut staged = stage(&mut ctx, pack, dir, map, &want)?;
         let mut w = Self::claim(&mut staged, cfg, dir, &want, progress)?;
         // the loader's copies run here; every buffer claimed above holds its weight only afterwards
         ctx.finish()?;

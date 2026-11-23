@@ -4752,9 +4752,15 @@ mod tests {
         assert!(text.contains("window_candidates (call"), "{text}");
         assert!(text.contains("CUDA error 20103 (communicator aborted)"), "{text}");
         assert!(!text.contains("unrecognised"), "{text}");
-        // the latched reason, the status and the exit class are the group's own: only the returned text names the collective
+        // the latched reason, the status and the exit class are the group's own: only the returned text names the collective.
+        // Two leader threads can notice the dead peer first and latch it, and both blame rank 1: its reader sees the stream end,
+        // or the watchdog's next ping (every 100 ms here, so one may fall on the kill) fails to write with a broken pipe
         let why = g.leader().failure().expect("the group must be lost");
-        assert!(why.contains("the connection to rank 1 failed") && !why.contains("20103"), "{why}");
+        assert!(
+            why.starts_with("the connection to rank 1 failed") || why.starts_with("sending ping (call 0) to rank 1 failed"),
+            "{why}"
+        );
+        assert!(!why.contains("20103"), "{why}");
         assert_eq!(g.leader().group_status().lost_rank, Some(1));
         assert!(matches!(g.leader().flush(), Err(e) if e.is_fatal()));
     }

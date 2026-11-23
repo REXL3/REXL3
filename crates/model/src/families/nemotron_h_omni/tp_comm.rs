@@ -368,6 +368,20 @@ impl TpComm for NcclTp {
         }
     }
 
+    fn allgather_bytes(&self, buf: &mut DevBuf, off_bytes: usize, rank_bytes: usize, st: &Stream) -> Result<(), CudaError> {
+        self.comm.allgather_bytes(buf, off_bytes, rank_bytes, st)
+    }
+
+    fn reduce_scatter_sum_f32_in_place(
+        &self,
+        buf: &mut DevBuf,
+        off_bytes: usize,
+        recv_count: usize,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        self.comm.reduce_scatter_sum_f32_in_place(buf, off_bytes, recv_count, st)
+    }
+
     /// The one-shot exchange when staging is reserved for this message (whatever the mode), else the ring. The staging is a fixed
     /// fact of the group (the policy's limit), so the choice is the same on every rank.
     fn supports_swap(&self) -> bool {
@@ -723,6 +737,88 @@ impl LoopbackComm {
         Ok(())
     }
 
+    fn gather_bytes(&self, buf: &mut DevBuf, off_bytes: usize, rank_bytes: usize, st: &Stream) -> Result<(), CudaError> {
+        let (me, sh) = (self.rank, &*self.shared);
+        st.sync()?;
+        sh.barrier.wait(sh.timeout).map_err(peer_error)?;
+        {
+            let mut s = self.slots();
+            if s.cap < rank_bytes {
+                let cap = rank_bytes.max(s.cap.saturating_mul(2)).next_multiple_of(1 << 20);
+                for b in s.bufs.iter_mut() {
+                    *b = None;
+                }
+                for b in s.bufs.iter_mut() {
+                    *b = Some(DevBuf::alloc(cap)?);
+                }
+                s.cap = cap;
+            }
+            s.counts[me] = rank_bytes;
+            if rank_bytes > 0 {
+                let slot = s.bufs[me].as_mut().expect("slots are allocated");
+                slot.copy_range_from(0, buf, off_bytes + me * rank_bytes, rank_bytes, st)?;
+            }
+        }
+        st.sync()?;
+        sh.barrier.wait(sh.timeout).map_err(peer_error)?;
+        {
+            let s = self.slots();
+            if let Some(r) = (0..sh.ranks).find(|&r| s.counts[r] != rank_bytes) {
+                eprintln!("tp loopback: rank {me} gathers {rank_bytes} bytes, rank {r} publishes {}", s.counts[r]);
+                return Err(CudaError(nccl::ERR_BAD_ARGUMENT));
+            }
+            for r in 0..sh.ranks {
+                if r != me && rank_bytes > 0 {
+                    let src = s.bufs[r].as_ref().expect("slots are allocated");
+                    buf.copy_range_from(off_bytes + r * rank_bytes, src, 0, rank_bytes, st)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn scatter_sum(&self, buf: &mut DevBuf, off_bytes: usize, recv_count: usize, st: &Stream) -> Result<(), CudaError> {
+        let (me, sh) = (self.rank, &*self.shared);
+        let full_count = recv_count.checked_mul(sh.ranks).ok_or(CudaError(nccl::ERR_BAD_ARGUMENT))?;
+        let bytes = full_count.checked_mul(4).ok_or(CudaError(nccl::ERR_BAD_ARGUMENT))?;
+        st.sync()?;
+        sh.barrier.wait(sh.timeout).map_err(peer_error)?;
+        {
+            let mut s = self.slots();
+            if s.cap < bytes {
+                let cap = bytes.max(s.cap.saturating_mul(2)).next_multiple_of(1 << 20);
+                for b in s.bufs.iter_mut() {
+                    *b = None;
+                }
+                for b in s.bufs.iter_mut() {
+                    *b = Some(DevBuf::alloc(cap)?);
+                }
+                s.cap = cap;
+            }
+            s.counts[me] = recv_count;
+            if bytes > 0 {
+                let slot = s.bufs[me].as_mut().expect("slots are allocated");
+                slot.copy_range_from(0, buf, off_bytes, bytes, st)?;
+            }
+        }
+        st.sync()?;
+        sh.barrier.wait(sh.timeout).map_err(peer_error)?;
+        {
+            let s = self.slots();
+            if let Some(r) = (0..sh.ranks).find(|&r| s.counts[r] != recv_count) {
+                eprintln!("tp loopback: rank {me} scatters {recv_count} f32, rank {r} publishes {}", s.counts[r]);
+                return Err(CudaError(nccl::ERR_BAD_ARGUMENT));
+            }
+            let ops: Vec<nccl::SumOperand> = s
+                .bufs
+                .iter()
+                .map(|b| nccl::SumOperand::Buf(b.as_ref().expect("slots are allocated"), me * recv_count * 4))
+                .collect();
+            nccl::sum_slots_f32(buf, off_bytes + me * recv_count * 4, &ops, recv_count, st)?;
+        }
+        Ok(())
+    }
+
     fn collective(&self, buf: &mut DevBuf, off_bytes: usize, count: usize, st: &Stream, kernel: bool) -> Result<(), CudaError> {
         let end = count.checked_mul(4).and_then(|b| b.checked_add(off_bytes));
         if off_bytes % 4 != 0 || end.is_none_or(|e| e > buf.bytes()) {
@@ -753,6 +849,44 @@ impl TpComm for LoopbackComm {
         let ranks = self.shared.ranks;
         let kernel = ranks != 2 || self.shared.policy.use_oneshot(ranks, count.saturating_mul(4));
         self.collective(buf, off_bytes, count, st, kernel)
+    }
+
+    fn allgather_bytes(&self, buf: &mut DevBuf, off_bytes: usize, rank_bytes: usize, st: &Stream) -> Result<(), CudaError> {
+        let end = rank_bytes.checked_mul(self.shared.ranks).and_then(|b| b.checked_add(off_bytes));
+        if end.is_none_or(|e| e > buf.bytes()) {
+            self.shared.barrier.break_now();
+            return Err(CudaError(nccl::ERR_BAD_ARGUMENT));
+        }
+        if rank_bytes == 0 || self.shared.ranks == 1 {
+            return Ok(());
+        }
+        let r = self.gather_bytes(buf, off_bytes, rank_bytes, st);
+        if r.is_err() {
+            self.shared.barrier.break_now();
+        }
+        r
+    }
+
+    fn reduce_scatter_sum_f32_in_place(
+        &self,
+        buf: &mut DevBuf,
+        off_bytes: usize,
+        recv_count: usize,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        let end = recv_count.checked_mul(self.shared.ranks).and_then(|n| n.checked_mul(4)).and_then(|b| b.checked_add(off_bytes));
+        if off_bytes % 4 != 0 || end.is_none_or(|e| e > buf.bytes()) {
+            self.shared.barrier.break_now();
+            return Err(CudaError(nccl::ERR_BAD_ARGUMENT));
+        }
+        if recv_count == 0 || self.shared.ranks == 1 {
+            return Ok(());
+        }
+        let r = self.scatter_sum(buf, off_bytes, recv_count, st);
+        if r.is_err() {
+            self.shared.barrier.break_now();
+        }
+        r
     }
 
     /// The one-shot form (the rank-ordered sum kernel over every rank's slot).
@@ -1432,6 +1566,76 @@ mod tests {
                 let got: Vec<f32> = out.to_vec().unwrap();
                 assert!(bits_eq(&got, &whole), "ranks {ranks} count {count} order {p:?}: {:?}", first_diff(&got, &whole));
             }
+        }
+    }
+
+    #[test]
+    fn loopback_allgather_and_reduce_scatter_keep_their_rank_slices_exact() {
+        if !device_available() {
+            eprintln!("no CUDA device: skipping");
+            return;
+        }
+        let comms = LoopbackGroup::with_policy(4, Duration::from_secs(30), CollectivePolicy::RING);
+        let threads: Vec<_> = comms
+            .into_iter()
+            .map(|comm| {
+                std::thread::spawn(move || -> Result<(), String> {
+                    let rank = comm.topology().rank;
+                    let ranks = comm.topology().ranks;
+                    let st = Stream::new().map_err(|e| e.to_string())?;
+
+                    let (off, rank_bytes, tail) = (19usize, 257usize, 23usize);
+                    let mut host = vec![0xA5u8; off + ranks * rank_bytes + tail];
+                    for i in 0..rank_bytes {
+                        host[off + rank * rank_bytes + i] = (rank as u8).wrapping_mul(53).wrapping_add(i as u8);
+                    }
+                    let mut bytes = DevBuf::from_slice(&host).map_err(|e| e.to_string())?;
+                    comm.allgather_bytes(&mut bytes, off, rank_bytes, &st).map_err(|e| e.to_string())?;
+                    st.sync().map_err(|e| e.to_string())?;
+                    let mut got = vec![0u8; host.len()];
+                    bytes.download_range(0, &mut got).map_err(|e| e.to_string())?;
+                    for r in 0..ranks {
+                        for i in 0..rank_bytes {
+                            let want = (r as u8).wrapping_mul(53).wrapping_add(i as u8);
+                            if got[off + r * rank_bytes + i] != want {
+                                return Err(format!("allgather rank {rank} source {r} byte {i}"));
+                            }
+                        }
+                    }
+                    assert!(got[..off].iter().chain(&got[off + ranks * rank_bytes..]).all(|&b| b == 0xA5));
+
+                    let recv_count = 259usize;
+                    let full_count = ranks * recv_count;
+                    let off_elems = 3usize;
+                    let mut host = vec![f32::from_bits(0x7FC0_1234); off_elems + full_count + 7];
+                    for (i, v) in host[off_elems..off_elems + full_count].iter_mut().enumerate() {
+                        *v = (rank * 100_000 + i) as f32;
+                    }
+                    let before = host.clone();
+                    let mut vals = DevBuf::from_slice(&host).map_err(|e| e.to_string())?;
+                    comm.reduce_scatter_sum_f32_in_place(&mut vals, off_elems * 4, recv_count, &st).map_err(|e| e.to_string())?;
+                    st.sync().map_err(|e| e.to_string())?;
+                    let mut got = vec![0f32; host.len()];
+                    vals.download_range(0, &mut got).map_err(|e| e.to_string())?;
+                    for i in 0..recv_count {
+                        let global = rank * recv_count + i;
+                        let want = (0..ranks).map(|r| (r * 100_000 + global) as f32).sum::<f32>();
+                        assert_eq!(got[off_elems + global].to_bits(), want.to_bits(), "rank {rank} element {global}");
+                    }
+                    for (i, (&g, &b)) in got
+                        .iter()
+                        .zip(&before)
+                        .enumerate()
+                        .filter(|(i, _)| *i < off_elems + rank * recv_count || *i >= off_elems + (rank + 1) * recv_count)
+                    {
+                        assert_eq!(g.to_bits(), b.to_bits(), "rank {rank} wrote outside its output at {i}");
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for (rank, t) in threads.into_iter().enumerate() {
+            assert_eq!(t.join().unwrap_or_else(|_| panic!("rank {rank} panicked")), Ok(()), "rank {rank}");
         }
     }
 

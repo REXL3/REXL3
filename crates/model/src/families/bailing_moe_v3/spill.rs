@@ -24,12 +24,23 @@
 //! checksum covers exactly its bytes. `hdr_len` is the offset of the payload, at least `88 + 8 * nblocks`; an upper-bound
 //! begin can reserve a larger checksum vector, zero-padded when the exact finish writes fewer blocks.
 //!
+//! Direct I/O ([`SpillIo::Direct`], which [`SpillStore::open`] picks wherever the filesystem takes `O_DIRECT`; Linux only): the
+//! files bypass the page cache. A buffered snapshot write asks the kernel for page-cache folios of up to 2 MiB (orders 7 to 9 on
+//! ext4). On a GB10 serving at a few GiB of MemAvailable, the free memory beside the weights holds no free block that large,
+//! so each such write ran direct reclaim, and that reclaim wrote the server's own idle heap pages to swap (about 1 GiB in a
+//! gate run). A direct write allocates no page cache. The file format is unchanged: `hdr_len` is rounded up to
+//! [`DIRECT_ALIGN`] (the reader already accepts a zero-padded checksum vector), and the last block is written padded and the
+//! file then cut to its exact length, so every transfer is aligned. A direct store reads a buffered store's file (an
+//! unaligned `hdr_len`) through the page cache. Other hosts have no `O_DIRECT`: there [`direct_supported`] is false, so
+//! [`SpillStore::open`] stays buffered and [`SpillStore::open_io`] refuses [`SpillIo::Direct`].
+//!
 //! Quota eviction is oldest-mtime-first (the index's LRU order is the engine's; a store-level eviction only ever removes the
 //! oldest files when a new snapshot would exceed the quota, so the index's handles for removed files, if any, fail their read
 //! and fall back cold cleanly).
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// The magic of a spill snapshot file.
@@ -42,6 +53,98 @@ pub const SPILL_STAGING_BYTES: usize = 64 << 20;
 pub const DEFAULT_QUOTA_BYTES: u64 = 64 << 30;
 /// The suffix of a spill snapshot file.
 pub const EXT: &str = "ling";
+/// The alignment of every direct transfer: buffer address, file offset and length.
+pub const DIRECT_ALIGN: usize = 4096;
+
+/// How a store moves bytes to and from its files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpillIo {
+    /// Through the page cache.
+    Buffered,
+    /// `O_DIRECT`: no page cache (the module notes say why the server uses it).
+    Direct,
+}
+
+impl SpillIo {
+    pub fn name(self) -> &'static str {
+        match self {
+            SpillIo::Buffered => "buffered",
+            SpillIo::Direct => "direct",
+        }
+    }
+}
+
+fn align_up(n: usize) -> usize {
+    n.div_ceil(DIRECT_ALIGN) * DIRECT_ALIGN
+}
+
+/// A zeroed byte buffer whose first byte is [`DIRECT_ALIGN`]-aligned (a `Vec` over-allocated by one alignment, never grown).
+#[derive(Default)]
+struct Staging {
+    buf: Vec<u8>,
+    off: usize,
+    len: usize,
+}
+
+impl Staging {
+    fn new(len: usize) -> Self {
+        let buf = vec![0u8; len + DIRECT_ALIGN];
+        let off = buf.as_ptr().align_offset(DIRECT_ALIGN);
+        Staging { buf, off, len }
+    }
+}
+
+impl std::ops::Deref for Staging {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.buf[self.off..self.off + self.len]
+    }
+}
+
+impl std::ops::DerefMut for Staging {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[self.off..self.off + self.len]
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_flags(io: SpillIo) -> i32 {
+    match io {
+        SpillIo::Buffered => 0,
+        SpillIo::Direct => libc::O_DIRECT,
+    }
+}
+
+/// Off Linux no store is direct ([`direct_supported`] is false, so [`SpillStore::open_io`] refuses [`SpillIo::Direct`]).
+#[cfg(not(target_os = "linux"))]
+fn open_flags(io: SpillIo) -> i32 {
+    match io {
+        SpillIo::Buffered => 0,
+        SpillIo::Direct => unreachable!("direct spill I/O is Linux-only"),
+    }
+}
+
+/// Whether `dir`'s filesystem takes an aligned `O_DIRECT` write (tmpfs, for one, refuses the open). Linux only.
+#[cfg(target_os = "linux")]
+pub fn direct_supported(dir: &Path) -> bool {
+    let probe = dir.join(format!(".direct-probe-{}", std::process::id()));
+    let ok = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(&probe)
+        .and_then(|mut f| f.write_all(&Staging::new(DIRECT_ALIGN)))
+        .is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
+/// Off Linux there is no `O_DIRECT`: every store is buffered.
+#[cfg(not(target_os = "linux"))]
+pub fn direct_supported(_dir: &Path) -> bool {
+    false
+}
 
 /// The planned spill cache: where it lives and what it may use.
 #[derive(Clone, Debug)]
@@ -202,6 +305,9 @@ struct Writer {
 /// A reader's in-flight state.
 struct Reader {
     file: File,
+    /// Direct reads (`pread` at `next_off`); else buffered sequential reads.
+    direct: bool,
+    next_off: u64,
     pos: u64,
     remaining: u64,
     block: usize,
@@ -210,13 +316,14 @@ struct Reader {
     filled: usize,
     consumed: usize,
     hash: u64,
-    staging: Vec<u8>,
+    staging: Staging,
 }
 
 /// The spill store: one directory of snapshot files, one staging buffer, a used-byte counter.
 pub struct SpillStore {
     cfg: SpillConfig,
-    staging: Vec<u8>,
+    io: SpillIo,
+    staging: Staging,
     used: u64,
     writer: Option<Writer>,
     reader: Option<Reader>,
@@ -225,18 +332,47 @@ pub struct SpillStore {
 }
 
 impl SpillStore {
-    /// Open the store: create the directory and purge every snapshot file in it (a boot). A fresh store is empty.
+    /// Open the store: create the directory and purge every snapshot file in it (a boot). A fresh store is empty. Its files use
+    /// direct I/O when the staging size is aligned and the directory's filesystem takes `O_DIRECT`, else the page cache.
     pub fn open(cfg: SpillConfig) -> Result<Self, SpillError> {
         fs::create_dir_all(&cfg.dir)?;
-        let staging = vec![0u8; cfg.staging_bytes.max(1)];
-        let mut store = SpillStore { cfg, staging, used: 0, writer: None, reader: None, last_path: PathBuf::new() };
+        let io = if cfg.staging_bytes > 0 && cfg.staging_bytes % DIRECT_ALIGN == 0 && direct_supported(&cfg.dir) {
+            SpillIo::Direct
+        } else {
+            SpillIo::Buffered
+        };
+        Self::open_io(cfg, io)
+    }
+
+    /// [`Self::open`] with the I/O mode named. [`SpillIo::Direct`] needs a [`DIRECT_ALIGN`]-multiple staging size and a
+    /// filesystem that takes `O_DIRECT`, else the open fails.
+    pub fn open_io(cfg: SpillConfig, io: SpillIo) -> Result<Self, SpillError> {
+        fs::create_dir_all(&cfg.dir)?;
+        if io == SpillIo::Direct {
+            if cfg.staging_bytes == 0 || cfg.staging_bytes % DIRECT_ALIGN != 0 {
+                return Err(SpillError::Corrupt(format!(
+                    "direct I/O needs a staging size that is a multiple of {DIRECT_ALIGN}, not {}",
+                    cfg.staging_bytes
+                )));
+            }
+            if !direct_supported(&cfg.dir) {
+                return Err(SpillError::Io(io::Error::new(io::ErrorKind::Unsupported, "the spill directory refuses O_DIRECT")));
+            }
+        }
+        let staging = Staging::new(cfg.staging_bytes.max(1));
+        let mut store = SpillStore { cfg, io, staging, used: 0, writer: None, reader: None, last_path: PathBuf::new() };
         store.purge()?;
         Ok(store)
     }
 
-    /// Open a store in `dir` with `quota_bytes` and `staging_bytes` (tests).
+    /// Open a buffered store in `dir` with `quota_bytes` and `staging_bytes` (tests).
     pub fn open_at(dir: PathBuf, quota_bytes: u64, staging_bytes: usize) -> Result<Self, SpillError> {
-        Self::open(SpillConfig { dir, quota_bytes, staging_bytes })
+        Self::open_io(SpillConfig { dir, quota_bytes, staging_bytes }, SpillIo::Buffered)
+    }
+
+    /// The I/O mode of this store's files.
+    pub fn io(&self) -> SpillIo {
+        self.io
     }
 
     pub fn config(&self) -> &SpillConfig {
@@ -313,10 +449,12 @@ impl SpillStore {
         if !self.evict_for(payload_len) {
             return Err(SpillError::Space);
         }
-        let header_len = 88 + (payload_len.div_ceil(self.cfg.staging_bytes as u64) as usize) * 8;
+        let need = 88 + (payload_len.div_ceil(self.cfg.staging_bytes as u64) as usize) * 8;
+        let header_len = if self.io == SpillIo::Direct { align_up(need) } else { need };
         let path = self.path_of(id);
-        let mut file = File::create(&path)?;
-        let mut hdr = vec![0u8; header_len];
+        let mut file =
+            OpenOptions::new().write(true).create(true).truncate(true).custom_flags(open_flags(self.io)).open(&path)?;
+        let mut hdr = Staging::new(header_len);
         hdr[..8].copy_from_slice(&MAGIC);
         hdr[8..12].copy_from_slice(&VERSION.to_le_bytes());
         hdr[12..16].copy_from_slice(&(header_len as u32).to_le_bytes());
@@ -381,20 +519,27 @@ impl SpillStore {
             w.buf_used += take;
             pos += take;
             if w.buf_used == cap {
-                Self::flush_block(&mut self.staging, w)?;
+                Self::flush_block(&mut self.staging, w, self.io)?;
             }
         }
         Ok(())
     }
 
-    fn flush_block(staging: &mut Vec<u8>, w: &mut Writer) -> Result<(), SpillError> {
+    fn flush_block(staging: &mut Staging, w: &mut Writer, io: SpillIo) -> Result<(), SpillError> {
         let cap = staging.len();
         let n = w.buf_used.min(cap);
         if n == 0 {
             return Ok(());
         }
         w.cksums.push(fnv1a64(&staging[..n]));
-        w.file.write_all(&staging[..n])?;
+        if io == SpillIo::Direct {
+            // only the last block is partial: written padded to the alignment, the file is cut to its length at the finish
+            let padded = align_up(n);
+            staging[n..padded].fill(0);
+            w.file.write_all(&staging[..padded])?;
+        } else {
+            w.file.write_all(&staging[..n])?;
+        }
         w.buf_used = 0;
         w.block += 1;
         Ok(())
@@ -414,11 +559,11 @@ impl SpillStore {
 
     fn finish_write_inner(&mut self, w: &mut Writer) -> Result<(), SpillError> {
         let actual = w.block as u64 * self.cfg.staging_bytes as u64 + w.buf_used as u64;
-        Self::flush_block(&mut self.staging, w)?;
+        Self::flush_block(&mut self.staging, w, self.io)?;
         w.total = actual;
         let nblocks = w.cksums.len();
         let header_len = w.header_len;
-        let mut hdr = vec![0u8; header_len];
+        let mut hdr = Staging::new(header_len);
         hdr[..8].copy_from_slice(&MAGIC);
         hdr[8..12].copy_from_slice(&VERSION.to_le_bytes());
         hdr[12..16].copy_from_slice(&(header_len as u32).to_le_bytes());
@@ -436,6 +581,9 @@ impl SpillStore {
         }
         w.file.seek(SeekFrom::Start(0))?;
         w.file.write_all(&hdr)?;
+        if self.io == SpillIo::Direct {
+            w.file.set_len(header_len as u64 + actual)?;
+        }
         w.file.sync_all()?;
         self.used = self.used.saturating_add(w.total + header_len as u64);
         Ok(())
@@ -446,9 +594,24 @@ impl SpillStore {
         if self.reader.is_some() {
             return Err(SpillError::Corrupt("a read is already in flight".into()));
         }
-        let mut file = File::open(path)?;
+        let mut direct = self.io == SpillIo::Direct;
+        let mut file = if direct {
+            OpenOptions::new().read(true).custom_flags(open_flags(SpillIo::Direct)).open(path)?
+        } else {
+            File::open(path)?
+        };
         let mut fixed = [0u8; 88];
-        file.read_exact(&mut fixed)?;
+        let mut head = None;
+        if direct {
+            let mut b = Staging::new(DIRECT_ALIGN);
+            if read_full_at(&file, &mut b, 0)? < fixed.len() {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            fixed.copy_from_slice(&b[..88]);
+            head = Some(b);
+        } else {
+            file.read_exact(&mut fixed)?;
+        }
         if fixed[..8] != MAGIC {
             return Err(SpillError::Corrupt("bad magic".into()));
         }
@@ -478,14 +641,37 @@ impl SpillStore {
             return Err(SpillError::Corrupt(format!("header len {header_len} is before or misaligned with {need}")));
         }
         let mut cksums = vec![0u64; nblocks];
-        let mut raw = vec![0u8; nblocks * 8];
-        file.read_exact(&mut raw)?;
+        let raw = if direct && header_len % DIRECT_ALIGN == 0 {
+            let b = match head {
+                Some(b) if header_len <= b.len() => b,
+                _ => {
+                    let mut b = Staging::new(header_len);
+                    if read_full_at(&file, &mut b, 0)? < need {
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                    }
+                    b
+                }
+            };
+            b[88..need].to_vec()
+        } else {
+            if direct {
+                // a buffered store's file (its payload is not aligned): read it through the page cache
+                file = File::open(path)?;
+                direct = false;
+            }
+            file.seek(SeekFrom::Start(88))?;
+            let mut raw = vec![0u8; nblocks * 8];
+            file.read_exact(&mut raw)?;
+            file.seek(SeekFrom::Start(header_len as u64))?;
+            raw
+        };
         for (i, c) in cksums.iter_mut().enumerate() {
             *c = u64::from_le_bytes(raw[i * 8..(i + 1) * 8].try_into().unwrap());
         }
-        file.seek(SeekFrom::Start(header_len as u64))?;
         self.reader = Some(Reader {
             file,
+            direct,
+            next_off: header_len as u64,
             pos: 0,
             remaining: payload_len,
             block: 0,
@@ -527,7 +713,16 @@ impl SpillStore {
                 let cap = r.staging.len();
                 let take = (r.remaining as usize).min(cap);
                 r.staging[..take].fill(0);
-                r.file.read_exact(&mut r.staging[..take])?;
+                if r.direct {
+                    // every block but the last is the aligned staging size; the last is read padded and stops at the end of file
+                    let padded = align_up(take).min(cap);
+                    if read_full_at(&r.file, &mut r.staging[..padded], r.next_off)? < take {
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                    }
+                    r.next_off += take as u64;
+                } else {
+                    r.file.read_exact(&mut r.staging[..take])?;
+                }
                 r.filled = take;
                 r.consumed = 0;
             }
@@ -571,6 +766,25 @@ impl SpillStore {
         }
         Ok(())
     }
+}
+
+/// Read into `buf` (a direct file: aligned buffer, offset and length) from `off` until it is full or the file ends; the bytes
+/// read. A read that ends off the alignment reached the end of the file (the next read would be an unaligned direct read).
+fn read_full_at(file: &File, buf: &mut [u8], off: u64) -> io::Result<usize> {
+    let mut got = 0;
+    while got < buf.len() {
+        match file.read_at(&mut buf[got..], off + got as u64) {
+            Ok(0) => break,
+            Ok(n) if n % DIRECT_ALIGN != 0 => {
+                got += n;
+                break;
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(got)
 }
 
 #[cfg(test)]
@@ -835,6 +1049,195 @@ mod tests {
             fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(remaining.len(), 1, "only the newest survives: {remaining:?}");
         assert!(remaining[0].starts_with("000000000000000c"), "the newest id is 12: {remaining:?}");
+        remove_dir(&dir);
+    }
+
+    /// A directory on the build's own filesystem (the workspace target dir): `temp_dir()` can be tmpfs, which refuses `O_DIRECT`.
+    #[cfg(target_os = "linux")]
+    fn disk_dir(name: &str) -> PathBuf {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        base.join(format!("ling-spill-direct-{name}-{}", std::process::id()))
+    }
+
+    /// Pages of `path` resident in the page cache (`mincore` over a read-only mapping that is never touched).
+    #[cfg(target_os = "linux")]
+    fn cached_pages(path: &Path) -> usize {
+        use std::os::fd::AsRawFd;
+        let f = File::open(path).unwrap();
+        let len = f.metadata().unwrap().len() as usize;
+        let pages = len.div_ceil(4096);
+        let mut vec = vec![0u8; pages];
+        // SAFETY: a fresh read-only shared mapping of `len` bytes of an open file, queried with `mincore` into a vector of one
+        // byte per page and unmapped; nothing dereferences it.
+        unsafe {
+            let addr = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, f.as_raw_fd(), 0);
+            assert_ne!(addr, libc::MAP_FAILED);
+            assert_eq!(libc::mincore(addr, len, vec.as_mut_ptr() as _), 0);
+            libc::munmap(addr, len);
+        }
+        vec.iter().filter(|&&b| b & 1 == 1).count()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn direct_store(name: &str, staging: usize) -> (PathBuf, SpillStore) {
+        let dir = disk_dir(name);
+        remove_dir(&dir);
+        let st =
+            SpillStore::open_io(SpillConfig { dir: dir.clone(), quota_bytes: 1 << 30, staging_bytes: staging }, SpillIo::Direct)
+                .expect("the build filesystem takes O_DIRECT");
+        assert_eq!(st.io(), SpillIo::Direct);
+        (dir, st)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_served_store_picks_direct_io_on_a_disk_and_buffered_on_an_unaligned_staging() {
+        let dir = disk_dir("pick");
+        remove_dir(&dir);
+        let st =
+            SpillStore::open(SpillConfig { dir: dir.clone(), quota_bytes: 1 << 30, staging_bytes: SPILL_STAGING_BYTES }).unwrap();
+        assert_eq!(st.io(), SpillIo::Direct, "the served staging size on a disk filesystem is direct");
+        assert_eq!(st.staging.as_ptr() as usize % DIRECT_ALIGN, 0, "the staging buffer is aligned");
+        drop(st);
+        let st = SpillStore::open(SpillConfig { dir: dir.clone(), quota_bytes: 1 << 30, staging_bytes: 256 }).unwrap();
+        assert_eq!(st.io(), SpillIo::Buffered, "an unaligned staging size stays buffered");
+        assert!(matches!(
+            SpillStore::open_io(SpillConfig { dir: dir.clone(), quota_bytes: 1 << 30, staging_bytes: 256 }, SpillIo::Direct),
+            Err(SpillError::Corrupt(_))
+        ));
+        remove_dir(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_direct_snapshot_roundtrips_bit_exact_with_aligned_transfers() {
+        // a 4 KiB staging: the payload spans two blocks, the second partial
+        let (dir, mut st) = direct_store("roundtrip", 4096);
+        let p = payload();
+        assert!(p.len() > 4096 && p.len() < 8192);
+        st.start_write(1, M, p.len() as u64).unwrap();
+        st.push_bytes(&p[..1000]).unwrap();
+        st.push_bytes(&p[1000..]).unwrap();
+        st.finish_write().unwrap();
+        let path = st.last_path().to_path_buf();
+        let raw = fs::read(&path).unwrap();
+        let header_len = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
+        assert_eq!(header_len, DIRECT_ALIGN, "the header is padded to the alignment");
+        assert_eq!(raw.len(), header_len + p.len(), "the padded tail block was cut off");
+        assert_eq!(&raw[header_len..], &p[..], "the payload sits after the padded header");
+        assert_eq!(st.used_bytes(), (header_len + p.len()) as u64);
+        // a second snapshot, never read through `fs::read`, for the page-cache checks
+        st.start_write(6, M, p.len() as u64).unwrap();
+        st.push_bytes(&p).unwrap();
+        st.finish_write().unwrap();
+        let unread = st.last_path().to_path_buf();
+        assert_eq!(cached_pages(&unread), 0, "a direct write leaves nothing in the page cache");
+
+        st.begin_read(&unread, M).unwrap();
+        let mut got = vec![0u8; p.len()];
+        st.read_exact_into(&mut got[..10]).unwrap();
+        st.read_exact_into(&mut got[10..]).unwrap();
+        st.finish_read().unwrap();
+        assert_eq!(got, p, "the payload is bit-exact");
+        assert_eq!(cached_pages(&unread), 0, "a direct read leaves nothing in the page cache");
+        remove_dir(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_direct_store_detects_corruption_and_a_truncated_payload_and_stays_reusable() {
+        let (dir, mut st) = direct_store("corrupt", 4096);
+        let p = payload();
+        st.start_write(2, M, p.len() as u64).unwrap();
+        st.push_bytes(&p).unwrap();
+        st.finish_write().unwrap();
+        let path = st.last_path().to_path_buf();
+        let good = fs::read(&path).unwrap();
+        let mut bad = good.clone();
+        bad[DIRECT_ALIGN + p.len() / 2] ^= 0xff;
+        fs::write(&path, &bad).unwrap();
+        let e = st.begin_read(&path, M).and_then(|_| st.read_exact_into(&mut vec![0u8; p.len()]));
+        assert!(matches!(e, Err(SpillError::Corrupt(_))), "corruption detected: {e:?}");
+        assert_eq!(st.staging.len(), 4096, "the failed reader returned the staging buffer");
+
+        fs::write(&path, &good[..good.len() - 1]).unwrap();
+        st.begin_read(&path, M).unwrap();
+        assert!(matches!(st.read_exact_into(&mut vec![0u8; p.len()]), Err(SpillError::Io(_))), "a truncated payload fails");
+
+        st.start_write(3, M, p.len() as u64).unwrap();
+        st.push_bytes(&p).unwrap();
+        st.finish_write().unwrap();
+        let again = st.last_path().to_path_buf();
+        st.begin_read(&again, M).unwrap();
+        let mut got = vec![0u8; p.len()];
+        st.read_exact_into(&mut got).unwrap();
+        st.finish_read().unwrap();
+        assert_eq!(got, p);
+        remove_dir(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_direct_store_reads_a_buffered_file_and_a_multi_block_payload() {
+        let (dir, mut st) = direct_store("mixed", 4096);
+        // a buffered store's file (unaligned header) in the same directory
+        let other = disk_dir("mixed-buffered");
+        remove_dir(&other);
+        let mut b = SpillStore::open_at(other.clone(), 1 << 30, 4096).unwrap();
+        let p = payload();
+        b.start_write(4, M, p.len() as u64).unwrap();
+        b.push_bytes(&p).unwrap();
+        b.finish_write().unwrap();
+        assert!(cached_pages(b.last_path()) > 0, "a buffered write stays in the page cache (the probe sees it)");
+        st.begin_read(b.last_path(), M).unwrap();
+        let mut got = vec![0u8; p.len()];
+        st.read_exact_into(&mut got).unwrap();
+        st.finish_read().unwrap();
+        assert_eq!(got, p, "a buffered file reads back through a direct store");
+
+        // exactly three full blocks: no partial tail, nothing to pad or cut
+        let big: Vec<u8> = (0..3 * 4096u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        st.start_write(5, M, big.len() as u64).unwrap();
+        st.push_bytes(&big).unwrap();
+        st.finish_write().unwrap();
+        let path = st.last_path().to_path_buf();
+        assert_eq!(fs::metadata(&path).unwrap().len() as usize, DIRECT_ALIGN + big.len());
+        st.begin_read(&path, M).unwrap();
+        let mut got = vec![0u8; big.len()];
+        st.read_exact_into(&mut got).unwrap();
+        st.finish_read().unwrap();
+        assert_eq!(got, big);
+        remove_dir(&dir);
+        remove_dir(&other);
+    }
+
+    /// Off Linux the served store falls back to the page cache: no `O_DIRECT` probe, a buffered pick at the served staging size,
+    /// a refused direct open, and a bit-exact buffered roundtrip.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn off_linux_the_served_store_is_buffered_and_refuses_direct_io() {
+        let dir = test_dir("off-linux");
+        remove_dir(&dir);
+        assert!(!direct_supported(&dir));
+        let cfg = SpillConfig { dir: dir.clone(), quota_bytes: 1 << 30, staging_bytes: SPILL_STAGING_BYTES };
+        assert!(matches!(
+            SpillStore::open_io(cfg.clone(), SpillIo::Direct),
+            Err(SpillError::Io(e)) if e.kind() == io::ErrorKind::Unsupported
+        ));
+        let mut st = SpillStore::open(cfg).unwrap();
+        assert_eq!(st.io(), SpillIo::Buffered, "the served staging size is buffered off Linux");
+        let p = payload();
+        st.start_write(1, M, p.len() as u64).unwrap();
+        st.push_bytes(&p).unwrap();
+        st.finish_write().unwrap();
+        let path = st.last_path().to_path_buf();
+        st.begin_read(&path, M).unwrap();
+        let mut got = vec![0u8; p.len()];
+        st.read_exact_into(&mut got).unwrap();
+        st.finish_read().unwrap();
+        assert_eq!(got, p, "the buffered payload is bit-exact");
         remove_dir(&dir);
     }
 }

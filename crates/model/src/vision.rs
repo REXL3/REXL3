@@ -91,6 +91,8 @@ fn lin<'p>(
     if (g.k, g.n) != (k, n) {
         return Err(ModelError::Config(format!("vision {name}: expected K={k} N={n}, found K={} N={}", g.k, g.n)));
     }
+    // the tower's linears run the whole-width prefill path only
+    crate::weights::refuse_half_width(&format!("vision {name}"), g, "the Qwen dense vision tower")?;
     let w = ctx.group(pack, name)?;
     *bytes += w.weight_bytes();
     Ok(w)
@@ -356,5 +358,39 @@ impl VisionTower {
         merger_fc2.forward_prefill_io(mlp, mout, tokens, Dtype::F16, Dtype::F32, pws, st)?;
         vis::f32_to_bf16(mout, out, tokens * OUT_HIDDEN, st)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gb_exl3::checkpoint::{Checkpoint, Group};
+
+    /// A tower linear stored at a half-integer width (odd k2) is refused when the tower is loaded, by its name and width, before anything
+    /// is read or allocated: the tower's EXL3 linears run the whole-width prefill path only.
+    #[test]
+    fn a_half_width_tower_linear_is_refused_at_load_by_name_and_width() {
+        let name = "model.visual.blocks.0.attn.q_proj";
+        let mut ck = Checkpoint::default();
+        let g = Group {
+            prefix: name.into(),
+            bits: gb_exl3::Bits::from_twice(5).unwrap(),
+            codebook: gb_exl3::Codebook::Mul1,
+            k: HIDDEN,
+            n: HIDDEN,
+            in_scales: "suh",
+            out_scales: "svh",
+            bias: false,
+            files: vec!["model.safetensors".into()],
+            bytes: 0,
+        };
+        ck.groups.insert(name.into(), g);
+        let pack = Pack { ck };
+        let mut ctx = LoadCtx::new(crate::loadctx::LoadMode::Serial);
+        let mut bytes = 0usize;
+        let msg = lin(&mut ctx, &pack, name, HIDDEN, HIDDEN, &mut bytes).err().expect("k2 = 5 must be refused").to_string();
+        assert!(msg.contains(&format!("vision {name}: an EXL3 tensor at 2.5 bits per weight")), "{msg}");
+        assert!(msg.contains("k2 = 5") && msg.contains("the Qwen dense vision tower") && msg.contains("(2 or 3 bits)"), "{msg}");
+        assert_eq!(bytes, 0);
     }
 }

@@ -1,6 +1,6 @@
 # Third-party notices
 
-REXL3 is licensed under the Apache License 2.0 (see `LICENSE` and `NOTICE`). This repository also ports or
+REXL3 is licensed under the GNU Affero General Public License, version 3 (AGPL-3.0-only; see `LICENSE` and `NOTICE`). This repository also ports or
 transcribes code from the projects below, each under the MIT License, except PyTorch, whose code that
 `crates/vision/src/torch_resample.rs` and `crates/vision/src/nemotron_video.rs` re-express is under the BSD 3-Clause License (see "Image
 preprocessing"). Each license
@@ -364,7 +364,7 @@ The binaries link crates from crates.io, each under its own licence (the licence
 ## Not code sources
 
 Atlas (AGPL-3.0) and TabbyAPI (AGPL-3.0) are used only as design references and numeric comparisons. No code
-from either is included, and none may be copied here while this repository is under the Apache License.
+from either is included, and none may be copied here: the porting rule in `docs/UPSTREAMS.md` keeps AGPL sources as ideas only.
 
 ## Model weights
 
@@ -372,7 +372,5 @@ Not included. Their licenses are separate from this repository's:
 
 - `r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw` and the Qwen3.8 quantized drafts: Apache-2.0 per their model cards.
 - `r0b0tlab/GLM-5.3-Flash-EXL3-2.25bpw-sm121`: MIT per its model card.
-- `incoai/GLM-5.3-Flash-DFlash2` and its EXL3 derivative: CC BY-NC-ND 4.0, research and evaluation only.
-  Do not ship it with a commercial deployment.
 - MiMo-V2.6-Flash-RL EXL3: MIT per its model card, marked work in progress.
 - Blackfrost MiMo derisk overlay (`exllamav3/blackfrost_derisk.py` and `derisk/` of `vcruz305/MiMo-V2.6-Flash-MOPD-DERISKED-EXL3-2.20bpw`): MIT. The intervention semantics (orthonormalize-once, the rank-one down-projection operator, the load-time switch) are ported from it; see `docs/INTERVENTIONS.md`.

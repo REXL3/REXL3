@@ -24,7 +24,7 @@ use super::backend::window_is_text;
 use super::tp::{chunk_of, GlmCall, GlmRank};
 use super::vision::{self, GlmVisionTower, TowerOptions, OUT_HIDDEN};
 use super::vision_serve::{FeatureBudget, GlmEncoder, GlmImageFeatures, SpliceOp};
-use super::GlmPack;
+use super::{lend, GlmPack};
 use crate::error::ModelError;
 use crate::forward::Candidates;
 use crate::lockstep::{
@@ -420,20 +420,69 @@ pub fn planned_vision(
 ) -> Result<(u64, u64), ModelError> {
     let (Some(v), Some(vc), true) = (vision, pack.config.vision.as_ref(), holds_tower(o, pack)) else { return Ok((0, 0)) };
     let tokens = vision::image_token_cap(&pack.config, o.max_image_tokens);
-    let tower = vision::weight_region_bytes(vc) + vision::scratch_bytes(tokens * vision::PATCHES_PER_TOKEN, vc.tower);
+    // the part of the scratch lent from the prefill scratch (`REXL3_GLM_TOWER_LEND`) is the model's bytes, planned with the model
+    let lent = planned_lend(o, pack)?.lent_bytes();
+    let tower = vision::weight_region_bytes(vc) + vision::scratch_bytes(tokens * vision::PATCHES_PER_TOKEN, vc.tower) - lent;
     let reserve = profile.vision_reserve_bytes(0, v.concurrent_images(o.slots)).map_err(|e| ModelError::Config(e.to_string()))?;
     Ok((tower, reserve))
 }
 
+/// Where rank 0's tower places the lent part of its scratch (`lend.rs`) at `o`'s `--max-image-tokens` and `--prefill-chunk`: empty
+/// unless `REXL3_GLM_TOWER_LEND` is on and this rank [`holds_tower`]. The plan ([`planned_vision`]) and the boot
+/// ([`load_leader_tower`]) both take it from here. Refused by name where nothing could be lent (no prefill scratch at the chunk).
+pub fn planned_lend(o: &ServeOptions, pack: &GlmPack) -> Result<lend::Placement, ModelError> {
+    if !lend::tower_lend()? || !holds_tower(o, pack) {
+        return Ok(lend::Placement::default());
+    }
+    let vc = pack.config.vision.as_ref().ok_or_else(|| ModelError::Config("the pack has no vision tower".into()))?;
+    let tokens = vision::image_token_cap(&pack.config, o.max_image_tokens);
+    let chunk = super::alloc::prefill_chunk_for(o.prefill_chunk);
+    let regions = lend::lendable_regions(&pack.config, chunk)?;
+    let p = lend::place(&vision::scratch_items(tokens * vision::PATCHES_PER_TOKEN, vc.tower), &regions);
+    if p.lent.is_empty() {
+        return Err(ModelError::Config(format!(
+            "{}=1: a {chunk}-row prefill chunk has no prefill scratch the tower's scratch fits in (use a chunk above {} rows, or unset it)",
+            lend::TOWER_LEND_ENV,
+            super::alloc::MAX_ROWS
+        )));
+    }
+    Ok(p)
+}
+
 /// Loads rank 0's tower (when [`holds_tower`]) from `pack` (the rank's map: the vision region is mapped whatever the expert share),
-/// refused by name when MemAvailable would fall under the floor, and its allocations checked against the memory model.
-pub fn load_leader_tower(o: &ServeOptions, pack: &GlmPack) -> Result<Option<GlmVisionTower>, ModelError> {
+/// refused by name when MemAvailable would fall under the floor, and its allocations checked against the memory model. With
+/// `REXL3_GLM_TOWER_LEND` on, `lease` is rank 0's model's lent prefill scratch (`GlmModel::lend_prefill_scratch`), and the tower's
+/// placement in it must be the plan's ([`planned_lend`]).
+pub fn load_leader_tower(
+    o: &ServeOptions,
+    pack: &GlmPack,
+    lease: Option<Arc<lend::ScratchLease>>,
+) -> Result<Option<GlmVisionTower>, ModelError> {
     if !holds_tower(o, pack) {
         return Ok(None);
     }
     let vc = pack.config.vision.as_ref().ok_or_else(|| ModelError::Config("the pack has no vision tower".into()))?;
     let tokens = vision::image_token_cap(&pack.config, o.max_image_tokens);
-    let need = vision::weight_region_bytes(vc) + vision::scratch_bytes(tokens * vision::PATCHES_PER_TOKEN, vc.tower);
+    let planned = planned_lend(o, pack)?;
+    let lease = match (planned.lent.is_empty(), lease) {
+        (true, None) => None,
+        (false, Some(l)) => {
+            let chunk = super::alloc::prefill_chunk_for(o.prefill_chunk);
+            if l.region_bytes() != lend::lendable_regions(&pack.config, chunk)? {
+                return Err(ModelError::Config("the lent prefill scratch is not the size the plan lent".into()));
+            }
+            Some(l)
+        }
+        (true, Some(_)) => return Err(ModelError::Config("a lent prefill scratch the plan did not lend".into())),
+        (false, None) => {
+            return Err(ModelError::Config(format!(
+                "{}=1: rank 0's model has no prefill scratch to lend its tower",
+                lend::TOWER_LEND_ENV
+            )))
+        }
+    };
+    let need = vision::weight_region_bytes(vc) + vision::scratch_bytes(tokens * vision::PATCHES_PER_TOKEN, vc.tower)
+        - planned.lent_bytes();
     if let Some(avail) = mem_available() {
         if avail < need.saturating_add(o.floor_bytes) {
             return Err(ModelError::Config(format!(
@@ -445,16 +494,19 @@ pub fn load_leader_tower(o: &ServeOptions, pack: &GlmPack) -> Result<Option<GlmV
             )));
         }
     }
-    let t = GlmVisionTower::load(pack, &o.model_dir, &TowerOptions::new(tokens * vision::PATCHES_PER_TOKEN, o.floor_bytes))?;
+    let opts = TowerOptions { lend: lease, ..TowerOptions::new(tokens * vision::PATCHES_PER_TOKEN, o.floor_bytes) };
+    let t = GlmVisionTower::load(pack, &o.model_dir, &opts)?;
     if t.scratch_allocations() != vision::scratch_items(t.max_patches, t.format)
         || t.weight_bytes() != vision::weight_region_bytes(vc)
+        || t.placement() != &planned
     {
         return Err(ModelError::Config("the vision memory model and the tower's allocations disagree".into()));
     }
     eprintln!(
-        "rexl3 event=glm_vision_loaded tokens={tokens} weights_gib={:.3} scratch_gib={:.3} load_s={:.2} tp_rank=0",
+        "rexl3 event=glm_vision_loaded tokens={tokens} weights_gib={:.3} scratch_gib={:.3} lent_gib={:.3} load_s={:.2} tp_rank=0",
         gib(t.weight_bytes()),
         gib(t.scratch_bytes()),
+        gib(t.lent_scratch_bytes()),
         t.boot.load_s
     );
     Ok(Some(t))

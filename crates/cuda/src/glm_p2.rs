@@ -136,10 +136,12 @@ fn codebook_code(cb: Codebook) -> i32 {
     }
 }
 
-/// Whether the P2 GEMM takes this layer (K and N multiples of 128, Mul1 at 2 to 8 bits: every GLM pack's dense linears).
+/// Whether the P2 GEMM takes this layer (K and N multiples of 128, Mul1 at 2 to 8 whole bits: every GLM pack's dense linears). A
+/// half-integer width (odd `k2`) is never taken: the kernel reads `w.bits` (`k2 / 2`, truncated) bits a weight, so it would decode the
+/// trellis at the next whole width down ([`ling_supported`] is the variant that takes odd `k2`).
 pub fn supported(w: &Exl3Weights) -> bool {
     // SAFETY: a pure function of its integer arguments
-    unsafe { ffi::gb_glm_p2_supported(w.k as i32, w.n as i32, w.bits as i32, codebook_code(w.codebook)) == 1 }
+    w.k2 % 2 == 0 && unsafe { ffi::gb_glm_p2_supported(w.k as i32, w.n as i32, w.bits as i32, codebook_code(w.codebook)) == 1 }
 }
 
 /// The tile the GEMM picks for `m` rows of a `k` x `n` layer under `v` (`BM * 10 + SN`), for the tables.

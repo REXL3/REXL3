@@ -1428,3 +1428,45 @@ fn assert_consumed_eq(mask: &[bool], a: &[u16], b: &[u16], k: usize, msg: &str) 
     }
     assert_eq!(shown, 0, "{msg}: {shown} consumed elements differ");
 }
+
+/// The stacked scales of [`MoeExperts::from_exl3`] (copied device to device) are, byte for byte, every expert's own scale vector
+/// read back and concatenated in expert order: what the stack held when it was built through the host. The weights are built
+/// right before, so the stack also reads uploads that have only just been issued.
+#[test]
+fn from_exl3_stacks_each_experts_own_scale_bytes_in_order() {
+    gpu!();
+    let dims = qwen_dims();
+    let mk = |k, n, tag: u64| -> Vec<Exl3Weights> {
+        (0..dims.experts)
+            .map(|x| Exl3Weights::from_loaded(&synth_group(k, n, 2, Codebook::Mul1, 9100 + tag * 1000 + x as u64)).unwrap())
+            .collect()
+    };
+    let (wg, wu, wd) = (mk(dims.hidden, dims.inter, 1), mk(dims.hidden, dims.inter, 2), mk(dims.inter, dims.hidden, 3));
+    let m = MoeExperts::from_exl3(&refs_all(&wg), &refs_all(&wu), &refs_all(&wd), dims).unwrap();
+    let host = |ws: &[Exl3Weights], suh: bool| -> Vec<u16> {
+        // `buffers()` names an EXL3 linear's parts in a fixed order: trellis, suh, svh
+        let part = if suh { "suh" } else { "svh" };
+        ws.iter()
+            .flat_map(|w| {
+                w.buffers()
+                    .into_iter()
+                    .find(|(n, _)| *n == part)
+                    .expect("an EXL3 linear has its scales")
+                    .1
+                    .to_vec::<u16>()
+                    .unwrap()
+            })
+            .collect()
+    };
+    for (name, stack, want) in [
+        ("suh_g", &m.suh_g, host(&wg, true)),
+        ("suh_u", &m.suh_u, host(&wu, true)),
+        ("svh_g", &m.svh_g, host(&wg, false)),
+        ("svh_u", &m.svh_u, host(&wu, false)),
+        ("suh_d", &m.suh_d, host(&wd, true)),
+        ("svh_d", &m.svh_d, host(&wd, false)),
+    ] {
+        assert_eq!(stack.bytes(), want.len() * 2, "{name}: stack size");
+        assert_eq!(stack.to_vec::<u16>().unwrap(), want, "{name}: stacked bytes");
+    }
+}

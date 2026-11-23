@@ -12,6 +12,7 @@
 // `rank` too. Nothing reads past the end of a tensor: a caller that wants spare columns must size its buffers for them.
 #include "common.cuh"
 #include <cublas_v2.h>
+#include <cublasLt.h>
 
 namespace hcg {
 
@@ -50,6 +51,54 @@ __global__ void __launch_bounds__(256) norm_kernel(const float* __restrict__ x, 
         const half* w = nw + (size_t)s * H;
         for (int d = threadIdx.x * 4; d < H; d += blockDim.x * 4) {
             const float4 v = *reinterpret_cast<const float4*>(xr + d);
+            const float2 w01 = __half22float2(*reinterpret_cast<const half2*>(w + d));
+            const float2 w23 = __half22float2(*reinterpret_cast<const half2*>(w + d + 2));
+            const float n0 = v.x * r * (1.f + w01.x), n1 = v.y * r * (1.f + w01.y);
+            const float n2 = v.z * r * (1.f + w23.x), n3 = v.w * r * (1.f + w23.y);
+            const float h0 = __half2float(__float2half_rn(n0)), h1 = __half2float(__float2half_rn(n1));
+            const float h2 = __half2float(__float2half_rn(n2)), h3 = __half2float(__float2half_rn(n3));
+            *reinterpret_cast<half2*>(hi + d) = __floats2half2_rn(h0, h1);
+            *reinterpret_cast<half2*>(hi + d + 2) = __floats2half2_rn(h2, h3);
+            *reinterpret_cast<half2*>(lo + d) = __floats2half2_rn(n0 - h0, n1 - h1);
+            *reinterpret_cast<half2*>(lo + d + 2) = __floats2half2_rn(n2 - h2, n3 - h3);
+        }
+    }
+}
+
+// H=2560, hc=4 is exactly ten floats per thread per stream. Keep them in registers across the
+// reduction so the normalization pass reads each input element once instead of once per pass.
+// The three float4 accumulations below deliberately retain norm_kernel's operation and addition
+// order (including the absent final float4 in threads 128..255), making this a bit-exact fast path.
+__global__ void __launch_bounds__(256) norm_kernel_2560_4(const float* __restrict__ x,
+                                                          const half* __restrict__ nw,
+                                                          half* __restrict__ normed_hi,
+                                                          half* __restrict__ normed_lo,
+                                                          float* __restrict__ rms, float eps) {
+    constexpr int H = 2560, hc = 4;
+    __shared__ float red[8];
+    const int t = blockIdx.x;
+    const int d0 = threadIdx.x * 4;
+#pragma unroll
+    for (int s = 0; s < hc; ++s) {
+        const float* xr = x + ((size_t)t * hc + s) * H;
+        const float4 v0 = *reinterpret_cast<const float4*>(xr + d0);
+        const float4 v1 = *reinterpret_cast<const float4*>(xr + d0 + 1024);
+        float4 v2 = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (d0 < 512) v2 = *reinterpret_cast<const float4*>(xr + d0 + 2048);
+        float a = 0.f;
+        a += v0.x * v0.x + v0.y * v0.y + v0.z * v0.z + v0.w * v0.w;
+        a += v1.x * v1.x + v1.y * v1.y + v1.z * v1.z + v1.w * v1.w;
+        if (d0 < 512) a += v2.x * v2.x + v2.y * v2.y + v2.z * v2.z + v2.w * v2.w;
+        const float r = rsqrtf(block_sum(a, red) / (float)H + eps);
+        if (threadIdx.x == 0) rms[t * hc + s] = r;
+        half* hi = normed_hi + ((size_t)t * hc + s) * H;
+        half* lo = normed_lo + ((size_t)t * hc + s) * H;
+        const half* w = nw + (size_t)s * H;
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            const int d = d0 + j * 1024;
+            if (j == 2 && d0 >= 512) break;
+            const float4 v = j == 0 ? v0 : (j == 1 ? v1 : v2);
             const float2 w01 = __half22float2(*reinterpret_cast<const half2*>(w + d));
             const float2 w23 = __half22float2(*reinterpret_cast<const half2*>(w + d + 2));
             const float n0 = v.x * r * (1.f + w01.x), n1 = v.y * r * (1.f + w01.y);
@@ -119,6 +168,97 @@ int gemm_abt(cublasHandle_t h, const half* A, const half* B, float* C, int T, in
     return s == CUBLAS_STATUS_SUCCESS ? 0 : (int)cudaErrorUnknown;
 }
 
+// The same fixed 64-row products, with all full tiles resident in one launch. Column-major A is the shared weight,
+// so strideA=0; row-major activations and outputs advance by one 64-row tile per batch. Keeping n=64 (rather than
+// making the whole chunk one GEMM) preserves each row's reduction schedule and chunk-independence contract.
+int gemm_abt_tiles(cublasHandle_t h, const half* A, const half* B, float* C, int N, int K, float beta, int batches) {
+    cudaStream_t st = nullptr;
+    if (cublasGetStream(h, &st) != CUBLAS_STATUS_SUCCESS) return (int)cudaErrorUnknown;
+    static thread_local cublasLtHandle_t lt = nullptr;
+    if (!lt && cublasLtCreate(&lt) != CUBLAS_STATUS_SUCCESS) return (int)cudaErrorUnknown;
+    struct LtPlan {
+        int n = 0, k = 0;
+        bool valid = false;
+        cublasLtMatmulDesc_t op = nullptr;
+        cublasLtMatrixLayout_t ad = nullptr, bd = nullptr, cd = nullptr, dd = nullptr;
+        cublasLtMatmulAlgo_t algo{};
+    };
+    // Descriptors intentionally live as long as the handle to avoid repeated host setup. Plans are thread-local,
+    // so overlapping prefill threads cannot race batch-count updates.
+    static thread_local LtPlan plans[16];
+    LtPlan* plan = nullptr;
+    LtPlan* empty = nullptr;
+    for (LtPlan& p : plans) {
+        if (p.valid && p.n == N && p.k == K) {
+            plan = &p;
+            break;
+        }
+        if (!empty && !p.valid) empty = &p;
+    }
+    if (!plan) {
+        if (!empty) return (int)cudaErrorUnknown;
+        LtPlan p;
+        p.n = N;
+        p.k = K;
+        bool ok = cublasLtMatmulDescCreate(&p.op, CUBLAS_COMPUTE_32F, CUDA_R_32F) == CUBLAS_STATUS_SUCCESS &&
+                  cublasLtMatrixLayoutCreate(&p.ad, CUDA_R_16F, K, N, K) == CUBLAS_STATUS_SUCCESS &&
+                  cublasLtMatrixLayoutCreate(&p.bd, CUDA_R_16F, K, 64, K) == CUBLAS_STATUS_SUCCESS &&
+                  cublasLtMatrixLayoutCreate(&p.cd, CUDA_R_32F, N, 64, N) == CUBLAS_STATUS_SUCCESS &&
+                  cublasLtMatrixLayoutCreate(&p.dd, CUDA_R_32F, N, 64, N) == CUBLAS_STATUS_SUCCESS;
+        const cublasOperation_t transa = CUBLAS_OP_T, transb = CUBLAS_OP_N;
+        ok = ok && cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)) ==
+                       CUBLAS_STATUS_SUCCESS &&
+             cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)) ==
+                       CUBLAS_STATUS_SUCCESS;
+        const long long astride = 0, bstride = (long long)64 * K, cstride = (long long)64 * N;
+        const int one_batch = 1;
+        auto set_layout = [&](cublasLtMatrixLayout_t d, long long stride) {
+            return cublasLtMatrixLayoutSetAttribute(d, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &one_batch,
+                                                    sizeof(one_batch)) == CUBLAS_STATUS_SUCCESS &&
+                   cublasLtMatrixLayoutSetAttribute(d, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride,
+                                                    sizeof(stride)) == CUBLAS_STATUS_SUCCESS;
+        };
+        ok = ok && set_layout(p.ad, astride) && set_layout(p.bd, bstride) && set_layout(p.cd, cstride) &&
+             set_layout(p.dd, cstride);
+        cublasLtMatmulPreference_t pref = nullptr;
+        const size_t no_workspace = 0;
+        ok = ok && cublasLtMatmulPreferenceCreate(&pref) == CUBLAS_STATUS_SUCCESS &&
+             cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &no_workspace,
+                                                  sizeof(no_workspace)) == CUBLAS_STATUS_SUCCESS;
+        cublasLtMatmulHeuristicResult_t heuristic{};
+        int returned = 0;
+        // Optimize the target 4096-row shape, then pin that complete splitK=1 descriptor for smaller chunks too.
+        // The layouts are reset to the actual batch count below before every launch.
+        const int heuristic_batches = 64;
+        for (cublasLtMatrixLayout_t d : {p.ad, p.bd, p.cd, p.dd})
+            ok = ok && cublasLtMatrixLayoutSetAttribute(d, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &heuristic_batches,
+                                                        sizeof(heuristic_batches)) == CUBLAS_STATUS_SUCCESS;
+        ok = ok && cublasLtMatmulAlgoGetHeuristic(lt, p.op, p.ad, p.bd, p.cd, p.dd, pref, 1, &heuristic, &returned) ==
+                       CUBLAS_STATUS_SUCCESS && returned == 1;
+        if (ok) p.algo = heuristic.algo;
+        if (pref) cublasLtMatmulPreferenceDestroy(pref);
+        if (!ok) {
+            if (p.op) cublasLtMatmulDescDestroy(p.op);
+            for (cublasLtMatrixLayout_t d : {p.ad, p.bd, p.cd, p.dd})
+                if (d) cublasLtMatrixLayoutDestroy(d);
+            return (int)cudaErrorUnknown;
+        }
+        p.valid = true;
+        *empty = p;
+        plan = empty;
+    }
+    auto set_batches = [&](cublasLtMatrixLayout_t d) {
+        return cublasLtMatrixLayoutSetAttribute(d, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batches, sizeof(batches)) ==
+               CUBLAS_STATUS_SUCCESS;
+    };
+    if (!set_batches(plan->ad) || !set_batches(plan->bd) || !set_batches(plan->cd) || !set_batches(plan->dd))
+        return (int)cudaErrorUnknown;
+    const float one = 1.f;
+    const cublasStatus_t status = cublasLtMatmul(lt, plan->op, &one, B, plan->ad, A, plan->bd, &beta, C, plan->cd, C,
+                                                  plan->dd, &plan->algo, nullptr, 0, st);
+    return status == CUBLAS_STATUS_SUCCESS ? 0 : (int)cudaErrorUnknown;
+}
+
 }  // namespace hcg
 
 using namespace hcg;
@@ -161,39 +301,53 @@ GB_EXPORT int gb_hcg_pre(const void* streams, const void* norm_w, const void* do
     // (the second `2 * al(padded*hc*4)` term); make the reservation explicit.
     float* inj_pad = (float*)p;     p += al((size_t)padded * hc * 4);
 
-    // A fixed 64-row GEMM tile gives the same accumulation for a row in every decode window.
-    // Initialize only the unused tail of the final tile; valid rows are overwritten by norm_kernel.
-    if (padded != T) {
-        if (cudaMemsetAsync(normed_hi + (size_t)T * K, 0, (size_t)(padded - T) * K * sizeof(half), st) != cudaSuccess)
-            return (int)cudaErrorUnknown;
-        if (cudaMemsetAsync(normed_lo + (size_t)T * K, 0, (size_t)(padded - T) * K * sizeof(half), st) != cudaSuccess)
-            return (int)cudaErrorUnknown;
-    }
-    norm_kernel<<<T, 256, 0, st>>>((const float*)streams, (const half*)norm_w, normed_hi, normed_lo, rms, H, hc, eps);
-    int rc = GB_CHECK_LAUNCH();
-    if (rc) return rc;
-    for (int row = 0; row < padded; row += 64) {
-        if ((rc = gemm_abt(h, normed_hi + (size_t)row * K, (const half*)down_w, L + (size_t)row * rank, 64, rank, K, 0.f))) return rc;
-        if ((rc = gemm_abt(h, normed_lo + (size_t)row * K, (const half*)down_w, L + (size_t)row * rank, 64, rank, K, 1.f))) return rc;
-        if (inject_w) {
-            if ((rc = gemm_abt(h, normed_hi + (size_t)row * K, (const half*)inject_w,
-                                Ij + (size_t)row * hc, 64, hc, K, 0.f))) return rc;
-            if ((rc = gemm_abt(h, normed_lo + (size_t)row * K, (const half*)inject_w,
-                                Ij + (size_t)row * hc, 64, hc, K, 1.f))) return rc;
+    // Keep each strip's G and normed hi/lo resident in L2 between the dependent up/mix launches.
+    // The strip is a whole number of the same pinned 64-row GEMM tiles, so splitting the outer row
+    // loop cannot change any reduction schedule or output bit. Scratch is deliberately reused at
+    // offset zero; only caller-owned input/output rows advance.
+    constexpr int strip_rows = 512;
+    int rc = 0;
+    for (int r0 = 0; r0 < T; r0 += strip_rows) {
+        const int rows = T - r0 < strip_rows ? T - r0 : strip_rows;
+        const int strip_padded = ((rows + 63) / 64) * 64;
+        const float* strip_streams = (const float*)streams + (size_t)r0 * K;
+        __nv_bfloat16* strip_y = (__nv_bfloat16*)y_out + (size_t)r0 * H;
+        // A fixed 64-row GEMM tile gives the same accumulation for a row in every decode window.
+        // Initialize only the unused tail of the final tile; valid rows are overwritten by norm.
+        if (strip_padded != rows) {
+            if (cudaMemsetAsync(normed_hi + (size_t)rows * K, 0, (size_t)(strip_padded - rows) * K * sizeof(half), st) !=
+                cudaSuccess)
+                return (int)cudaErrorUnknown;
+            if (cudaMemsetAsync(normed_lo + (size_t)rows * K, 0, (size_t)(strip_padded - rows) * K * sizeof(half), st) !=
+                cudaSuccess)
+                return (int)cudaErrorUnknown;
         }
+        if (H == 2560 && hc == 4)
+            norm_kernel_2560_4<<<rows, 256, 0, st>>>(strip_streams, (const half*)norm_w, normed_hi, normed_lo, rms, eps);
+        else
+            norm_kernel<<<rows, 256, 0, st>>>(strip_streams, (const half*)norm_w, normed_hi, normed_lo, rms, H, hc, eps);
+        if ((rc = GB_CHECK_LAUNCH())) return rc;
+        const int tiles = strip_padded / 64;
+        if ((rc = gemm_abt_tiles(h, normed_hi, (const half*)down_w, L, rank, K, 0.f, tiles))) return rc;
+        if ((rc = gemm_abt_tiles(h, normed_lo, (const half*)down_w, L, rank, K, 1.f, tiles))) return rc;
+        if (inject_w) {
+            if ((rc = gemm_abt_tiles(h, normed_hi, (const half*)inject_w, Ij, hc, K, 0.f, tiles))) return rc;
+            if ((rc = gemm_abt_tiles(h, normed_lo, (const half*)inject_w, Ij, hc, K, 1.f, tiles))) return rc;
+        }
+        const size_t n = (size_t)strip_padded * rank + (inject_w ? (size_t)strip_padded * hc : 0);
+        low_kernel<<<(unsigned)((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, st>>>(
+            L, inject_w ? Ij : nullptr, low_hi, low_lo, inject_w ? inj_pad : nullptr, strip_padded, rank, hc);
+        if ((rc = GB_CHECK_LAUNCH())) return rc;
+        if (inject_w &&
+            cudaMemcpyAsync(inj_out + (size_t)r0 * hc, inj_pad, (size_t)rows * hc * sizeof(float),
+                            cudaMemcpyDeviceToDevice, st) != cudaSuccess)
+            return (int)cudaErrorUnknown;
+        if ((rc = gemm_abt_tiles(h, low_hi, (const half*)up_w, G, K, rank, 0.f, tiles))) return rc;
+        if ((rc = gemm_abt_tiles(h, low_lo, (const half*)up_w, G, K, rank, 1.f, tiles))) return rc;
+        mix_kernel<<<rows, 256, 0, st>>>(strip_streams, G, rms, (const half*)norm_w, strip_y, H, hc);
+        if ((rc = GB_CHECK_LAUNCH())) return rc;
     }
-    const size_t n = (size_t)padded * rank + (inject_w ? (size_t)padded * hc : 0);
-    low_kernel<<<(unsigned)((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, st>>>(
-        L, inject_w ? Ij : nullptr, low_hi, low_lo, inject_w ? inj_pad : nullptr, padded, rank, hc);
-    if ((rc = GB_CHECK_LAUNCH())) return rc;
-    if (inject_w && cudaMemcpyAsync(inj_out, inj_pad, (size_t)T * hc * sizeof(float), cudaMemcpyDeviceToDevice, st) != cudaSuccess)
-        return (int)cudaErrorUnknown;
-    for (int row = 0; row < padded; row += 64) {
-        if ((rc = gemm_abt(h, low_hi + (size_t)row * rank, (const half*)up_w, G + (size_t)row * K, 64, K, rank, 0.f))) return rc;
-        if ((rc = gemm_abt(h, low_lo + (size_t)row * rank, (const half*)up_w, G + (size_t)row * K, 64, K, rank, 1.f))) return rc;
-    }
-    mix_kernel<<<T, 256, 0, st>>>((const float*)streams, G, rms, (const half*)norm_w, (__nv_bfloat16*)y_out, H, hc);
-    return GB_CHECK_LAUNCH();
+    return 0;
 }
 
 // ------------------------------------------------------------------------------------------------ small linear GEMM

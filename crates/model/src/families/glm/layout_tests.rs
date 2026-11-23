@@ -501,6 +501,71 @@ fn a_kda_split_rank_places_and_plans_only_its_qkv_strips() {
     }
 }
 
+/// `lm-held` (opt-in): a rank that holds only its vocabulary half of the lm_head (`GlmConfig::with_lm_rank`) places and plans only those
+/// strips of the head (one range: 256 trellis runs, one of `svh`, `suh` whole). The two ranks' runs read every stored byte of the head's
+/// trellis and `svh` exactly once, every other item is the single node's, and the global region shrinks by exactly the half it does not hold.
+#[test]
+fn a_rank_holding_its_vocabulary_half_places_and_plans_only_those_head_strips() {
+    let whole_w = weights();
+    let whole = plan();
+    let head = |n: &str| n == "lm_head.trellis" || n == "lm_head.svh";
+    let mut read: std::collections::BTreeMap<String, Vec<(u64, u64)>> = Default::default();
+    let f = &whole_w.lm_head;
+    assert_eq!((f.k, f.n), (4096, 154_880));
+    for r in 0..2 {
+        let cfg = config().with_lm_rank(r, 2).unwrap();
+        assert_eq!(cfg.lm_strips, Some((605 * r, 605 * (r + 1))));
+        assert!(cfg.with_lm_rank(r, 2).is_err(), "a rank's configuration is not halved again");
+        let w = GlmWeights::map(&inventory(), &cfg).unwrap();
+        assert_eq!(w.counts(), whole_w.counts(), "rank {r}: every tensor is still claimed");
+        let p = w.load_plan().unwrap();
+        let g = &w.lm_head;
+        assert_eq!(g.cut.as_ref().map(|c| c.ranges.clone()), Some(vec![(605 * r, 605 * (r + 1))]));
+        assert_eq!((g.k, g.n, g.placed_n()), (4096, 154_880, 77_440));
+        assert_eq!((g.trellis.bytes * 2, g.svh.bytes * 2, g.suh.bytes), (f.trellis.bytes, f.svh.bytes, f.suh.bytes));
+        assert_eq!((g.trellis.src, g.svh.src, g.suh.src), (f.trellis.src, f.svh.src, f.suh.src));
+        let saved = g.trellis.bytes + g.svh.bytes;
+        for (suffix, part, runs) in [("trellis", &g.trellis, 256), ("svh", &g.svh, 1)] {
+            let name = format!("lm_head.{suffix}");
+            let mut items: Vec<_> = p.items.iter().filter(|i| i.name == name).collect();
+            assert_eq!(items.len(), runs, "{name}");
+            items.sort_by_key(|i| i.dst);
+            let mut at = part.dst.offset;
+            for i in &items {
+                assert_eq!((i.region, i.dst, i.dst_bytes), (part.dst.region, at, i.bytes), "{name}");
+                at += i.bytes;
+                read.entry(name.clone()).or_default().push((i.offset, i.offset + i.bytes));
+            }
+            assert_eq!(at, part.dst.offset + part.bytes, "{name}: the runs fill the cut");
+        }
+        let others = |p: &super::plan::LoadPlan| -> Vec<(String, ItemPart, u16, u64, u64)> {
+            p.items.iter().filter(|i| !head(&i.name)).map(|i| (i.name.clone(), i.part, i.file, i.offset, i.bytes)).collect()
+        };
+        assert_eq!(others(&p), others(whole), "rank {r}");
+        assert_eq!(p.markers, whole.markers, "rank {r}: every codebook marker is still checked");
+        for (a, b) in p.regions.iter().zip(&whole.regions) {
+            assert_eq!((a.id, a.kind), (b.id, b.kind));
+            let drop = if a.kind == RegionKind::Global { saved } else { 0 };
+            assert_eq!(a.bytes + drop, b.bytes, "rank {r} {:?}: only the global region drops, by the other half exactly", a.kind);
+        }
+        assert_eq!(whole.totals().uploaded_total() - p.totals().uploaded_total(), saved, "rank {r}");
+        eprintln!("rank {r}: {:.1} MiB of the lm_head not placed", saved as f64 / 1048576.0);
+    }
+    let stored: std::collections::BTreeMap<String, (u64, u64)> =
+        whole.items.iter().filter(|i| head(&i.name)).map(|i| (i.name.clone(), (i.offset, i.offset + i.bytes))).collect();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(read.keys().collect::<Vec<_>>(), stored.keys().collect::<Vec<_>>());
+    for (name, mut v) in read {
+        v.sort();
+        let (lo, hi) = stored[&name];
+        assert_eq!((v.first().unwrap().0, v.last().unwrap().1), (lo, hi), "{name}");
+        assert!(v.windows(2).all(|w| w[0].1 == w[1].0), "{name}: the two ranks' runs tile the stored part");
+    }
+    for bad in [(2, 2), (0, 3), (1, 1)] {
+        assert!(config().with_lm_rank(bad.0, bad.1).is_err(), "{bad:?}");
+    }
+}
+
 #[test]
 fn the_tower_is_checked_and_absent_when_the_config_has_none() {
     let mut inv = inventory();

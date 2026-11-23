@@ -1,7 +1,9 @@
 """release_manifest.py: the carried-forward model entry contract (decision D37)."""
+import json
+from pathlib import Path
 import unittest
 
-from tools.release_manifest import validate_manifest
+from tools.release_manifest import validate_manifest, evidence_published
 
 VERSION = 'v0.1.1'
 HEX40 = '0' * 40
@@ -126,6 +128,66 @@ class ManifestSchemaTest(unittest.TestCase):
         doc['engine']['dev_commit'] = 'a' * 40
         with self.assertRaisesRegex(ValueError, 'dev_commit prefix must match the engine release tag commit'):
             validate_manifest(doc, VERSION)
+
+
+class EvidenceAssetsKeyTest(unittest.TestCase):
+    """The optional top-level `evidence_assets` key: absent, or exactly "dev-release"."""
+
+    def test_a_manifest_without_the_key_publishes_evidence_and_passes_unchanged(self):
+        doc = base_manifest()
+        self.assertEqual(validate_manifest(doc, VERSION), base_manifest())
+        self.assertNotIn('evidence_assets', doc)
+        self.assertIs(evidence_published(doc), True)
+
+    def test_dev_release_is_accepted_and_keeps_evidence_off_the_release(self):
+        doc = dict(base_manifest(), evidence_assets='dev-release')
+        self.assertEqual(validate_manifest(doc, VERSION), doc)
+        self.assertIs(evidence_published(doc), False)
+
+    def test_any_other_value_is_refused(self):
+        for value in ('published', 'private', 'Dev-Release', 'dev-release ', '', None, True, False, 0, 1,
+                      ['dev-release'], {'dev-release': True}):
+            doc = dict(base_manifest(), evidence_assets=value)
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'invalid evidence_assets'):
+                    validate_manifest(doc, VERSION)
+                with self.assertRaisesRegex(ValueError, 'invalid evidence_assets'):
+                    evidence_published(doc)
+
+    def test_the_key_inside_engine_or_a_model_entry_is_refused(self):
+        doc = base_manifest()
+        doc['engine']['evidence_assets'] = 'dev-release'
+        with self.assertRaisesRegex(ValueError, 'top-level manifest key, not an engine key'):
+            validate_manifest(doc, VERSION)
+        doc = base_manifest()
+        doc['models'][0]['evidence_assets'] = 'dev-release'
+        with self.assertRaisesRegex(ValueError, 'top-level manifest key, not a model key'):
+            validate_manifest(doc, VERSION)
+
+    def test_a_misspelt_top_level_key_is_refused_instead_of_ignored(self):
+        for key in ('evidence_asset', 'evidence-assets', 'evidence', 'Evidence_Assets', 'evidenceAssets',
+                    'evidance_assets', 'evidence_assets ', 'private_evidence', 'source_archives'):
+            doc = dict(base_manifest(), **{key: 'dev-release'})
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'unknown top-level manifest key'):
+                validate_manifest(doc, VERSION)
+
+    def test_the_released_manifests_carry_only_known_top_level_keys(self):
+        releases = Path(__file__).resolve().parent.parent / 'releases'
+        seen = 0
+        for path in sorted(releases.glob('v*/manifest.json')):
+            doc = json.loads(path.read_text(encoding='utf-8'))
+            with self.subTest(release=path.parent.name):
+                self.assertEqual(validate_manifest(doc, path.parent.name), doc)
+                self.assertIs(evidence_published(doc), True)
+                seen += 1
+        self.assertGreaterEqual(seen, 3)
+
+    def test_a_models_free_text_evidence_field_is_still_accepted(self):
+        doc = base_manifest()
+        doc['models'][0]['evidence'] = 'synthetic-demo-v1-evidence.tar.gz'
+        self.assertEqual(validate_manifest(doc, VERSION), doc)
+        doc['evidence_assets'] = 'dev-release'
+        self.assertEqual(validate_manifest(doc, VERSION), doc)
 
 
 if __name__ == '__main__':

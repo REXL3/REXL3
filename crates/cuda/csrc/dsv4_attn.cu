@@ -1840,6 +1840,56 @@ __global__ void index_score_kernel(const void* q, const void* index_k, const flo
     score[(size_t)r * n_pos + p] = acc * scale;
 }
 
+/// FP16 serving shape: one warp per position and one lane per index head. The query row is staged once per
+/// 128-thread block, and both operands are read as aligned uint4 vectors. Each lane still accumulates its head's
+/// 128 products in ascending dimension order; lane zero then accumulates heads in ascending order. Thus the
+/// floating-point operation order is the same as index_score_kernel, while all 32 heads execute in parallel.
+__global__ void index_score_f16_32x128_kernel(const __half* q, const __half* index_k, const float* w,
+                                              const uint8_t* mask, int mask_stride, float* score, int rows,
+                                              int n_pos, float scale, int start_pos, int ratio) {
+    __shared__ __align__(16) __half q_row[32 * 128];
+    const int r = blockIdx.y;
+    const int tid = threadIdx.x;
+    for (int i = tid; i < 32 * 128 / 8; i += 128) {
+        reinterpret_cast<uint4*>(q_row)[i] = reinterpret_cast<const uint4*>(q + (size_t)r * 32 * 128)[i];
+    }
+    __syncthreads();
+
+    const int lane = tid & 31;
+    const int p = blockIdx.x * 4 + (tid >> 5);
+    if (p >= n_pos) {
+        return;
+    }
+    const int len = (start_pos + r + 1) / ratio;
+    if (p >= len || (mask != nullptr && mask[(size_t)r * mask_stride + p] == 0)) {
+        if (lane == 0) {
+            score[(size_t)r * n_pos + p] = -INFINITY;
+        }
+        return;
+    }
+
+    float d = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 128 / 8; ++i) {
+        const uint4 qv = reinterpret_cast<const uint4*>(q_row + lane * 128)[i];
+        const uint4 kv = reinterpret_cast<const uint4*>(index_k + (size_t)p * 128)[i];
+        const __half* qh = reinterpret_cast<const __half*>(&qv);
+        const __half* kh = reinterpret_cast<const __half*>(&kv);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            d += __half2float(qh[j]) * __half2float(kh[j]);
+        }
+    }
+    float acc = 0.0f;
+#pragma unroll
+    for (int h = 0; h < 32; ++h) {
+        acc += fmaxf(__shfl_sync(0xffffffffu, d, h), 0.0f) * w[(size_t)r * 32 + h];
+    }
+    if (lane == 0) {
+        score[(size_t)r * n_pos + p] = acc * scale;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------- top-k
 
 /// Monotone f32 -> u32: `x >= 0 ? bits ^ 0x80000000 : ~bits`, so the unsigned order is the float order.
@@ -2409,12 +2459,18 @@ GB_EXPORT int gb_dsv4_state_write(const void* kv, const void* score, float* kv_s
 
 GB_EXPORT int gb_dsv4_index_score(const void* q, const void* index_k, const float* w, const uint8_t* mask,
                                   int mask_stride, float* score, int rows, int n_pos, int n_heads, int dim,
-                                  float scale, int start_pos, int ratio, int dtype, void* stream) {
+                                  float scale, int start_pos, int ratio, int dtype, int force_scalar, void* stream) {
     if (rows <= 0 || n_pos <= 0 || n_heads <= 0 || dim <= 0 || ratio <= 0) {
         return (int)cudaErrorInvalidValue;
     }
-    index_score_kernel<<<dim3(rows, (n_pos + 127) / 128), 128, 0, gb_stream(stream)>>>(
-        q, index_k, w, mask, mask_stride, score, rows, n_pos, n_heads, dim, scale, start_pos, ratio, dtype);
+    if (!force_scalar && dtype == 0 && n_heads == 32 && dim == 128) {
+        index_score_f16_32x128_kernel<<<dim3((n_pos + 3) / 4, rows), 128, 0, gb_stream(stream)>>>(
+            static_cast<const __half*>(q), static_cast<const __half*>(index_k), w, mask, mask_stride, score,
+            rows, n_pos, scale, start_pos, ratio);
+    } else {
+        index_score_kernel<<<dim3(rows, (n_pos + 127) / 128), 128, 0, gb_stream(stream)>>>(
+            q, index_k, w, mask, mask_stride, score, rows, n_pos, n_heads, dim, scale, start_pos, ratio, dtype);
+    }
     return GB_CHECK_LAUNCH();
 }
 

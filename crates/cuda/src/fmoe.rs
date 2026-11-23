@@ -28,6 +28,42 @@ mod ffi {
             expert_bias: *const f32, n_group: i32, topk_group: i32,
             routed_limit: f32, shared_limit: f32, routed_scaling: f32,
         ) -> i32;
+        pub fn gb_fmoe_forward_row_staged(
+            x: *const c_void, logits: *const c_void, logits_f32: i32, shared_gate: *const c_void,
+            g_t: *const u64, g_su: *const u64, g_sv: *const u64,
+            u_t: *const u64, u_su: *const u64, u_sv: *const u64,
+            d_t: *const u64, d_su: *const u64, d_sv: *const u64,
+            ktab: *const i32, out: *mut c_void,
+            t: i32, ne: i32, top_k: i32, h: i32, i: i32, kc: i32, max_tokens: i32,
+            ws: *mut c_void, stream: *mut c_void,
+            expert_bias: *const f32, n_group: i32, topk_group: i32,
+            routed_limit: f32, shared_limit: f32, routed_scaling: f32,
+        ) -> i32;
+        pub fn gb_fmoe_forward_pairs(
+            x: *const c_void, logits: *const c_void, logits_f32: i32, shared_gate: *const c_void,
+            g_t: *const u64, g_su: *const u64, g_sv: *const u64,
+            u_t: *const u64, u_su: *const u64, u_sv: *const u64,
+            d_t: *const u64, d_su: *const u64, d_sv: *const u64,
+            ktab: *const i32, own: *const i32,
+            t: i32, ne: i32, top_k: i32, h: i32, i: i32, kc: i32, max_tokens: i32,
+            ws: *mut c_void, stream: *mut c_void, routed_limit: f32, shared_limit: f32,
+        ) -> i32;
+        pub fn gb_fmoe_forward_pairs_unfilled(
+            x: *const c_void, logits: *const c_void, logits_f32: i32, shared_gate: *const c_void,
+            g_t: *const u64, g_su: *const u64, g_sv: *const u64,
+            u_t: *const u64, u_su: *const u64, u_sv: *const u64,
+            d_t: *const u64, d_su: *const u64, d_sv: *const u64,
+            ktab: *const i32, own: *const i32,
+            t: i32, ne: i32, top_k: i32, h: i32, i: i32, kc: i32, max_tokens: i32,
+            ws: *mut c_void, stream: *mut c_void, routed_limit: f32, shared_limit: f32,
+        ) -> i32;
+        pub fn gb_fmoe_y_offset(max_tokens: i32, top_k: i32, h: i32, i: i32, kc: i32) -> usize;
+        pub fn gb_fmoe_combine(ws: *mut c_void, out: *mut c_void, h: i32, i: i32, kc: i32, top_k: i32, max_tokens: i32, stream: *mut c_void) -> i32;
+        pub fn gb_fmoe_combine_owned_f32(
+            ws: *const c_void, own: *const i32, out_f32: *mut f32,
+            h: i32, i: i32, kc: i32, top_k: i32, ne: i32, t: i32, max_tokens: i32, stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_fmoe_cast_f32_bf16(src: *const f32, dst: *mut c_void, elems: i64, stream: *mut c_void) -> i32;
         pub fn gb_fmoe_unpack(trellis: *const c_void, w: *mut c_void, k: i32, n: i32, k2: i32, stream: *mut c_void) -> i32;
         pub fn gb_fmoe_group_route(
             logits: *const c_void, logits_f32: i32, shared_gate: *const c_void, expert_bias: *const f32, scale: f32,
@@ -173,6 +209,44 @@ pub fn forward(
     ws: &mut DevBuf,
     st: &Stream,
 ) -> Result<(), CudaError> {
+    forward_with(x, logits, ld, shared_gate, tb, out, shape, gr, limits, ws, st, false)
+}
+
+/// [`forward`] with the gate/up of a one- to four-row call at `kc` 10 staging only the call's token rows
+/// (`gb_fmoe_forward_row_staged`): two CTAs an SM where [`forward`]'s kernel fits one. The same bits as [`forward`] at every
+/// row count (the extra MMA columns feed only token columns that are never stored). Its own entry point: the families that
+/// call [`forward`] keep their launches.
+pub fn forward_row_staged(
+    x: &DevBuf,
+    logits: &DevBuf,
+    ld: LogitsDtype,
+    shared_gate: &DevBuf,
+    tb: &ExpertTables<'_>,
+    out: &mut DevBuf,
+    shape: Shape,
+    gr: Option<GroupRoute<'_>>,
+    limits: SwigluLimit,
+    ws: &mut DevBuf,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    forward_with(x, logits, ld, shared_gate, tb, out, shape, gr, limits, ws, st, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_with(
+    x: &DevBuf,
+    logits: &DevBuf,
+    ld: LogitsDtype,
+    shared_gate: &DevBuf,
+    tb: &ExpertTables<'_>,
+    out: &mut DevBuf,
+    shape: Shape,
+    gr: Option<GroupRoute<'_>>,
+    limits: SwigluLimit,
+    ws: &mut DevBuf,
+    st: &Stream,
+    row_staged: bool,
+) -> Result<(), CudaError> {
     let Shape { t, ne, top_k, h, i, kc, max_tokens } = shape;
     if t == 0 || t > max_tokens {
         eprintln!("rexl3 level=error launch contract: fmoe rows {t} outside 1..={max_tokens}");
@@ -191,8 +265,9 @@ pub fn forward(
         Some(g) => (g.expert_bias.map_or(core::ptr::null(), |b| b.ptr() as *const f32), g.n_group as i32, g.topk_group as i32),
         None => (core::ptr::null(), 0, 0),
     };
+    let launch = if row_staged { ffi::gb_fmoe_forward_row_staged } else { ffi::gb_fmoe_forward };
     let rc = unsafe {
-        ffi::gb_fmoe_forward(
+        launch(
             x.ptr(),
             logits.ptr(),
             ld.code(),
@@ -225,6 +300,197 @@ pub fn forward(
             gr.map_or(0.0, |g| g.scale),
         )
     };
+    CudaError::check(rc)
+}
+
+/// The pairs stage of [`forward`] for one rank of a tensor-parallel group: the same route on every rank, then the gate/up and down work of
+/// the experts with `own[e] != 0` only (`own` i32 `[ne + 1]`, the shared expert last), and no combine. On return the workspace's y
+/// ([`pair_rows`]) holds every entry slot's expert output in fp32, `-0.0` in the slots of the experts another rank owns. The ranks sum y
+/// (fp32, no flush to zero: disjoint support, so the sum is the owner's value bit for bit), then [`combine`] writes exactly what
+/// [`forward`] writes. Tables of an expert this rank does not own are never read (their pointers may be null).
+pub fn forward_pairs(
+    x: &DevBuf,
+    logits: &DevBuf,
+    ld: LogitsDtype,
+    shared_gate: &DevBuf,
+    tb: &ExpertTables<'_>,
+    own: &DevBuf,
+    shape: Shape,
+    limits: SwigluLimit,
+    ws: &mut DevBuf,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    let Shape { t, ne, top_k, h, i, kc, max_tokens } = shape;
+    if t == 0 || t > max_tokens {
+        eprintln!("rexl3 level=error launch contract: fmoe pairs rows {t} outside 1..={max_tokens}");
+        return Err(CudaError(1));
+    }
+    need(x, t * h * 2, "fmoe x")?;
+    need(logits, t * ne * ld.size(), "fmoe logits")?;
+    need(shared_gate, t * 2, "fmoe shared gate")?;
+    need(own, (ne + 1) * 4, "fmoe ownership")?;
+    tb.check(ne + 1, "fmoe")?;
+    need(ws, workspace_bytes(max_tokens, top_k, h, i, kc), "fmoe workspace")?;
+    let wp = ws.ptr();
+    let [gt, gsu, gsv, ut, usu, usv, dt, dsu, dsv] = tb.ptrs();
+    let rc = unsafe {
+        ffi::gb_fmoe_forward_pairs(
+            x.ptr(),
+            logits.ptr(),
+            ld.code(),
+            shared_gate.ptr(),
+            gt,
+            gsu,
+            gsv,
+            ut,
+            usu,
+            usv,
+            dt,
+            dsu,
+            dsv,
+            tb.ktab.ptr() as *const i32,
+            own.ptr() as *const i32,
+            t as i32,
+            ne as i32,
+            top_k as i32,
+            h as i32,
+            i as i32,
+            kc as i32,
+            max_tokens as i32,
+            wp,
+            st.raw(),
+            limits.routed,
+            limits.shared,
+        )
+    };
+    CudaError::check(rc)
+}
+
+/// Like [`forward_pairs`], except unowned slots (`own[e] == 0`) are NOT zero-filled in the workspace's `y` section
+/// (saving `(top_k + 1) * rows * h * 4` bytes of `-0.0` GDDR6 writes per layer). Unowned slots in `y` contain arbitrary
+/// scratch bytes and MUST only be reduced by [`combine_owned_f32`]. Routing compacts owned selections into dense groups and
+/// slots, leaving `-1` in unowned entries of the selection table, so four-warp gate/up and down CTAs do not idle on unowned work.
+pub fn forward_pairs_unfilled(
+    x: &DevBuf,
+    logits: &DevBuf,
+    logits_dtype: LogitsDtype,
+    shared_gate: &DevBuf,
+    tables: &ExpertTables<'_>,
+    own: &DevBuf,
+    shape: Shape,
+    limit: SwigluLimit,
+    ws: &mut DevBuf,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    let Shape { t, ne, top_k, h, i, kc, max_tokens } = shape;
+    if t == 0 || t > max_tokens {
+        eprintln!("rexl3 level=error launch contract: fmoe pairs rows {t} outside 1..={max_tokens}");
+        return Err(CudaError(1));
+    }
+    need(x, t * h * 2, "fmoe x")?;
+    need(logits, t * ne * logits_dtype.size(), "fmoe logits")?;
+    need(shared_gate, t * 2, "fmoe shared gate")?;
+    need(own, (ne + 1) * 4, "fmoe ownership")?;
+    tables.check(ne + 1, "fmoe")?;
+    need(ws, workspace_bytes(max_tokens, top_k, h, i, kc), "fmoe workspace")?;
+    let wp = ws.ptr();
+    let [gt, gsu, gsv, ut, usu, usv, dt, dsu, dsv] = tables.ptrs();
+    let rc = unsafe {
+        ffi::gb_fmoe_forward_pairs_unfilled(
+            x.ptr(),
+            logits.ptr(),
+            logits_dtype.code(),
+            shared_gate.ptr(),
+            gt,
+            gsu,
+            gsv,
+            ut,
+            usu,
+            usv,
+            dt,
+            dsu,
+            dsv,
+            tables.ktab.ptr() as *const i32,
+            own.ptr() as *const i32,
+            t as i32,
+            ne as i32,
+            top_k as i32,
+            h as i32,
+            i as i32,
+            kc as i32,
+            max_tokens as i32,
+            wp,
+            st.raw(),
+            limit.routed,
+            limit.shared,
+        )
+    };
+    CudaError::check(rc)
+}
+
+/// Where a pairs stage of `t` rows leaves its y in the workspace: `(byte offset, bytes)` of `[t * (top_k + 1), h]` fp32, the span the
+/// ranks all-reduce.
+pub fn pair_rows(shape: Shape) -> (usize, usize) {
+    let Shape { t, top_k, h, i, kc, max_tokens, .. } = shape;
+    let off = unsafe { ffi::gb_fmoe_y_offset(max_tokens as i32, top_k as i32, h as i32, i as i32, kc as i32) };
+    (off, t * (top_k + 1) * h * 4)
+}
+
+/// The combine of a [`forward_pairs`] call, after the ranks' exchange of its y: `out` bf16 `[t, h]`, the same arithmetic as [`forward`]'s
+/// in-line combine (per token, the entries in top-k order, the shared expert last, one bf16 rounding).
+pub fn combine(ws: &mut DevBuf, out: &mut DevBuf, shape: Shape, st: &Stream) -> Result<(), CudaError> {
+    let Shape { t, top_k, h, i, kc, max_tokens, .. } = shape;
+    if t == 0 || t > max_tokens {
+        return Err(CudaError(1));
+    }
+    need(ws, workspace_bytes(max_tokens, top_k, h, i, kc), "fmoe workspace")?;
+    need(out, t * h * 2, "fmoe out")?;
+    let rc = unsafe {
+        ffi::gb_fmoe_combine(ws.ptr(), out.ptr(), h as i32, i as i32, kc as i32, top_k as i32, max_tokens as i32, st.raw())
+    };
+    CudaError::check(rc)
+}
+
+/// Sums ONLY this rank's owned expert outputs (`own[sel[t, k]] != 0`, including shared expert `sel == shape.ne` when owned)
+/// weighted by `wts[t, k]` in slot order `k = 0..=shape.top_k` into `out_f32` (`[shape.t, shape.h]` f32).
+/// Unowned slots (`own[e] == 0` or `sel < 0`) are never read from `y`. Stream-ordered and CUDA-Graph-capturable.
+pub fn combine_owned_f32(ws: &DevBuf, own: &DevBuf, out_f32: &mut DevBuf, shape: Shape, st: &Stream) -> Result<(), CudaError> {
+    let Shape { t, ne, top_k, h, i, kc, max_tokens } = shape;
+    if t == 0 || t > max_tokens {
+        return Err(CudaError(1));
+    }
+    need(ws, workspace_bytes(max_tokens, top_k, h, i, kc), "fmoe workspace")?;
+    need(own, (ne + 1) * 4, "fmoe ownership")?;
+    need(out_f32, t * h * 4, "fmoe owned output")?;
+    let rc = unsafe {
+        ffi::gb_fmoe_combine_owned_f32(
+            ws.ptr(),
+            own.ptr() as *const i32,
+            out_f32.ptr() as *mut f32,
+            h as i32,
+            i as i32,
+            kc as i32,
+            top_k as i32,
+            ne as i32,
+            t as i32,
+            max_tokens as i32,
+            st.raw(),
+        )
+    };
+    CudaError::check(rc)
+}
+
+/// Vectorized round-to-nearest-even cast of `elems` f32 values (`elems` a multiple of 4) from `src_f32` into `dst_bf16`.
+/// Stream-ordered and CUDA-Graph-capturable.
+pub fn cast_f32_to_bf16(src_f32: &DevBuf, dst_bf16: &mut DevBuf, elems: usize, st: &Stream) -> Result<(), CudaError> {
+    if elems % 4 != 0 || elems > i64::MAX as usize {
+        return Err(CudaError(1));
+    }
+    let src_bytes = elems.checked_mul(4).ok_or(CudaError(1))?;
+    let dst_bytes = elems.checked_mul(2).ok_or(CudaError(1))?;
+    need(src_f32, src_bytes, "fmoe cast source")?;
+    need(dst_bf16, dst_bytes, "fmoe cast destination")?;
+    let rc = unsafe { ffi::gb_fmoe_cast_f32_bf16(src_f32.ptr() as *const f32, dst_bf16.ptr(), elems as i64, st.raw()) };
     CudaError::check(rc)
 }
 

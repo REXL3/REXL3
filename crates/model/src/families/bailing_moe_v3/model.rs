@@ -619,8 +619,10 @@ impl BailingModel {
         let prefill_kda_rec =
             kda::Record::alloc(dims, prefill_rows).map_err(|e| ModelError::Config(format!("kda prefill record: {e}")))?;
         let kda_ws = kda::Workspace::alloc(dims, prefill_rows).map_err(|e| ModelError::Config(format!("kda workspace: {e}")))?;
+        // the decode window's per-(seq, head) counters, and one more: the prefill commit's grid-wide counter at index `heads`
+        // (`ling_kda_fused::chunk_norm_commit_fused`; every counter self-resets, and the kernels run in stream order)
         let kda_head_cnt =
-            DevBuf::zeroed(slots.max(1) * dims.heads * 4).map_err(|e| ModelError::Config(format!("kda head cnt: {e}")))?;
+            DevBuf::zeroed((slots.max(1) * dims.heads + 1) * 4).map_err(|e| ModelError::Config(format!("kda head cnt: {e}")))?;
         // the batched commit-tail layer table (raw record rows / conv pool / parity pointers of every KDA
         // layer): built once here; the device addresses are stable for the model's lifetime
         let mut commit_bytes = Vec::with_capacity(kda_layers.len() * 24);
@@ -3830,6 +3832,85 @@ impl BailingModel {
             .map_err(|e| ModelError::Config(format!("taps d2d: {e}")))?;
         self.dev.lm_head.forward(&row, &mut self.s.logits, 1, Dtype::BF16, Dtype::F16, &mut self.s.ws, &self.stream)?;
         self.candidates_of(1, count)
+    }
+
+    /// The log-probability records of the first `chosen.len()` rows of the last prefill chunk (one call of
+    /// [`BailingModel::prefill_chunk`] of at most [`BailingModel::prefill_rows`] tokens, whose final-normed rows are still in
+    /// `final_normed`), appended to `out`: each row is reduced on the device to its log-sum-exp, the logit of token `chosen[r]`
+    /// (-1: none) and its top `out.k` logits (`gb_cuda::logprob::rows_f16`: the head writes fp16), and only those are read back.
+    /// The head runs in pieces of [`ROWS`] rows with the kernel the prefill's last row uses (`lm_head.forward`, bf16 in, fp16
+    /// out). It overwrites the logits and candidate buffers; reads no per-slot state, writes none.
+    pub fn chunk_row_records(&mut self, chosen: &[i32], out: &mut gb_engine::score::RowRecords) -> Result<(), ModelError> {
+        use gb_cuda::logprob;
+        let (h, vocab, k) = (self.cfg.hidden, self.cfg.vocab, out.k);
+        if chosen.len() > self.prefill_rows
+            || k == 0
+            || k > logprob::MAX_TOP
+            || k > vocab
+            || logprob::workspace_bytes_f16(ROWS, vocab, k) > self.s.topk_ws.bytes()
+        {
+            return Err(ModelError::Request(format!(
+                "a readout of {} rows with the top {k} of {vocab} (a chunk holds {} rows)",
+                chosen.len(),
+                self.prefill_rows
+            )));
+        }
+        // the candidate buffers hold 64 entries a window row: the chosen ids go in front of the top ids, the normalisers behind
+        // the top values
+        const { assert!(logprob::MAX_TOP + 2 <= 64) };
+        let (ids_at, norm_at) = (ROWS * 4, ROWS * logprob::MAX_TOP * 4);
+        let mut at = 0;
+        while at < chosen.len() {
+            let n = (chosen.len() - at).min(ROWS);
+            put(&mut self.stage, &mut self.s.topk_ids, &chosen[at..at + n], &self.stream, "chosen ids")?;
+            let x = self.s.final_normed.subview(at * h * 2, n * h * 2);
+            self.dev.lm_head.forward(&x, &mut self.s.logits, n, Dtype::BF16, Dtype::F16, &mut self.s.ws, &self.stream)?;
+            // SAFETY: fp16 logits `[n, vocab]`; i32 chosen `[n]` at the front of the ids buffer and the top ids behind it; the top
+            // values at the front of the values buffer and the `[n, 2]` normalisers behind them; the top-k workspace (checked above).
+            unsafe {
+                logprob::rows_f16(
+                    self.s.logits.ptr().cast_const(),
+                    n,
+                    vocab,
+                    vocab,
+                    k,
+                    self.s.topk_ids.ptr().cast_const(),
+                    self.s.topk_vals.ptr_at(norm_at),
+                    self.s.topk_ids.ptr_at(ids_at),
+                    self.s.topk_vals.ptr(),
+                    self.s.topk_ws.ptr(),
+                    self.s.topk_ws.bytes(),
+                    &self.stream,
+                )
+            }
+            .map_err(|e| ModelError::Config(format!("logprob rows: {e}")))?;
+            self.sync()?;
+            let (mut nv, mut iv, mut vv) = (vec![0f32; n * 2], vec![0i32; n * k], vec![0f32; n * k]);
+            self.s.topk_vals.download_range(norm_at, &mut nv)?;
+            self.s.topk_ids.download_range(ids_at, &mut iv)?;
+            self.s.topk_vals.download_range(0, &mut vv)?;
+            out.lse.extend(nv.chunks_exact(2).map(|p| p[0]));
+            out.chosen.extend(nv.chunks_exact(2).map(|p| p[1]));
+            out.top_ids.extend(iv.iter().map(|&t| t as u32));
+            out.top_logits.extend(vv);
+            at += n;
+        }
+        Ok(())
+    }
+
+    /// The full-vocabulary logits of row `row` of the last prefill chunk, widened to f32 from the head's fp16: the head on that
+    /// one row, the kernel [`BailingModel::prefill_chunk`] runs for a chunk's last row.
+    pub fn chunk_row_logits(&mut self, row: usize) -> Result<Vec<f32>, ModelError> {
+        let h = self.cfg.hidden;
+        if row >= self.prefill_rows {
+            return Err(ModelError::Request(format!("row {row} of a chunk of at most {} rows", self.prefill_rows)));
+        }
+        let x = self.s.final_normed.subview(row * h * 2, h * 2);
+        self.dev.lm_head.forward(&x, &mut self.s.logits, 1, Dtype::BF16, Dtype::F16, &mut self.s.ws, &self.stream)?;
+        self.sync()?;
+        let mut raw = vec![0u16; self.cfg.vocab];
+        self.s.logits.download_range(0, &mut raw)?;
+        Ok(raw.into_iter().map(|v| gb_exl3::f16::f16_to_f64(v) as f32).collect())
     }
 
     // ------------------------------------------------------------------------------------------------------ MTP drafter

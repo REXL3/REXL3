@@ -12,7 +12,7 @@ use super::{
     config::FlashNextConfig,
     inventory::{self, Tensors},
 };
-use gb_exl3::checkpoint::{read_header_checked, scan};
+use gb_exl3::checkpoint::{read_header_checked, scan, Checkpoint};
 use gb_exl3::{Bits, Codebook};
 use std::{collections::BTreeMap, path::Path};
 
@@ -243,6 +243,12 @@ impl WeightMap {
     /// Scan headers and EXL3 codebook markers, not weight arrays; map both configured sidecars.
     pub fn from_dir(dir: &Path, cfg: &FlashNextConfig) -> Result<Self, Vec<String>> {
         let ck = scan(dir, true).map_err(|e| vec![e.to_string()])?;
+        Self::from_checkpoint(dir, &ck, cfg)
+    }
+
+    /// [`WeightMap::from_dir`] on the pack in `dir` already scanned as `ck` (`scan(dir, true)`): the same checks and the same map, so a
+    /// boot that keeps the scan for the load scans the pack once. The two sidecars are read from `dir`.
+    pub fn from_checkpoint(dir: &Path, ck: &Checkpoint, cfg: &FlashNextConfig) -> Result<Self, Vec<String>> {
         let bad: Vec<String> = ck
             .bad
             .iter()

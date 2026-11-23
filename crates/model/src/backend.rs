@@ -26,6 +26,8 @@ pub struct QwenBackend {
     fatal: Option<BackendError>,
     /// The prefix cache this backend reserved (its namespace and budget), when one is enabled.
     prefix: Option<PrefixCaps>,
+    /// The `prompt_logprobs` readouts in flight, by slot (`Backend::score_begin`): the records of the rows scored so far.
+    records: std::collections::BTreeMap<usize, gb_engine::score::RowRecords>,
 }
 
 fn nan_row(n: usize) -> RowOutput {
@@ -40,7 +42,7 @@ fn row_of(c: &Candidates, r: usize, n: usize) -> RowOutput {
 
 impl QwenBackend {
     pub fn new(m: Model, chunk: usize) -> Self {
-        Self { m, chunk, deadline_rows: None, error: None, fatal: None, prefix: None }
+        Self { m, chunk, deadline_rows: None, error: None, fatal: None, prefix: None, records: Default::default() }
     }
 
     /// Enable the prefix cache: allocates `budget.snapshot_slots` snapshot slots (the draft's window included when a draft is attached to the
@@ -175,6 +177,14 @@ impl QwenBackend {
                 } else {
                     c.map(|c| row_of(&c, 0, candidates))
                 };
+                if full_row {
+                    // a readout: every row of the chunk, reduced on the device, after the last row above was read (it
+                    // reuses the head's buffers). Row `i` predicts token `i + 1`; the prompt's last row has none.
+                    if let Some(rec) = self.records.get_mut(&slot) {
+                        let chosen: Vec<i32> = (at..end).map(|i| prompt.get(i + 1).map_or(-1, |&t| t as i32)).collect();
+                        self.m.chunk_row_records(&chosen, rec)?;
+                    }
+                }
                 // the snapshots are complete: the entries take their page references now and own their slots from here
                 let captured = taken
                     .drain(..)
@@ -214,6 +224,19 @@ impl Backend for QwenBackend {
     fn score_supported(&self) -> bool {
         true
     }
+    fn score_rows_supported(&self) -> bool {
+        true
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        self.records.remove(&slot);
+        if all_rows {
+            let k = gb_engine::score::RECORD_TOP.min(self.m.cfg.vocab);
+            self.records.insert(slot, gb_engine::score::RowRecords::new(k));
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<gb_engine::score::RowRecords> {
+        self.records.remove(&slot)
+    }
     fn score_slice(
         &mut self,
         slot: usize,
@@ -229,6 +252,7 @@ impl Backend for QwenBackend {
             for c in r.captured {
                 self.prefix_release(c.handle);
             }
+            self.records.remove(&slot);
             return Err(e);
         }
         Ok(gb_engine::score::ScoreStep { done: r.step.done, row: r.step.row.map(|r| r.values), captured: r.captured })
@@ -523,6 +547,7 @@ impl Backend for QwenBackend {
     }
 
     fn release(&mut self, slot: usize) {
+        self.records.remove(&slot); // a readout that was cancelled or failed leaves its records behind
         self.m.end_slot(slot);
     }
 

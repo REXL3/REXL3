@@ -156,3 +156,91 @@ fn fp8_small_m_woa_bench() {
         bench_woa("wo_a", &mut rng, m, &st);
     }
 }
+
+#[cfg(test)]
+mod perf_probe_ffi_contract {
+    //! Check the raw declarations without a CUDA device or kernel launch.
+
+    const PROBE: &str = include_str!("dsv4_perf_probe.rs");
+    const CUDA: &str = include_str!("../csrc/dsv4_attn.cu");
+    const RUST_WOA: &str = "fn gb_dsv4_woa_grouped(";
+    const CUDA_WOA: &str = "GB_EXPORT int gb_dsv4_woa_grouped(";
+
+    fn declarations<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+        let mut declarations = Vec::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(marker) {
+            let after_open = &rest[start + marker.len()..];
+            let mut depth = 1usize;
+            let mut close = None;
+            for (offset, character) in after_open.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let close = close.expect("unterminated FFI declaration");
+            declarations.push(&after_open[..close]);
+            rest = &after_open[close + 1..];
+        }
+        declarations
+    }
+
+    fn rust_type_classes(declaration: &str) -> Vec<&str> {
+        declaration
+            .split(',')
+            .filter(|parameter| !parameter.trim().is_empty())
+            .map(|parameter| {
+                let rust_type = parameter.split_once(':').expect("Rust FFI parameter needs a name and type").1.trim();
+                if rust_type.starts_with('*') {
+                    "ptr"
+                } else {
+                    rust_type
+                }
+            })
+            .collect()
+    }
+
+    fn cuda_type_classes(declaration: &str) -> Vec<&str> {
+        declaration
+            .split(',')
+            .filter(|parameter| !parameter.trim().is_empty())
+            .map(|parameter| if parameter.contains('*') { "ptr" } else { "i32" })
+            .collect()
+    }
+
+    fn c_woa_parameters() -> &'static str {
+        let declarations = declarations(CUDA, CUDA_WOA);
+        assert_eq!(declarations.len(), 1, "expected one C wo_a export");
+        declarations[0]
+    }
+
+    #[test]
+    fn probe_woa_declarations_match_the_c_export() {
+        let expected = cuda_type_classes(c_woa_parameters());
+        assert_eq!(expected, ["ptr", "ptr", "ptr", "ptr", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "ptr"]);
+
+        let rust_declarations = declarations(PROBE, RUST_WOA);
+        assert_eq!(rust_declarations.len(), 2, "both raw probe declarations must be checked");
+        for declaration in rust_declarations {
+            assert_eq!(rust_type_classes(declaration), expected);
+        }
+    }
+
+    #[test]
+    fn abi_check_rejects_the_old_eleven_parameter_declaration() {
+        let old_declaration = "o: *const core::ffi::c_void, w: *const u8, s: *const u8, \
+                               out: *mut core::ffi::c_void, rows: i32, groups: i32, o_lora: i32, \
+                               o_in: i32, dtype: i32, use_classic: i32, stream: *mut core::ffi::c_void";
+        let old_types = rust_type_classes(old_declaration);
+        assert_eq!(old_types.len(), 11);
+        assert_ne!(old_types, cuda_type_classes(c_woa_parameters()));
+    }
+}

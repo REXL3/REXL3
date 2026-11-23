@@ -909,7 +909,11 @@ impl GlmWeights {
         );
         let final_norm =
             b.plain_x(&format!("{P}norm.weight"), PlainDtype::Bf16, &[cfg.hidden], Xform::Bf16ToF32, global, Category::Other);
-        let lm_head = b.group("lm_head", cfg.hidden, cfg.vocab, Some(global), Category::Head);
+        // a TP rank that holds only its vocabulary half (`GlmConfig::lm_strips`, `lm-held`) places only those strips
+        let lm_head = match cfg.lm_strips {
+            None => b.group("lm_head", cfg.hidden, cfg.vocab, Some(global), Category::Head),
+            Some(r) => b.group_cut("lm_head", cfg.hidden, cfg.vocab, global, Category::Head, vec![r]),
+        };
 
         let mut layers = Vec::with_capacity(cfg.layers.len());
         for (i, spec) in cfg.layers.iter().enumerate() {

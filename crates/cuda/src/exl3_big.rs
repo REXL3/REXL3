@@ -110,6 +110,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         if m == 0
             || m > i32::MAX as usize / 128
             || x.bytes() < m * self.k * x_dtype.size()

@@ -507,3 +507,114 @@ fn every_prefill_slice_tells_the_draft_where_its_context_starts() {
     b.prefill_piece(0, 0, &vec![3u32; 100], 100, 1);
     assert_eq!(*b.m.from.last().unwrap(), (0, 0));
 }
+
+/// A runtime that reads the records of a chunk out: each row's record carries the chosen id it was handed, so the test sees
+/// which token every row of every chunk was asked about.
+#[derive(Default)]
+struct Reader {
+    inner: Fake,
+    asked: Vec<Vec<i32>>,
+}
+impl FlashNextRuntime for Reader {
+    fn vocab_size(&self) -> usize {
+        42
+    }
+    fn has_mtp(&self) -> bool {
+        true
+    }
+    fn begin_slot(&mut self, _: usize) -> Result<(), ModelError> {
+        Ok(())
+    }
+    fn end_slot(&mut self, _: usize) {}
+    fn prefill_chunk(&mut self, b: &RowBatch, path: PrefillPath, want: Option<usize>) -> Result<Option<Candidates>, ModelError> {
+        self.inner.prefill_chunk(b, path, want)
+    }
+    fn mtp_after_prefill(&mut self, s: usize, f: usize, c: &[u32], n: Option<u32>, p: PrefillPath) -> Result<(), ModelError> {
+        self.inner.mtp_after_prefill(s, f, c, n, p)
+    }
+    fn window_candidates(&mut self, b: &RowBatch, count: usize) -> Result<Candidates, ModelError> {
+        self.inner.window_candidates(b, count)
+    }
+    fn commit(&mut self, _: usize, _: usize) {}
+    fn flush(&mut self) -> Result<(), ModelError> {
+        Ok(())
+    }
+    fn mtp_propose(&mut self, _: usize, _: &[u32], k: usize) -> Result<Vec<u32>, ModelError> {
+        Ok(vec![7; k])
+    }
+    fn row_records_supported(&self) -> bool {
+        true
+    }
+    fn chunk_row_records(&mut self, chosen: &[i32], out: &mut RowRecords) -> Result<(), ModelError> {
+        self.asked.push(chosen.to_vec());
+        for &c in chosen {
+            out.lse.push(1.0);
+            out.chosen.push(c as f32);
+            out.top_ids.extend(0..out.k as u32);
+            out.top_logits.extend(std::iter::repeat_n(0.5, out.k));
+        }
+        Ok(())
+    }
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        Ok(vec![0.25; 42])
+    }
+}
+
+/// The readout runs the chunks of a plain prefill (the same grid and path, no candidates, no MTP head), asks every row about
+/// the prompt token after it, across chunk boundaries too, and the last row about none; its records stay with its slot.
+#[test]
+fn a_readout_asks_each_row_about_the_next_prompt_token_on_the_prefill_grid() {
+    let mut b = FlashNextBackend::with_runtime(Reader::default(), 64, 6, true);
+    assert!(b.score_rows_supported() && !b.score_supported(), "the readout, not last-row scoring");
+    let prompt: Vec<u32> = (0..130).map(|i| (i * 5 + 1) % 42).collect();
+    // no readout begun in the slot: refused before the runtime is touched
+    assert!(b.score_slice(1, &prompt, 0, &[]).is_err());
+    assert!(b.m.inner.calls.is_empty() && b.take_error().is_none());
+    b.score_begin(1, true);
+    b.score_begin(0, false);
+    let mut done = 0;
+    let mut last = None;
+    while done < prompt.len() {
+        // cuts are ignored: the readout neither reads nor writes the prefix cache
+        let step = b.score_slice(1, &prompt, done, &[100]).unwrap();
+        assert!(step.captured.is_empty());
+        assert_eq!(step.row.is_some(), step.done == prompt.len());
+        done = step.done;
+        last = step.row;
+    }
+    assert_eq!(last.map(|r| r.len()), Some(42), "the engine's full last row");
+    assert_eq!(
+        b.m.inner.calls,
+        vec![(0, 64, PrefillPath::Tiled, None), (64, 64, PrefillPath::Tiled, None), (128, 2, PrefillPath::Tiled, None)]
+    );
+    assert!(b.m.inner.mtp.is_empty(), "the MTP head does not run in a readout");
+    let asked: Vec<i32> = b.m.asked.concat();
+    let want: Vec<i32> = (1..130).map(|i| prompt[i] as i32).chain([-1]).collect();
+    assert_eq!(asked, want);
+    assert!(b.take_score_records(0).is_none());
+    let rec = b.take_score_records(1).unwrap();
+    assert_eq!((rec.rows(), rec.k, rec.top_ids.len()), (130, 20, 130 * 20));
+    assert!(b.take_score_records(1).is_none(), "read once");
+    // a failed slice fails the request through its result, drops the records and leaves nothing for `take_error`
+    b.score_begin(1, true);
+    b.m.inner.fail = Some(ModelError::Request("boom".into()));
+    let err = b.score_slice(1, &prompt, 0, &[]).err().expect("the failed slice");
+    assert!(!err.fatal && err.message.contains("boom"), "{err:?}");
+    assert!(b.take_error().is_none() && b.take_score_records(1).is_none());
+    // a readout that is released before it ends leaves no records behind
+    b.score_begin(1, true);
+    b.score_slice(1, &prompt, 0, &[]).unwrap();
+    b.release(1);
+    assert!(b.take_score_records(1).is_none());
+}
+
+/// A runtime that does not read records out (a tensor-parallel group) does not serve the readout: the capability is off, so
+/// the engine refuses the request by name, and a slice that arrives anyway is refused without touching the runtime.
+#[test]
+fn a_runtime_without_the_readout_does_not_serve_it() {
+    let mut b = FlashNextBackend::with_runtime(Fake::default(), 64, 6, true);
+    assert!(!b.score_rows_supported() && !b.score_supported());
+    b.score_begin(0, true);
+    assert!(b.score_slice(0, &[1, 2, 3], 0, &[]).is_err());
+    assert!(b.m.calls.is_empty() && b.take_score_records(0).is_none() && b.take_error().is_none());
+}

@@ -89,7 +89,6 @@ struct Args {
     image_preparation: gb_server::preparation::PreparationLimits,
     image_ingress: gb_server::vision_ingress::IngressPolicy,
     allow_unvalidated_pack: bool,
-    intervention: Option<String>,
     /// `--chat-format ID`: name a registered chat format instead of letting `config.json` choose.
     chat_format: Option<String>,
     print_fingerprints: bool,
@@ -196,7 +195,6 @@ fn parse_from(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         image_preparation: Default::default(),
         image_ingress: Default::default(),
         allow_unvalidated_pack: false,
-        intervention: None,
         chat_format: None,
         print_fingerprints: false,
         print_crc32: false,
@@ -369,7 +367,11 @@ fn parse_from(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     val("--kv-headroom-tokens")?.parse().map_err(|_| "--kv-headroom-tokens must be a number of tokens")?
             }
             "--allow-unvalidated-pack" => a.allow_unvalidated_pack = true,
-            "--intervention" => a.intervention = Some(val("--intervention")?),
+            "--intervention" => {
+                // parsed so the operator is told why, not "unknown argument": no forward applies an overlay yet
+                val("--intervention")?;
+                return Err(gb_model::serve::INTERVENTION_NOT_APPLIED.into());
+            }
             "--chat-format" => a.chat_format = Some(val("--chat-format")?),
             "--print-fingerprints" => a.print_fingerprints = true,
             "--print-crc32" => a.print_crc32 = true,
@@ -564,7 +566,6 @@ fn serve_options(a: &Args, vision_slot: Option<gb_model::serve::VisionSlot>) -> 
     o.vision = vision_slot;
     o.max_image_tokens = a.max_image_tokens.unwrap_or(4096);
     o.allow_unvalidated_pack = a.allow_unvalidated_pack;
-    o.intervention_dir = a.intervention.clone().map(std::path::PathBuf::from);
     o.verify_pack = a.verify_pack;
     o.spec_tree = a.spec_tree;
     o.tp = a.tp.clone().filter(|t| t.is_group());
@@ -832,7 +833,7 @@ async fn serve_main() {
             if !e.is_empty() {
                 eprintln!("error: {e}");
             }
-            eprintln!("usage: rexl3-serve --model DIR [--draft DIR] [--port 8889] [--host 127.0.0.1] [--max-model-len N] [--served-model-name NAME] [--backend mock|cuda] [--slots N (default 8; fewer when the box holds fewer, unless the flag is given)] [--spec auto|mtp|copy|none] [--no-drafts] [--default-max-tokens N (0 = whole window)] [--default-thinking off|template (default off: a request that names neither enable_thinking nor reasoning_effort does not think; template: the chat template's own default)] [--default-reasoning-effort LEVEL (a request that names no effort and does not turn thinking off gets this level; a request that names an effort or sets enable_thinking false keeps its own)] [--reasoning-unverified (offer declared reasoning controls the template check refuses)] [--kv-tokens N] [--kv-headroom-tokens N (0)] [--prefill-chunk N] [--window-rows N (up to 128)] [--no-vision] [--kv-dtype fp16|int8|q4 (Nemotron: fp16, the default and the qualified one, or int8; DeepSeek-V4.1: fp16 or q4, a 4-bit compressed plane and indexer keys, see crates/cuda/src/dsv4_kvq4.rs; int8 experimental: not qualified for v0.1.0 (the 1M NIAH, task-level recall and two-node exactness-at-depth checks are pending))] [--max-image-tokens N] [--no-video] [--max-video-frames N (32)] [--max-video-tokens N (4096)] [--video-pruning-rate Q (0 = off)] [--video-evs-strict] [--chat-format ID] [--allow-unvalidated-pack] [--intervention DIR] [--verify-pack] [--no-spec-tree] [--prefix-cache on|off] [--prefix-cache-mib N] [--tp-ranks N (2 or more) --tp-rank 0..N-1 --tp-peer HOST:PORT (rank 0's rendezvous address, the same on every rank; REXL3_TP_RANKS, REXL3_TP_RANK, REXL3_TP_PEER) [--tp-connect-timeout SECS (default 900)] [--tp-ready-timeout SECS (default 1800)] [--tp-peer-timeout SECS (default 15)]] [--queue-depth N] [--queue-timeout SECS] [--request-timeout SECS (default 1800)] [--write-stall SECS (default 30)] [--heartbeat-stale-secs SECS (default 60)] [--loading-budget SECS (default 1800)] [--prefill-budget SECS (default 1800)] [--header-read-timeout SECS (default 30)] [--shutdown-grace SECS] [--unready-after N] [--exit-after N] [--mock SPEC (test only)]");
+            eprintln!("usage: rexl3-serve --model DIR [--draft DIR] [--port 8889] [--host 127.0.0.1] [--max-model-len N] [--served-model-name NAME] [--backend mock|cuda] [--slots N (default 8; fewer when the box holds fewer, unless the flag is given)] [--spec auto|mtp|copy|none] [--no-drafts] [--default-max-tokens N (0 = whole window)] [--default-thinking off|template (default off: a request that names neither enable_thinking nor reasoning_effort does not think; template: the chat template's own default)] [--default-reasoning-effort LEVEL (a request that names no effort and does not turn thinking off gets this level; a request that names an effort or sets enable_thinking false keeps its own)] [--reasoning-unverified (offer declared reasoning controls the template check refuses)] [--kv-tokens N] [--kv-headroom-tokens N (0)] [--prefill-chunk N] [--window-rows N (up to 128)] [--no-vision] [--kv-dtype fp16|int8|q4 (Nemotron: fp16, the default and the qualified one, or int8; DeepSeek-V4.1: fp16 or q4, a 4-bit compressed plane and indexer keys, see crates/cuda/src/dsv4_kvq4.rs; int8 experimental: not qualified for v0.1.0 (the 1M NIAH, task-level recall and two-node exactness-at-depth checks are pending))] [--max-image-tokens N] [--no-video] [--max-video-frames N (32)] [--max-video-tokens N (4096)] [--video-pruning-rate Q (0 = off)] [--video-evs-strict] [--chat-format ID] [--allow-unvalidated-pack] [--intervention DIR (refused: not applied in this build)] [--verify-pack] [--no-spec-tree] [--prefix-cache on|off] [--prefix-cache-mib N] [--tp-ranks N (2 or more) --tp-rank 0..N-1 --tp-peer HOST:PORT (rank 0's rendezvous address, the same on every rank; REXL3_TP_RANKS, REXL3_TP_RANK, REXL3_TP_PEER) [--tp-connect-timeout SECS (default 900)] [--tp-ready-timeout SECS (default 1800)] [--tp-peer-timeout SECS (default 15)]] [--queue-depth N] [--queue-timeout SECS] [--request-timeout SECS (default 1800)] [--write-stall SECS (default 30)] [--heartbeat-stale-secs SECS (default 60)] [--loading-budget SECS (default 1800)] [--prefill-budget SECS (default 1800)] [--header-read-timeout SECS (default 30)] [--shutdown-grace SECS] [--unready-after N] [--exit-after N] [--mock SPEC (test only)]");
             eprintln!("       Resource defaults: --max-body-mib 64 --max-total-request-mib 128 --max-json-nodes 300000 --max-json-depth 128 --max-rendered-prompt-mib (16 bytes per --max-model-len token, at least 1; 4 for 262144) --preparation-concurrency 2 --preparation-queue 64 --processing-reserve-mib (2048, or the price of one prompt at the rendered cap, 448 bytes a byte, when that is more); --model-alias NAME (repeatable). TLS/auth belongs at the loopback proxy, not a secret argv flag.");
             eprintln!("image flags: --image-urls off|on (default off; security review required); --image-url-max-bytes N (10485760 max); --image-url-connect-timeout SEC (10); --image-url-total-timeout SEC (30); --image-preparation-bytes N (2147483648); --image-retained-bytes N (134217728); --image-preparation-workers N (2); --image-preparation-backlog N (64); --image-preparation-wait SEC (300); --image-preparation-deadline SEC (1800)");
             eprintln!("       rexl3-serve --version");
@@ -1195,6 +1196,19 @@ mod tests {
         let e = args(&["--max-rendered-prompt-mib", "8", "--processing-reserve-mib", "2048"]).err().unwrap();
         assert!(e.contains("processing reserve must be at least"), "{e}");
         assert!(args(&["--max-rendered-prompt-mib", "8", "--processing-reserve-mib", "3600"]).is_ok());
+    }
+
+    #[test]
+    fn the_intervention_flag_is_refused_by_name_on_every_backend() {
+        for backend in ["cuda", "mock"] {
+            let line = ["--model", "/m", "--backend", backend, "--intervention", "/overlay"];
+            let e = parse_from(line.into_iter().map(String::from)).err().unwrap();
+            assert_eq!(e, gb_model::serve::INTERVENTION_NOT_APPLIED);
+            assert!(e.contains("--intervention is not applied in this build"), "{e}");
+        }
+        // the flag still wants its value, and no flag is no refusal
+        assert!(parse_from(["--model", "/m", "--intervention"].into_iter().map(String::from)).is_err());
+        assert!(opts(&["--model", "/m"]).intervention_dir.is_none());
     }
 
     fn opts(args: &[&str]) -> gb_model::serve::ServeOptions {

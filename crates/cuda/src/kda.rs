@@ -224,13 +224,22 @@ impl LayerWeights {
 
     /// The weights of heads `[h0, h1)` of a layer of geometry `d` (lane E, the TP head split: a rank of 32 heads runs the kernels with
     /// `Dims { heads: h1 - h0, .. }` on these): the per-head rows of `b`, `f_b`, `g_b`, `A_log` and `dt_bias`, the heads' channels of each
-    /// of the conv's `[q | k | v]` thirds, and the shared `f_a`, `g_a` (the low-rank projections, rank 128) and `o_norm` whole. Device to
-    /// device copies on `st` (synchronised before returning); every kernel computes a head from these alone, so the heads' outputs and
-    /// state are the full layer's bit for bit (`crates/cuda/tests/kda_split.rs`).
+    /// of the conv's `[q | k | v]` thirds, and the shared `f_a`, `g_a` (the low-rank projections, rank 128) and `o_norm` whole. Every
+    /// kernel computes a head from these alone, so the heads' outputs and state are the full layer's bit for bit
+    /// (`crates/cuda/tests/kda_split.rs`).
+    ///
+    /// A tensor whose heads are ONE byte range of the source (all but `conv_w`) is a [`DevBuf::subview`] of it when the source is a view
+    /// into a block (the model's weights are views of the plan's regions): the same bytes at the same addresses, no device memory taken,
+    /// and the source's block kept alive. Only `conv_w` is copied: the conv kernel reads `[conv_dim, 4]` as one array, and the heads'
+    /// channels are three disjoint ranges of it (one in each third). A source that is an allocation of its own is copied too. Copies are
+    /// device to device on `st` (synchronised before returning). [`LayerWeights::heads_of_copied_bytes`] is what this allocates.
     pub fn heads_of(w: &Weights<'_>, d: Dims, h0: usize, h1: usize, st: &Stream) -> Result<Self, CudaError> {
         d.check();
         let nh = h1.checked_sub(h0).filter(|&n| n > 0 && n % 4 == 0 && h1 <= d.heads).ok_or(CudaError(1))?;
         let part = |src: &DevBuf, ranges: &[(usize, usize)]| -> Result<DevBuf, CudaError> {
+            if let ([(off, len)], Some(_)) = (ranges, src.block()) {
+                return Ok(src.subview(*off, *len));
+            }
             let mut dst = DevBuf::alloc(ranges.iter().map(|r| r.1).sum::<usize>())?;
             let mut at = 0;
             for &(off, len) in ranges {
@@ -263,6 +272,20 @@ impl LayerWeights {
         };
         st.sync()?;
         Ok(out)
+    }
+
+    /// The device bytes [`LayerWeights::heads_of`] allocates for heads `[h0, h1)` when every source tensor is a view into a block (the
+    /// model's case): the heads' `conv_w` channels, `3 * (h1 - h0) * 128` channels of 4 bf16 taps. Everything else is a subview.
+    pub fn heads_of_copied_bytes(h0: usize, h1: usize) -> usize {
+        3 * (h1 - h0) * HEAD_DIM * CONV_TAPS * 2
+    }
+
+    /// Bytes of the device buffers this layer's weights hold.
+    pub fn bytes(&self) -> u64 {
+        [&self.b, &self.f_a, &self.g_a, &self.f_b, &self.g_b, &self.conv_w, &self.a_log, &self.dt_bias, &self.o_norm]
+            .iter()
+            .map(|b| b.bytes() as u64)
+            .sum()
     }
 
     pub fn view(&self) -> Weights<'_> {

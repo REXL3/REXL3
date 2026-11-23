@@ -4158,7 +4158,8 @@ fn prefill_chunk_norm_commit_fused_matches_separate_for(heads: usize, rows: usiz
     };
     assert_eq!(rc, 0, "separate commit rc={rc}");
 
-    let head_cnt = DevBuf::zeroed(heads * 4).unwrap();
+    // the per-head counters and the grid-wide one the parity flip waits on
+    let head_cnt = DevBuf::zeroed((heads + 1) * 4).unwrap();
     // the fused k.o input rotation (ko_suh/ko_xh): the separate path rotates the gated output with the same suh
     let suh_host: Vec<u16> = (0..heads * D).map(|_| bf(r.uniform(-1.0, 1.0))).collect();
     let suh = DevBuf::from_slice(&suh_host).unwrap();
@@ -4235,10 +4236,27 @@ fn prefill_chunk_norm_commit_fused_matches_separate() {
     let Some(st) = gpu() else { return };
     let mut r = Rng(0x9c1_5b84);
     for &heads in &[8usize, 64] {
-        for &rows in &[128usize, 204, 512, 1488] {
+        for &rows in &[4usize, 16, 128, 204, 512, 1488] {
             for trial in 0..2 {
                 prefill_chunk_norm_commit_fused_matches_separate_for(heads, rows, trial, &mut r, &st);
             }
+        }
+    }
+}
+
+/// X141: the fused prefill commit on small chunks, many times over, at Ling-3.1's 64 heads (a grid of 128 CTAs). Before
+/// the parity flip waited for the whole grid, a CTA dispatched after head 0's last CTA had finished read the flipped
+/// parity and ran from the wrong state half. Small chunks make every CTA short, which is when that happens. Every call
+/// must equal the separate launches. `X141_TRIALS` sets the count (default 300 per row count).
+#[test]
+#[ignore]
+fn prefill_chunk_norm_commit_fused_is_the_separate_launches_on_small_chunks_every_time() {
+    let Some(st) = gpu() else { return };
+    let trials = std::env::var("X141_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(300usize);
+    let mut r = Rng(0x0141_0141);
+    for &rows in &[4usize, 16, 48] {
+        for trial in 0..trials {
+            prefill_chunk_norm_commit_fused_matches_separate_for(64, rows, trial, &mut r, &st);
         }
     }
 }

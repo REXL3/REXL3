@@ -132,6 +132,10 @@ mod dl {
         pub get_unique_id: unsafe extern "C" fn(*mut RawId) -> i32,
         pub comm_init_rank: unsafe extern "C" fn(*mut *mut c_void, i32, RawId, i32) -> i32,
         pub all_reduce: unsafe extern "C" fn(*const c_void, *mut c_void, usize, i32, i32, *mut c_void, *mut c_void) -> i32,
+        /// `ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream)`.
+        pub all_gather: unsafe extern "C" fn(*const c_void, *mut c_void, usize, i32, *mut c_void, *mut c_void) -> i32,
+        /// `ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream)`.
+        pub reduce_scatter: unsafe extern "C" fn(*const c_void, *mut c_void, usize, i32, i32, *mut c_void, *mut c_void) -> i32,
         pub group_start: unsafe extern "C" fn() -> i32,
         pub group_end: unsafe extern "C" fn() -> i32,
         /// `ncclSend(sendbuff, count, datatype, peer, comm, stream)`
@@ -191,6 +195,8 @@ mod dl {
                 get_unique_id: sym(lib, "ncclGetUniqueId")?,
                 comm_init_rank: sym(lib, "ncclCommInitRank")?,
                 all_reduce: sym(lib, "ncclAllReduce")?,
+                all_gather: sym(lib, "ncclAllGather")?,
+                reduce_scatter: sym(lib, "ncclReduceScatter")?,
                 group_start: sym(lib, "ncclGroupStart")?,
                 group_end: sym(lib, "ncclGroupEnd")?,
                 send: sym(lib, "ncclSend")?,
@@ -653,6 +659,94 @@ impl NcclComm {
         #[cfg(gb_no_cuda)]
         {
             let _ = (st, send, recv);
+            Err(CudaError(-1))
+        }
+    }
+
+    /// Gather `rank_bytes` from the same relative position in every rank's buffer, in place, queued on `st`. Rank `r`
+    /// contributes `buf[off + r * rank_bytes .. off + (r + 1) * rank_bytes]`; after the collective every rank holds all
+    /// `ranks * rank_bytes` bytes at `off`. NCCL's in-place form uses the receive slice owned by this rank as `sendbuff`.
+    pub fn allgather_bytes(&self, buf: &mut DevBuf, off_bytes: usize, rank_bytes: usize, st: &Stream) -> Result<(), CudaError> {
+        let end = rank_bytes.checked_mul(self.ranks).and_then(|b| b.checked_add(off_bytes));
+        if end.is_none_or(|e| e > buf.bytes()) {
+            eprintln!(
+                "nccl: allgather of {rank_bytes} bytes from {} ranks at byte offset {off_bytes} does not fit a {}-byte buffer",
+                self.ranks,
+                buf.bytes()
+            );
+            return Err(CudaError(ERR_BAD_ARGUMENT));
+        }
+        if rank_bytes == 0 || self.ranks == 1 {
+            return Ok(());
+        }
+        #[cfg(not(gb_no_cuda))]
+        {
+            use core::sync::atomic::Ordering;
+            if self.aborted.load(Ordering::Acquire) {
+                return Err(CudaError(ERR_ABORTED));
+            }
+            let api = dl::api()?;
+            let recv = buf.ptr_at(off_bytes);
+            let send = buf.ptr_at(off_bytes + self.rank * rank_bytes);
+            let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: both ranges lie in `buf` (checked above); `send` is this rank's slice of `recv`, NCCL's in-place form.
+            let rc = unsafe { (api.all_gather)(send, recv, rank_bytes, dl::NCCL_UINT8, self.comm, st.raw()) };
+            let r = dl::check(api, "ncclAllGather", rc);
+            if r.is_err() {
+                self.failed.store(true, Ordering::Relaxed);
+            }
+            r
+        }
+        #[cfg(gb_no_cuda)]
+        {
+            let _ = (buf, st);
+            Err(CudaError(-1))
+        }
+    }
+
+    /// Sum `ranks * recv_count` f32 values at `off_bytes` across ranks and leave this rank's `recv_count`-element
+    /// slice at `off_bytes + rank * recv_count * 4`, in place, queued on `st`. The other slices are unspecified by NCCL.
+    pub fn reduce_scatter_sum_f32_in_place(
+        &self,
+        buf: &mut DevBuf,
+        off_bytes: usize,
+        recv_count: usize,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        let end = recv_count.checked_mul(self.ranks).and_then(|n| n.checked_mul(4)).and_then(|b| b.checked_add(off_bytes));
+        if off_bytes % 4 != 0 || end.is_none_or(|e| e > buf.bytes()) {
+            eprintln!(
+                "nccl: reduce-scatter of {recv_count} f32 from {} ranks at byte offset {off_bytes} does not fit a {}-byte buffer (or is not 4-byte aligned)",
+                self.ranks,
+                buf.bytes()
+            );
+            return Err(CudaError(ERR_BAD_ARGUMENT));
+        }
+        if recv_count == 0 || self.ranks == 1 {
+            return Ok(());
+        }
+        #[cfg(not(gb_no_cuda))]
+        {
+            use core::sync::atomic::Ordering;
+            if self.aborted.load(Ordering::Acquire) {
+                return Err(CudaError(ERR_ABORTED));
+            }
+            let api = dl::api()?;
+            let send = buf.ptr_at(off_bytes);
+            let recv = buf.ptr_at(off_bytes + self.rank * recv_count * 4);
+            let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: send covers `ranks * recv_count` f32 and recv is this rank's disjoint output slice of the same buffer;
+            // this is NCCL's supported in-place reduce-scatter form.
+            let rc = unsafe { (api.reduce_scatter)(send, recv, recv_count, dl::NCCL_FLOAT32, dl::NCCL_SUM, self.comm, st.raw()) };
+            let r = dl::check(api, "ncclReduceScatter", rc);
+            if r.is_err() {
+                self.failed.store(true, Ordering::Relaxed);
+            }
+            r
+        }
+        #[cfg(gb_no_cuda)]
+        {
+            let _ = (buf, st);
             Err(CudaError(-1))
         }
     }

@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
+/// gb-cuda's way of handing a source to nvcc, so that these kernels too compile to the same bytes in every checkout.
+#[allow(dead_code)]
+#[path = "../cuda/kernel_build.rs"]
+mod kernel_build;
+
 /// gb-cuda's base flags (crates/cuda/build.rs); per-file additions come from the file's first line.
 const NVCC_FLAGS: &[&str] = &["-c", "-O3", "--std=c++17", "-Xcompiler", "-fPIC", "-lineinfo", "-I", "csrc"];
 
@@ -55,6 +60,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(gb_quant_no_cuda)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=csrc");
+    println!("cargo:rerun-if-changed=../cuda/kernel_build.rs");
     for v in ["REXL3_NO_CUDA", "GB_NO_CUDA", "REXL3_CUDA_ARCH", "CUDA_HOME", "CUDA_PATH"] {
         println!("cargo:rerun-if-env-changed={v}");
     }
@@ -69,20 +75,26 @@ fn main() {
         fs::read_dir("csrc").map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
     sources.retain(|p| p.extension().is_some_and(|e| e == "cu"));
     sources.sort();
+    let stage = kernel_build::stage_or_warn("quant", Path::new("csrc"));
+    let cuda_bin = cuda.join("bin");
     let mut objects = Vec::new();
     for src in &sources {
         println!("cargo:rerun-if-changed={}", src.display());
         let obj = out.join(src.file_stem().unwrap()).with_extension("o");
-        let status = Command::new(&nvcc)
-            .args(NVCC_FLAGS)
-            .arg(format!("-arch={arch}"))
-            .args(extra_flags(src))
-            .arg("-o")
-            .arg(&obj)
-            .arg(src)
-            .status()
-            .expect("run nvcc");
-        assert!(status.success(), "nvcc failed on {}", src.display());
+        let extra = extra_flags(src);
+        let file = src.file_name().expect("a kernel source has a file name").to_string_lossy();
+        let ok = kernel_build::Compile {
+            nvcc: &nvcc,
+            cuda_bin: &cuda_bin,
+            stage: stage.as_deref(),
+            flags: NVCC_FLAGS,
+            arch: &arch,
+            extra: &extra,
+            file: &file,
+            object: &obj,
+        }
+        .run();
+        assert!(ok, "nvcc failed on {}", src.display());
         objects.push(obj);
     }
     if !objects.is_empty() {

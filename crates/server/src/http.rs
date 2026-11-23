@@ -891,7 +891,8 @@ struct Started {
 }
 
 /// Validate the length budget, queue the request (it waits in the engine's FIFO queue for a slot; a full queue, or a request that can
-/// never fit, is refused here with its status code), and start the task that turns engine tokens into text.
+/// never fit, is refused here with its status code), and start the task that turns engine tokens into text. `one_tool_call`
+/// (`parallel_tool_calls: false`) ends the reply at its first complete tool call.
 #[allow(clippy::too_many_arguments)]
 async fn start(
     s: &Arc<AppState>,
@@ -901,6 +902,7 @@ async fn start(
     starts_in_reasoning: bool,
     images: Vec<gb_engine::ImageSpan>,
     tools: Option<crate::tools::ToolSchemas>,
+    one_tool_call: bool,
     reasoning_budget: Option<gb_engine::ReasoningBudget>,
 ) -> Result<Started, ApiError> {
     let plen = prompt.len();
@@ -952,7 +954,14 @@ async fn start(
         let mut rs = ReasoningSplitter::with_close(starts_in_reasoning, reasoning_caps.close());
         let mut thinking = ReasoningCount::new(starts_in_reasoning, reasoning_caps.close_id);
         let mut stopper = StopMatcher::new(stops);
-        let mut tool_split = tools.map(|t| format.tool_splitter(t));
+        let mut tool_split = tools.map(|t| {
+            let split = format.tool_splitter(t);
+            if one_tool_call {
+                split.at_most_one_call()
+            } else {
+                split
+            }
+        });
         let mut n_calls = 0usize;
         let mut n_tokens = 0usize;
         let mut decoded_bytes = 0usize;
@@ -1004,8 +1013,20 @@ async fn start(
                         None => (split.content, Vec::new()),
                     };
                     n_calls += calls.len();
-                    let (content, hit) = stopper.push(&visible);
+                    let (mut content, hit) = stopper.push(&visible);
+                    // the first call under `parallel_tool_calls: false` ends the reply here: the text the stop matcher still holds
+                    // back (in case it begins a stop string) is the end of the reply's text, not a match
+                    if one_tool_call && !hit && n_calls > 0 && tool_split.as_ref().is_some_and(|t| t.is_closed()) {
+                        content.push_str(&stopper.finish());
+                    }
                     let ids = if want_ids { ids } else { Vec::new() };
+                    // a closed DSML calls block ends the reply here (`dsml_done` below), before the engine's own end: the text the
+                    // stop matcher still holds back (in case it begins a stop string) is the end of the reply's text, not a match
+                    let content = if !hit && n_calls > 0 && tool_split.as_ref().is_some_and(|t| t.is_closed()) {
+                        content + &stopper.finish()
+                    } else {
+                        content
+                    };
                     if (!split.reasoning.is_empty() || !content.is_empty() || !ids.is_empty() || !calls.is_empty())
                         && otx
                             .send_wait(Out::Text { reasoning: split.reasoning, content, ids, calls }, deadline, stall)
@@ -1015,6 +1036,7 @@ async fn start(
                         handle.cancel(ticket); // the client left
                         return;
                     }
+                    // a closed DSML calls block, or the first call under `parallel_tool_calls: false`, ends the reply
                     let dsml_done = tool_split.as_ref().is_some_and(|t| t.is_closed()) && n_calls > 0;
                     if hit || dsml_done {
                         stopped_by_string = true;
@@ -1543,6 +1565,8 @@ async fn chat(
         Err(e) => return err(e),
     };
     let tool_schemas = crate::tools::ToolSchemas::from_request(body);
+    // already type-checked with the other fields (`field_policy::validate_fields_with`); absent or null means true
+    let one_tool_call = !crate::field_policy::boolean(body, "parallel_tool_calls", true).unwrap_or(true);
     drop(request);
     drop(lease);
     let Started { mut rx, plen, guard, failure_hook } = match start(
@@ -1553,6 +1577,7 @@ async fn chat(
         in_reasoning,
         images,
         tool_schemas,
+        one_tool_call,
         reasoning_budget,
     )
     .await
@@ -1741,21 +1766,56 @@ fn top_k_under(row: &[f32], lse: f64, k: usize) -> Vec<(f32, u32)> {
     lps
 }
 
+/// A finished teacher-forced readout in either form the engine returns it: row `i` is the logits after the prompt's tokens
+/// `0..=i`, so it predicts token `i + 1`.
+#[derive(Clone, Copy)]
+enum Readout<'a> {
+    /// Full rows; the log-softmax is taken here.
+    Rows(&'a [Vec<f32>]),
+    /// Rows reduced on the device ([`gb_engine::score::RowRecords`]): the normaliser, the next token's logit and the top
+    /// logits of each row.
+    Records(&'a gb_engine::score::RowRecords),
+}
+
+impl Readout<'_> {
+    fn rows(&self) -> usize {
+        match self {
+            Readout::Rows(r) => r.len(),
+            Readout::Records(r) => r.rows(),
+        }
+    }
+    /// [`scored_position`] of `token` (the prompt token after row `row`) with the row's top `k`.
+    fn position(&self, row: usize, token: u32, k: usize) -> Result<(f32, Vec<(f32, u32)>), ApiError> {
+        let rec = match self {
+            Readout::Rows(r) => return scored_position(&r[row], token, k),
+            Readout::Records(r) => r,
+        };
+        let (lse, own) = (rec.lse[row] as f64, rec.chosen[row]);
+        let at = row * rec.k..row * rec.k + k.min(rec.k);
+        let (ids, logits) = match (rec.top_ids.get(at.clone()), rec.top_logits.get(at)) {
+            (Some(i), Some(l)) if rec.chosen.len() == rec.rows() && lse.is_finite() && own.is_finite() => (i, l),
+            _ => return Err(ApiError::status(500, "server_error", "the engine returned a non-finite logits row")),
+        };
+        // one normaliser for the token and the top entries, so a token among them has exactly its top value
+        Ok(((own as f64 - lse) as f32, logits.iter().zip(ids).map(|(&v, &t)| ((v as f64 - lse) as f32, t)).collect()))
+    }
+}
+
 /// The `logprobs` object and the `prompt_logprobs` entries of a teacher-forced readout of `ids`. `rows[i]` is the logits
 /// row after `ids[..=i]`: it predicts `ids[i + 1]`. So position `i >= 1` reports `ids[i]` with its exact log-softmax under
 /// `rows[i - 1]` and that row's top `k`; position 0 has no conditioning prefix and is null; the last row predicts past the
 /// prompt and is not reported (vLLM's prompt-logprobs convention). Every array has one entry per prompt token.
 fn prompt_logprobs_body(
-    rows: &[Vec<f32>],
+    rows: Readout<'_>,
     ids: &[u32],
     k: usize,
     piece: impl Fn(u32) -> String,
 ) -> Result<(Value, Vec<Value>), ApiError> {
-    if rows.len() != ids.len() {
+    if rows.rows() != ids.len() {
         return Err(ApiError::status(
             500,
             "server_error",
-            format!("the engine returned {} logits rows for {} prompt tokens", rows.len(), ids.len()),
+            format!("the engine returned {} logits rows for {} prompt tokens", rows.rows(), ids.len()),
         ));
     }
     let n = ids.len();
@@ -1778,7 +1838,7 @@ fn prompt_logprobs_body(
             entries.push(json!({"position": 0, "token_id": null, "logprob": null, "top_ids": [], "top_logprobs": []}));
             continue;
         }
-        let (own, lps) = scored_position(&rows[i - 1], tok, k)?;
+        let (own, lps) = rows.position(i - 1, tok, k)?;
         let top_ids: Vec<u32> = lps.iter().map(|x| x.1).collect();
         let top_vals: Vec<f32> = lps.iter().map(|x| x.0).collect();
         tokens.push(json!(text));
@@ -1833,7 +1893,8 @@ async fn prompt_logprobs(
         }
     };
     drop(guard);
-    let (logprobs, entries) = match prompt_logprobs_body(&row.logits_rows, &ids, k, |t| s.tok.decode(&[t], true)) {
+    let readout = row.records.as_ref().map_or(Readout::Rows(&row.logits_rows), Readout::Records);
+    let (logprobs, entries) = match prompt_logprobs_body(readout, &ids, k, |t| s.tok.decode(&[t], true)) {
         Ok(x) => x,
         Err(e) => return err(e),
     };
@@ -1916,11 +1977,22 @@ async fn completions(
     if p.prompt_logprobs > 0 {
         return prompt_logprobs(&s, ids, &model, p.prompt_logprobs, deadline, s.max_model_len).await;
     }
-    let Started { mut rx, guard, failure_hook, .. } =
-        match start(&s, (arrival, RequestDeadline(deadline, failure_hook)), ids, &p, false, Vec::new(), None, None).await {
-            Ok(x) => x,
-            Err(e) => return err(e.for_field("prompt")),
-        };
+    let Started { mut rx, guard, failure_hook, .. } = match start(
+        &s,
+        (arrival, RequestDeadline(deadline, failure_hook)),
+        ids,
+        &p,
+        false,
+        Vec::new(),
+        None,
+        false,
+        None,
+    )
+    .await
+    {
+        Ok(x) => x,
+        Err(e) => return err(e.for_field("prompt")),
+    };
     let id = format!("cmpl-{:x}", rand_id());
     let created = api::now();
     if p.stream {
@@ -2033,7 +2105,7 @@ mod tests {
             let z: f64 = row.iter().map(|&v| (v as f64).exp()).sum();
             row[t as usize] as f64 - z.ln()
         };
-        let (lp, entries) = prompt_logprobs_body(&rows, &ids, 2, |t| format!("<{t}>")).unwrap();
+        let (lp, entries) = prompt_logprobs_body(Readout::Rows(&rows), &ids, 2, |t| format!("<{t}>")).unwrap();
         assert_eq!(entries.len(), ids.len());
         for key in ["tokens", "token_ids", "token_logprobs", "top_logprobs", "text_offset"] {
             assert_eq!(lp[key].as_array().unwrap().len(), ids.len(), "{key}: one entry per prompt token");
@@ -2059,21 +2131,56 @@ mod tests {
         // the last row is never read: another (even a non-finite) last row gives the same body
         let mut other = rows.clone();
         other[3] = vec![f32::NAN; 6];
-        assert_eq!(prompt_logprobs_body(&other, &ids, 2, |t| format!("<{t}>")).unwrap(), (lp, entries));
+        assert_eq!(
+            prompt_logprobs_body(Readout::Rows(&other), &ids, 2, |t| format!("<{t}>")).unwrap(),
+            (lp.clone(), entries.clone())
+        );
         // a one-token prompt has one null position and reads no row
-        let (one, e1) = prompt_logprobs_body(&[vec![f32::NAN; 6]], &[3], 2, |_| "x".into()).unwrap();
+        let (one, e1) = prompt_logprobs_body(Readout::Rows(&[vec![f32::NAN; 6]]), &[3], 2, |_| "x".into()).unwrap();
         assert_eq!((one["token_logprobs"].clone(), e1.len()), (json!([null]), 1));
+        // the compact form of the same rows gives the same body: the same keys, tokens, ids and order, the values to f32 rounding
+        let rec = gb_engine::score::RowRecords::from_rows(&rows, &ids);
+        let (clp, centries) = prompt_logprobs_body(Readout::Records(&rec), &ids, 2, |t| format!("<{t}>")).unwrap();
+        let near = |a: &Value, b: &Value| (a.as_f64().unwrap() - b.as_f64().unwrap()).abs() < 1e-6;
+        for key in ["tokens", "token_ids", "text_offset"] {
+            assert_eq!(clp[key], lp[key], "{key}");
+        }
+        assert_eq!(centries[0], entries[0]);
+        for i in 1..ids.len() {
+            let (c, e) = (&centries[i], &entries[i]);
+            assert_eq!((&c["position"], &c["token_id"], &c["top_ids"]), (&e["position"], &e["token_id"], &e["top_ids"]));
+            assert!(near(&c["logprob"], &e["logprob"]) && near(&clp["token_logprobs"][i], &lp["token_logprobs"][i]));
+            for j in 0..2 {
+                assert!(near(&c["top_logprobs"][j], &e["top_logprobs"][j]), "position {i} top {j}");
+                let id = e["top_ids"][j].to_string();
+                assert!(near(&clp["top_logprobs"][i][&id], &lp["top_logprobs"][i][&id]));
+            }
+            assert_eq!(clp["top_logprobs"][i].as_object().unwrap().len(), 2);
+        }
+        assert_eq!(centries[1]["logprob"], centries[1]["top_logprobs"][0], "a token among the top has exactly its top value");
+        // more entries asked for than the records carry: every one they have (the full-row form is bounded by the vocabulary)
+        let (_, all) = prompt_logprobs_body(Readout::Records(&rec), &ids, 20, |_| String::new()).unwrap();
+        assert_eq!(all[1]["top_ids"].as_array().unwrap().len(), 6);
     }
 
     #[test]
     fn a_prompt_readout_refuses_rows_it_cannot_score() {
         let ids = [1u32, 2, 3];
         let good = vec![vec![0.0f32, 1.0, 2.0, 3.0]; 3];
-        assert!(prompt_logprobs_body(&good[..2], &ids, 1, |_| String::new()).is_err(), "one row per prompt token");
+        assert!(prompt_logprobs_body(Readout::Rows(&good[..2]), &ids, 1, |_| String::new()).is_err(), "one row per prompt token");
         let mut nan = good.clone();
         nan[1][0] = f32::INFINITY;
-        assert!(prompt_logprobs_body(&nan, &ids, 1, |_| String::new()).is_err(), "a non-finite row that scores a token");
-        assert!(prompt_logprobs_body(&good, &[1, 9, 3], 1, |_| String::new()).is_err(), "a token outside the row");
+        assert!(
+            prompt_logprobs_body(Readout::Rows(&nan), &ids, 1, |_| String::new()).is_err(),
+            "a non-finite row that scores a token"
+        );
+        assert!(prompt_logprobs_body(Readout::Rows(&good), &[1, 9, 3], 1, |_| String::new()).is_err(), "a token outside the row");
+        // the compact form refuses the same: a row short, a non-finite normaliser, a token outside the row (its logit is -inf)
+        let rec = |rows: &[Vec<f32>], ids: &[u32]| gb_engine::score::RowRecords::from_rows(rows, ids);
+        assert!(prompt_logprobs_body(Readout::Records(&rec(&good[..2], &ids)), &ids, 1, |_| String::new()).is_err());
+        assert!(prompt_logprobs_body(Readout::Records(&rec(&nan, &ids)), &ids, 1, |_| String::new()).is_err());
+        assert!(prompt_logprobs_body(Readout::Records(&rec(&good, &[1, 9, 3])), &[1, 9, 3], 1, |_| String::new()).is_err());
+        assert!(prompt_logprobs_body(Readout::Records(&rec(&good, &ids)), &ids, 1, |_| String::new()).is_ok());
     }
 
     #[test]

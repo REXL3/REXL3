@@ -7,6 +7,24 @@ use crate::rows::RowBatch;
 use gb_engine::ProposeRequest;
 use gb_sampling::Sampling;
 
+/// `pack_header_fingerprint_of` of the pack in `dir`, scanned here (a boot passes the scan it already has).
+fn pack_header_fingerprint(dir: &Path) -> Result<String, ModelError> {
+    let ck = scan(dir, true).map_err(|e| ModelError::Config(format!("pack fingerprint: {e}")))?;
+    pack_header_fingerprint_of(dir, &ck)
+}
+
+/// The pack gate as a boot runs it, from a fresh scan of `dir`: `validate_scanned_pack_before_load`, its packs left out.
+fn validate_pack_before_load<T>(
+    dir: &Path,
+    draft_dir: Option<&Path>,
+    allow_unvalidated: bool,
+    load: impl FnOnce() -> Result<T, ModelError>,
+) -> Result<(T, String), ModelError> {
+    let ck = scan(dir, true).map_err(|e| crate::pack::PackError::Io(e.to_string()))?;
+    let (loaded, target, ..) = validate_scanned_pack_before_load(ck, draft_dir, allow_unvalidated, load)?;
+    Ok((loaded, target))
+}
+
 #[test]
 fn planning_holds_back_weights_without_reserving_the_reclaimable_warm_table() {
     const G: u64 = 1 << 30;
@@ -631,6 +649,35 @@ fn draft_head_plan_bytes_refuses_a_missing_or_narrow_lm_head() {
         },
     );
     assert!(draft_head_plan_bytes(&groups, 248_320).is_err(), "head narrower than the candidate domain must fail closed");
+}
+
+/// The DFlash2 restricted sub-head is priced as exactly the strip copy, logits and workspace it allocates.
+#[test]
+fn dflash_sub_head_plan_matches_its_allocated_parts() {
+    use gb_exl3::{Bits, Codebook};
+    use std::collections::BTreeMap;
+    let mut groups = BTreeMap::new();
+    groups.insert(
+        "lm_head".into(),
+        crate::families::qwen_flash_next::weights::Exl3Group {
+            prefix: "lm_head".into(),
+            k: 2560,
+            n: 248_320,
+            bits: Bits::from_twice(10).unwrap(),
+            codebook: Codebook::Inst3,
+        },
+    );
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/qwen_flash_next");
+    let cfg = FlashNextConfig::from_dir(&dir).unwrap();
+    let planned = dflash_sub_head_plan_bytes(&groups, &cfg, 2, crate::draft::BLOCK).unwrap() as usize;
+    let ranges = crate::costs::DraftVocab::Auto.ranges().unwrap();
+    let strips = crate::draft::vocab_strips(&ranges, 248_320).unwrap();
+    let columns: usize = strips.iter().map(|&(lo, hi)| (hi - lo) * 128).sum();
+    let max_rows = 2 * (crate::draft::BLOCK - 1);
+    let allocated = crate::families::qwen_flash_next::model::draft_head_prefix_bytes(2560, columns, 5)
+        + max_rows * columns * 2
+        + gb_cuda::exl3_linear::linear_workspace_bytes(max_rows, cfg.hidden, columns, 5);
+    assert_eq!(planned, allocated);
 }
 
 /// The KV plan is sized after the draft-head bytes: `free_after_load` sees the full weight

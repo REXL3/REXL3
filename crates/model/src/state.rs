@@ -7,11 +7,12 @@
 
 use crate::config::QwenConfig;
 use crate::error::ModelError;
-use gb_cuda::gdn::{CONV_SLOT_ELEMS, S_SLOT_ELEMS};
+use gb_cuda::gdn::GdnShape;
 use gb_cuda::DevBuf;
 
 pub struct GdnPools {
     pub slots: usize,
+    pub shape: GdnShape,
     /// f32 `[slots][48][128][128]`, one buffer per linear layer in layer order.
     pub s: Vec<DevBuf>,
     /// bf16 `[slots][3][10240]`, one per linear layer.
@@ -30,34 +31,29 @@ impl GdnPools {
     }
 
     fn alloc(c: &QwenConfig, slots: usize, zero: bool) -> Result<Self, ModelError> {
-        if c.lin_value_heads * c.lin_value_dim * c.lin_key_dim != S_SLOT_ELEMS
-            || (c.conv_kernel - 1) * c.conv_channels() != CONV_SLOT_ELEMS
-        {
-            return Err(ModelError::Config(
-                "the GDN kernels are compiled for 48 x 128 x 128 state and 3 x 10240 conv history".into(),
-            ));
-        }
+        let shape = c.gdn_shape().map_err(ModelError::Config)?;
         let n = c.linear_layers();
         let mut s = Vec::with_capacity(n);
         let mut conv = Vec::with_capacity(n);
         for _ in 0..n {
             if zero {
-                s.push(DevBuf::zeroed(slots * S_SLOT_ELEMS * 4)?);
-                conv.push(DevBuf::zeroed(slots * CONV_SLOT_ELEMS * 2)?);
+                s.push(DevBuf::zeroed(slots * shape.s_slot_elems() * 4)?);
+                conv.push(DevBuf::zeroed(slots * shape.conv_slot_elems() * 2)?);
             } else {
-                s.push(DevBuf::alloc(slots * S_SLOT_ELEMS * 4)?);
-                conv.push(DevBuf::alloc(slots * CONV_SLOT_ELEMS * 2)?);
+                s.push(DevBuf::alloc(slots * shape.s_slot_elems() * 4)?);
+                conv.push(DevBuf::alloc(slots * shape.conv_slot_elems() * 2)?);
             }
         }
-        Ok(Self { slots, s, conv })
+        Ok(Self { slots, shape, s, conv })
     }
 
     /// Zero one slot's state in every layer (a new sequence starts from a zero state).
     pub fn reset_slot(&mut self, slot: usize, st: &gb_cuda::Stream) -> Result<(), ModelError> {
         assert!(slot < self.slots);
+        let (sb, cb) = (self.shape.s_slot_elems() * 4, self.shape.conv_slot_elems() * 2);
         for (s, conv) in self.s.iter_mut().zip(self.conv.iter_mut()) {
-            zero_range(s, slot * S_SLOT_ELEMS * 4, S_SLOT_ELEMS * 4, st)?;
-            zero_range(conv, slot * CONV_SLOT_ELEMS * 2, CONV_SLOT_ELEMS * 2, st)?;
+            zero_range(s, slot * sb, sb, st)?;
+            zero_range(conv, slot * cb, cb, st)?;
         }
         Ok(())
     }

@@ -472,7 +472,7 @@ impl NemotronMemory {
         let allowance = rows.saturating_mul(TOPK_ALLOWANCE_PER_ROW);
         let tp = if self.tp_ranks >= 2 { self.tp_scratch_bytes(rows, self.attn_layers > 0) } else { 0 };
         ScratchBytes {
-            activations: rows.saturating_mul(per_row).saturating_add(tp),
+            activations: rows.saturating_mul(per_row).saturating_add(tp).saturating_add(WINDOW_ROWS as u64 * 4),
             topk_workspace: allowance.max(topk_workspace_bytes(r, vocab, MAX_CANDIDATES) as u64),
             moe: MoeScratch::bytes(r.min(WINDOW_ROWS))
                 + if r > WINDOW_ROWS { PrefillScratch::bytes(r) } else { 0 }
@@ -606,7 +606,7 @@ impl NemotronMemory {
             window_records: profile.window_record_bytes(),
             scratch: self.scratch_for(rows, opts.max_context as u64, opts.mtp, opts.window_rows as u64),
             engine_reserve: profile.engine_reserve_bytes(),
-            mtp_head: opts.mtp.then(|| self.mtp_head_for_window(WINDOW_ROWS as u64, opts.window_rows as u64)),
+            mtp_head: opts.mtp.then(|| self.mtp_head_for_window(rows, opts.window_rows as u64)),
         })
     }
 }
@@ -917,6 +917,7 @@ mod tests {
         let single = mem().scratch(64, 8192);
         let rank = mem().with_tp_rank().scratch(64, 8192);
         assert_eq!(rank.activations, single.activations + mem().tp_scratch_bytes(64, true));
+        assert_eq!(single.activations, 64 * 790_016 + 64 * 4, "the fixed chosen-id tile is priced beside the row buffers");
         assert_eq!(
             (rank.topk_workspace, rank.moe, rank.attn_partials),
             (single.topk_workspace, single.moe, single.attn_partials)
@@ -935,7 +936,7 @@ mod tests {
         let total: u64 = per_row.iter().map(|(_, b)| b).sum();
         assert_eq!(total, 790_016);
         let s = m.scratch(64, 262_144);
-        assert_eq!(s.activations, 64 * 790_016);
+        assert_eq!(s.activations, 64 * 790_016 + 64 * 4);
         assert_eq!(s.moe, MoeScratch::bytes(64));
         assert!((90_000_000..=110_000_000).contains(&s.moe), "about 100 MB at 64 rows: {}", s.moe);
         assert_eq!(
@@ -1065,6 +1066,17 @@ mod tests {
             big.scratch_bytes() + big.window_record_bytes()
         );
         assert_eq!(big.engine_reserve_bytes(), ACTIVATION_RESERVE);
+    }
+
+    #[test]
+    fn a_wide_step_budget_prices_the_mtp_head_at_the_same_rows_as_its_scratch() {
+        let m = mem();
+        let o = MemoryOptions { prefill_rows: 256, ..mtp_opts() };
+        let b = m.budget(&o, 2, 1 << 20).unwrap();
+        let h = m.mtp_head_for_window(256, o.window_rows as u64);
+        assert_eq!(b.mtp_head, Some(h));
+        assert_eq!(b.scratch.mtp_head, h.scratch());
+        assert!(h.scratch() > m.mtp_head().scratch());
     }
 
     #[test]

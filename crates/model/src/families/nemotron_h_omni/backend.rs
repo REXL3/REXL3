@@ -30,6 +30,22 @@ pub struct ModelOptions {
 pub trait NemotronRuntime {
     fn vocab_size(&self) -> usize;
     fn has_mtp(&self) -> bool;
+    /// Whether this runtime implements compact per-row prefill readout (the single-node model does).
+    fn row_records_supported(&self) -> bool {
+        false
+    }
+    /// Run one prefill slice and append its compact prompt records. The final full row is returned only when requested.
+    fn prefill_readout(
+        &mut self,
+        _slot: usize,
+        _start: usize,
+        _tokens: &[u32],
+        _chosen: &[i32],
+        _need_last_logits: bool,
+        _out: &mut gb_engine::score::RowRecords,
+    ) -> Result<Vec<f32>, ModelError> {
+        Err(ModelError::NotBuilt("nemotron prompt row readout".into()))
+    }
     /// The form of the loaded MTP head's projections, which keys the arbiter's draft-call tables (`spec::CostTables::shipped_for`):
     /// bf16 unless the runtime holds a 4-bit head.
     fn head_form(&self) -> super::spec::HeadForm {
@@ -175,6 +191,7 @@ use super::model::NemotronModel;
 use super::prefix;
 use super::spec::{CostTables, SpecConfig, SpecRuntime};
 use super::vision::{plan_splice, NemotronImageFeatures, SpliceOp};
+use gb_engine::score::RowRecords;
 use gb_engine::{
     Backend, BackendError, CacheBudget, Captured, CutStep, ImageSpan, PrefillJob, PrefillStep, PrefixCaps, Proposal,
     ProposeRequest, RowOutput, RowRequest,
@@ -324,6 +341,8 @@ pub struct NemotronBackend<M: NemotronRuntime = NemotronModel> {
     fuse_decode: bool,
     live: BTreeSet<usize>,
     windows: BTreeMap<usize, usize>,
+    /// Compact readout state is per slot: interleaved requests never share an accumulator.
+    records: BTreeMap<usize, RowRecords>,
     error: Option<BackendError>,
     fatal: Option<BackendError>,
     /// The drafters and their telemetry; `None`: the backend offers no drafts of its own.
@@ -369,6 +388,7 @@ impl<M: NemotronRuntime> NemotronBackend<M> {
             fuse_decode: false,
             live: BTreeSet::new(),
             windows: BTreeMap::new(),
+            records: BTreeMap::new(),
             error: None,
             fatal: None,
             spec: None,
@@ -478,6 +498,7 @@ impl<M: NemotronRuntime> NemotronBackend<M> {
     /// left alone, as it cannot be trusted to answer.
     fn drop_slot(&mut self, slot: usize) {
         self.windows.remove(&slot);
+        self.records.remove(&slot);
         self.slot_images.remove(&slot);
         if let Some(s) = self.spec.as_mut() {
             s.end(slot);
@@ -574,6 +595,26 @@ impl<M: NemotronRuntime> NemotronBackend<M> {
             )));
         }
         row_of(&c, 0, n).map(Some)
+    }
+
+    /// One text slice of a prompt readout. The ordinary prefill grid and trunk arithmetic are unchanged; MTP and snapshots do not run.
+    fn score_slice_inner(&mut self, slot: usize, prompt: &[u32], done: usize) -> Result<gb_engine::score::ScoreStep, ModelError> {
+        let n = prompt.len();
+        if done >= n {
+            return Err(ModelError::Request("empty or completed score slice".into()));
+        }
+        if done == 0 {
+            self.begin(slot)?;
+        } else {
+            self.resume(slot, done)?;
+        }
+        self.m.flush()?;
+        let end = next_chunk_end(done, n, self.effective_chunk());
+        let chosen: Vec<i32> = (done..end).map(|i| prompt.get(i + 1).map_or(-1, |&t| t as i32)).collect();
+        let NemotronBackend { m, records, .. } = self;
+        let out = records.get_mut(&slot).ok_or_else(|| ModelError::Request("no readout was begun in this slot".into()))?;
+        let row = m.prefill_readout(slot, done, &prompt[done..end], &chosen, end == n, out)?;
+        Ok(gb_engine::score::ScoreStep { done: end, row: (end == n).then_some(row), captured: Vec::new() })
     }
 
     /// A piece of a prompt of `total` tokens, cut on the absolute grid. The final slice of the piece asks for candidates.
@@ -871,6 +912,42 @@ impl<M: NemotronRuntime> NemotronBackend<M> {
 }
 
 impl<M: NemotronRuntime> Backend for NemotronBackend<M> {
+    fn score_rows_supported(&self) -> bool {
+        self.m.row_records_supported()
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        self.records.remove(&slot);
+        if all_rows && self.m.row_records_supported() {
+            self.records.insert(slot, RowRecords::new(gb_engine::score::RECORD_TOP.min(self.m.vocab_size())));
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<RowRecords> {
+        self.records.remove(&slot)
+    }
+    fn score_slice(
+        &mut self,
+        slot: usize,
+        prompt: &[u32],
+        done: usize,
+        _cuts: &[usize],
+    ) -> Result<gb_engine::score::ScoreStep, BackendError> {
+        if let Some(e) = self.fatal.clone() {
+            return Err(e);
+        }
+        if !self.records.contains_key(&slot) {
+            return Err(gb_engine::score::unsupported_backend());
+        }
+        self.score_slice_inner(slot, prompt, done).map_err(|e| {
+            self.records.remove(&slot);
+            if e.is_fatal() {
+                self.record(&format!("prompt readout of slot {slot}"), &e);
+            } else if !self.dead() {
+                self.drop_slot(slot);
+            }
+            self.fatal.clone().unwrap_or_else(|| BackendError::retryable(format!("prompt readout of slot {slot}: {e}")))
+        })
+    }
+
     /// Slices are at most 64 rows, so a limit of 128 rows (the only one the engine asks for) is met without change; a smaller limit
     /// puts the slices on a finer grid, which the runtime's row invariance makes exact.
     fn set_prefill_row_limit(&mut self, rows: Option<usize>) -> bool {

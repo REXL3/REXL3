@@ -1,4 +1,5 @@
 #include "common.cuh"
+#include "cuda_caps.cuh"
 #include "roce_dev.cuh"
 
 #include <stddef.h>
@@ -252,8 +253,8 @@ __global__ void __launch_bounds__(512) roce_bulk_k(GbRoceDev d, GbRoceSite s, co
 // Launch the standalone exchange at `site` on `stream`. src: this rank's bytes (device or host-mapped memory; may be its own half of
 // the site's current parity for zero-copy, or null when it already wrote that half), dst: where the result goes (null: nowhere).
 // send / recv: this rank's and the peer's message bytes (both <= site cap); stride: the rank stride of a gather's dst; mode: 0 gather,
-// 1 swap, 2 f32 sum, 3 none; sms: the device's SM count; bulk_blocks: blocks of a bulk (chunked) exchange. Launched with PDL. Returns a
-// cudaError_t (0 on success).
+// 1 swap, 2 f32 sum, 3 none; sms: the device's SM count; bulk_blocks: blocks of a bulk (chunked) exchange. Launched with PDL only
+// when both the device and the compiled architecture support it. Returns a cudaError_t (0 on success).
 extern "C" int gb_roce_exchange(const GbRoceDev* d, const GbRoceSite* s, const void* src, void* dst, uint64_t send, uint64_t recv,
                                 uint64_t stride, int mode, int sms, int bulk_blocks, void* stream) {
     if (send > s->cap || recv > s->cap || send == 0 || recv == 0) return (int)cudaErrorInvalidValue;
@@ -280,7 +281,7 @@ extern "C" int gb_roce_exchange(const GbRoceDev* d, const GbRoceSite* s, const v
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr;
-    cfg.numAttrs = 1;
+    cfg.numAttrs = gbx_cuda::device_supports_pdl() ? 1 : 0;
     const char* source = static_cast<const char*>(src);
     char* out = static_cast<char*>(dst);
     const cudaError_t e = bulk ? cudaLaunchKernelEx(&cfg, roce_bulk_k, *d, *s, source, out, send, recv, stride, mode)

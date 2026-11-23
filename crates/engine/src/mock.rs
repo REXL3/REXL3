@@ -79,13 +79,19 @@ pub struct MockOptions {
     /// Score like a backend that reads out only the prompt's last row (`Backend::score_rows_supported` false), so a
     /// `prompt_logprobs` readout is refused.
     pub last_row_only: bool,
+    /// Answer a `prompt_logprobs` readout in the compact form (`Backend::take_score_records`), as a backend that reduces
+    /// each row on the device does, instead of with full rows.
+    pub compact_rows: bool,
+    /// Serve the `prompt_logprobs` readout only (`Backend::score_supported` false, `score_rows_supported` true).
+    pub readout_only: bool,
 }
 
 impl MockOptions {
     /// `key=value,key=value`: `step_ms`, `prefill_ms`, `slice`, `vocab`, `panic_step`, `fatal_step`, `retry_step` (with
     /// `retry_count`, default 1), `panic_prefill`, `poison` (a token id), `panic_boot` (1: panic while building the engine),
     /// `prefix_cache` (entries of a prefix cache), `graphs` (1: report graph-cache counters), `prefill_floor_us` (a prefill floor a token),
-    /// `last_row_only` (1: score the prompt's last row only, refusing `prompt_logprobs`).
+    /// `last_row_only` (1: score the prompt's last row only, refusing `prompt_logprobs`), `compact_rows` (1: answer the
+    /// readout in the compact form), `readout_only` (1: serve the readout but not last-row scoring).
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut o = Self::default();
         for kv in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -111,6 +117,8 @@ impl MockOptions {
                 "graphs" => o.graphs = n != 0,
                 "prefill_floor_us" => o.prefill_floor_us = n,
                 "last_row_only" => o.last_row_only = n != 0,
+                "compact_rows" => o.compact_rows = n != 0,
+                "readout_only" => o.readout_only = n != 0,
                 _ => return Err(format!("--mock: unknown option `{k}`")),
             }
         }
@@ -134,6 +142,12 @@ impl MockOptions {
         }
         if self.last_row_only {
             b = b.with_last_row_scores_only();
+        }
+        if self.compact_rows {
+            b = b.with_compact_score_rows();
+        }
+        if self.readout_only {
+            b = b.with_readout_only();
         }
         if self.prefix_cache > 0 {
             let units = self.prefix_cache;
@@ -312,6 +326,15 @@ struct MockCache {
     fault: PrefixFault,
     /// A pool-page cache (`with_pool_prefix_cache`): entries live in the KV pool's idle pages, reported by `prefix_pool_room`.
     pool: bool,
+    /// Faithfully run out of pages: a capture is skipped (returns `None`) when the entries already hold so many distinct pages that the
+    /// new snapshot would exceed the budget's page block — as the real backends' block pools do. Off: captures always succeed page-wise (the
+    /// pool is oversized), so only the index's page budget bites, at insert time.
+    strict_pages: bool,
+    /// Distinct pages the entries hold, and how many entries hold each (a capture shares pages with its slot; several captures of one prompt
+    /// share pages with each other).
+    held: std::collections::HashMap<u32, u32>,
+    /// Distinct pages held (the sum's size).
+    held_pages: usize,
 }
 
 pub struct MockBackend {
@@ -360,6 +383,12 @@ pub struct MockBackend {
     score_rows: Vec<Vec<f32>>,
     /// Score like a backend that reads out only the prompt's last row (`Backend::score_rows_supported` false).
     last_row_only: bool,
+    /// Answer a readout with [`crate::score::RowRecords`] per slot instead of full rows: the slots a readout is in flight
+    /// in (`Backend::score_begin`), with the records of the ones that finished.
+    compact_rows: bool,
+    records: std::collections::BTreeMap<usize, Option<crate::score::RowRecords>>,
+    /// Serve the readout but not last-row scoring.
+    readout_only: bool,
 }
 
 /// What the GLM shape keeps per slot outside the pages.
@@ -401,7 +430,20 @@ impl MockBackend {
             score_rows_on: false,
             score_rows: Vec::new(),
             last_row_only: false,
+            compact_rows: false,
+            records: Default::default(),
+            readout_only: false,
         }
+    }
+    /// Answer a `prompt_logprobs` readout in the compact form (`Backend::take_score_records`), kept per slot.
+    pub fn with_compact_score_rows(mut self) -> Self {
+        self.compact_rows = true;
+        self
+    }
+    /// Serve the readout only: `Backend::score_supported` false, `Backend::score_rows_supported` true.
+    pub fn with_readout_only(mut self) -> Self {
+        self.readout_only = true;
+        self
     }
     /// State a lower bound on prefill time (`Backend::prefill_floor`) of `per_token` a prompt token, as a family with measured rates does.
     /// Score like a backend whose readout is the prompt's last row only (`Backend::score_rows_supported` false).
@@ -430,6 +472,9 @@ impl MockBackend {
             snaps: (0..budget.snapshot_slots).map(|_| None).collect(),
             fault,
             pool: false,
+            strict_pages: false,
+            held: std::collections::HashMap::new(),
+            held_pages: 0,
         });
         self.deep = true;
         self
@@ -447,6 +492,9 @@ impl MockBackend {
             snaps: (0..snapshot_slots).map(|_| None).collect(),
             fault,
             pool: true,
+            strict_pages: false,
+            held: std::collections::HashMap::new(),
+            held_pages: 0,
         });
         self.deep = true;
         self
@@ -454,6 +502,14 @@ impl MockBackend {
     /// Free pages of the paged KV (0 without one).
     pub fn free_pages(&self) -> usize {
         self.kv.as_ref().map_or(0, |k| k.free.len())
+    }
+    /// [`MockBackend::with_prefix_cache`] where a capture also runs out of pages when the entries already hold the whole page budget
+    /// (the real backends' block-pool behavior; the engine's page-aware planning exists to make room before that happens).
+    pub fn with_strict_cache_pages(mut self) -> Self {
+        if let Some(c) = self.cache.as_mut() {
+            c.strict_pages = true;
+        }
+        self
     }
     /// Drafts come from the draft context ring (kept like the real draft's: prompt rows from `total - 2064`, accepted rows as they commit).
     pub fn with_native_draft(mut self) -> Self {
@@ -617,9 +673,22 @@ impl MockBackend {
         let snap = cache.snaps.iter().position(|s| s.is_none())?;
         let kv = self.kv.as_mut()?;
         let pages: Vec<u32> = kv.tables[slot][..len.div_ceil(MOCK_PAGE)].to_vec();
+        // the block pool is short: skip the cut (the prompt still prefills uncached), as the real backends do when their pool has no free
+        // blocks
+        if cache.strict_pages {
+            let new_pages = pages.iter().filter(|p| !cache.held.contains_key(p)).count();
+            if cache.held_pages + new_pages > cache.caps.budget.page_blocks {
+                return None;
+            }
+        }
         for &p in &pages {
             kv.retain(p);
         }
+        for &p in &pages {
+            let e = cache.held.entry(p).or_insert(0);
+            *e += 1;
+        }
+        cache.held_pages = cache.held.len();
         let lo = len.saturating_sub(MOCK_WINDOW);
         let ring = match &self.ring {
             Some(r) => (lo..len).map(|pos| r[slot][pos % MOCK_RING]).collect(),
@@ -793,10 +862,20 @@ impl Backend for MockBackend {
         })
     }
     fn score_supported(&self) -> bool {
-        self.glm.is_none()
+        self.glm.is_none() && !self.readout_only
     }
     fn score_rows_supported(&self) -> bool {
-        self.score_supported() && !self.last_row_only
+        self.glm.is_none() && !self.last_row_only
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        if self.compact_rows && all_rows {
+            self.records.insert(slot, None);
+        } else {
+            self.records.remove(&slot);
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<crate::score::RowRecords> {
+        self.records.remove(&slot).flatten()
     }
     fn score_all_rows(&mut self, on: bool) {
         self.score_rows_on = on;
@@ -812,7 +891,7 @@ impl Backend for MockBackend {
         done: usize,
         cuts: &[usize],
     ) -> Result<crate::score::ScoreStep, BackendError> {
-        if !self.score_supported() {
+        if self.glm.is_some() || (self.readout_only && !self.records.contains_key(&slot)) {
             return Err(crate::score::unsupported_backend());
         }
         let c = self.prefill_slice_cuts(slot, prompt, &[], done, 1, cuts);
@@ -830,7 +909,12 @@ impl Backend for MockBackend {
             if self.deep && h(self.state[slot], 99) % 4 == 0 {
                 logits[(h(self.state[slot], 7) % self.vocab as u64) as usize] = 7.0;
             }
-            if self.score_rows_on {
+            if let Some(rec) = self.records.get_mut(&slot) {
+                // the compact form of the same rows, for this slot alone
+                let mut rows: Vec<Vec<f32>> = (1..ctx.len()).map(|n| mock_logits(&ctx[..n], self.vocab)).collect();
+                rows.push(logits.clone());
+                *rec = Some(crate::score::RowRecords::from_rows(&rows, &ctx));
+            } else if self.score_rows_on {
                 // every row of the scored context: row i follows tokens 0..=i (it predicts token i + 1); the last is the returned row
                 self.score_rows = (1..ctx.len()).map(|n| mock_logits(&ctx[..n], self.vocab)).collect();
                 self.score_rows.push(logits.clone());
@@ -913,6 +997,11 @@ impl Backend for MockBackend {
             write_ahead_tokens: 0,
         })
     }
+    fn prefix_free_pages(&self) -> Option<usize> {
+        // only the strict mode reports a real page count (the engine's page-aware planning then works against it); the loose mock's
+        // oversized pool never runs out, so it keeps the pre-page-aware behavior
+        self.cache.as_ref().and_then(|c| c.strict_pages.then(|| c.caps.budget.page_blocks - c.held_pages))
+    }
     fn prefix_restore(&mut self, slot: usize, handle: &PrefixHandle, len: usize) -> Result<(), String> {
         self.clear_slot(slot);
         let (Some(cache), Some(kv)) = (self.cache.as_ref(), self.kv.as_mut()) else { return Err("no prefix cache".into()) };
@@ -979,6 +1068,16 @@ impl Backend for MockBackend {
                 }
             }
         }
+        // the entries' page mirror drops the pages no entry holds any more (the index's `page_refs`)
+        for &p in &handle.pages {
+            match cache.held.get_mut(&p) {
+                Some(n) if *n > 1 => *n -= 1,
+                _ => {
+                    cache.held.remove(&p);
+                }
+            }
+        }
+        cache.held_pages = cache.held.len();
     }
     fn propose(&mut self, slot: usize, tokens: &[u32], _s: &Sampling, max: usize) -> Option<Vec<u32>> {
         if self.glm.is_some() {
@@ -1120,6 +1219,7 @@ impl Backend for MockBackend {
         }
     }
     fn release(&mut self, slot: usize) {
+        self.records.remove(&slot);
         // the draft's ring is not cleared: the next owner of the slot finds the previous one's keys, as on the GPU
         self.clear_slot(slot);
     }

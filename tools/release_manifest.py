@@ -39,6 +39,29 @@ CARRY_FORWARD_KEYS = ('qualified_engine_release_tag', 'qualification_tier', 'sco
 SOURCE_ARCHIVES = 'source_archives'
 # The name release_evidence.shared_engine_source_name gives an engine-v<X.Y.Z>-<8hex> release.
 SOURCE_ARCHIVE_NAME = re.compile(r'rexl3-engine-source-[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{8}\.tar\.gz')
+# Optional top-level `evidence_assets`: where the release keeps each model's qualification evidence
+# archive. The one accepted value, "dev-release", keeps the archives on the development release:
+# cut_release still downloads every archive and verifies it against the sealed approval, but does not
+# publish it, and the release notes name each archive and its sealed sha256 without offering it as a
+# download. A manifest without the key publishes one evidence archive per model (v0.1.0 to v0.1.2).
+EVIDENCE_ASSETS = 'evidence_assets'
+EVIDENCE_ON_DEV_RELEASE = 'dev-release'
+# Every top-level key a manifest may carry. The set is closed so that a misspelt `evidence_assets` is
+# refused instead of ignored: an ignored switch would publish the archives, and a release is immutable.
+TOP_LEVEL_KEYS = frozenset(('schema', 'version', 'engine', 'models', 'notes', EVIDENCE_ASSETS))
+
+
+def evidence_published(manifest):
+    """True when the release publishes the per-model evidence archives (no `evidence_assets` key).
+
+    Any value but the one accepted string is refused here as well as in validate_manifest, so a
+    caller holding an unvalidated manifest cannot read a malformed key as either mode.
+    """
+    if EVIDENCE_ASSETS not in manifest:
+        return True
+    e.require(manifest[EVIDENCE_ASSETS] == EVIDENCE_ON_DEV_RELEASE and type(manifest[EVIDENCE_ASSETS]) is str,
+              f'invalid {EVIDENCE_ASSETS}: the only accepted value is "{EVIDENCE_ON_DEV_RELEASE}"')
+    return False
 
 
 def validate_manifest(doc, version):
@@ -46,8 +69,14 @@ def validate_manifest(doc, version):
     e.require(doc.get('schema') == MANIFEST_SCHEMA, 'release manifest schema mismatch')
     m.product_version(version)
     e.require(doc.get('version') == version, 'manifest version differs from the release version')
+    # The evidence switch is one exact top-level key with one exact value. A misspelt key, or the
+    # key inside `engine` or a model entry, would otherwise be ignored and publish the archives.
+    unknown = sorted(repr(key) for key in doc if key not in TOP_LEVEL_KEYS)
+    e.require(not unknown, 'unknown top-level manifest key: ' + ', '.join(unknown))
+    evidence_published(doc)
     engine = doc.get('engine')
     e.require(isinstance(engine, dict), 'manifest engine required')
+    e.require(EVIDENCE_ASSETS not in engine, f'{EVIDENCE_ASSETS} is a top-level manifest key, not an engine key')
     e.require(all(key in engine for key in ENGINE_KEYS), 'incomplete manifest engine')
     e.full_hash(engine['dev_commit'], e.HEX40)
     e.full_hash(engine['dev_tree'], e.HEX40)
@@ -79,6 +108,7 @@ def validate_manifest(doc, version):
     e.require(isinstance(models, list) and models, 'manifest models required')
     for item in models:
         e.require(isinstance(item, dict) and all(key in item for key in MODEL_KEYS), 'incomplete model entry')
+        e.require(EVIDENCE_ASSETS not in item, f'{EVIDENCE_ASSETS} is a top-level manifest key, not a model key')
         m.model_name(item['family'], 'family')
         m.model_name(item['model'])
         e.require(isinstance(item['version'], str) and m.VERSION_RE.fullmatch(item['version']), 'invalid model version')
@@ -139,7 +169,8 @@ def shared_source_name(approval, sources):
     return name
 
 
-def _manifest_approvals(manifest, repo_root):
+def manifest_approvals(manifest, repo_root):
+    """((family, model, version), sealed approval) per manifest model, each pinned to the manifest's hash."""
     root = Path(repo_root)
     for item in manifest['models']:
         path = root / 'runtimes' / item['family'] / item['model'] / item['version'] / 'approval.json'
@@ -160,7 +191,7 @@ def shared_engine_sources(manifest, repo_root):
     if sources is None:
         return {}
     e.require(repo_root is not None, 'shared engine source archives need the production tree')
-    mapped = {key: shared_source_name(approval, sources) for key, approval in _manifest_approvals(manifest, repo_root)}
+    mapped = {key: shared_source_name(approval, sources) for key, approval in manifest_approvals(manifest, repo_root)}
     unused = set(sources) - set(mapped.values())
     e.require(not unused, 'manifest names an engine source archive no model was sealed from: ' + ', '.join(sorted(unused)))
     return mapped
@@ -169,7 +200,7 @@ def shared_engine_sources(manifest, repo_root):
 def derive_source_archives(manifest, repo_root):
     """The `engine.source_archives` block for the manifest's models: one entry per distinct sealed digest."""
     sources = {}
-    for _, approval in _manifest_approvals(manifest, repo_root):
+    for _, approval in manifest_approvals(manifest, repo_root):
         name, record = shared_source_record(approval)
         e.require(sources.setdefault(name, record) == record,
                   'approvals name the same engine source archive with different bytes: ' + name)

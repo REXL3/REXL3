@@ -97,8 +97,16 @@ static inline void gb_roce_shape(const GbRoceDev* d, uint32_t site, uint32_t seq
 // Programmatic dependent launch (PDL): a kernel launched with cudaLaunchAttributeProgrammaticStreamSerialization may start before
 // the previous kernel of its stream ends; it must call gb_roce_pdl_wait() before it reads anything the previous kernel wrote (and
 // before it reads a site's sequence). gb_roce_pdl_trigger() lets the next kernel launch early (it still waits for this one to end).
-__device__ __forceinline__ void gb_roce_pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
-__device__ __forceinline__ void gb_roce_pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+__device__ __forceinline__ void gb_roce_pdl_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void gb_roce_pdl_trigger() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+}
 
 __device__ __forceinline__ uint64_t gb_roce_now() {
     uint64_t t;

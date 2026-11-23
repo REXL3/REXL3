@@ -93,6 +93,7 @@ mod ffi {
     use core::ffi::c_void;
     extern "C" {
         pub fn cudaGetDeviceCount(n: *mut i32) -> i32;
+        pub fn cudaGetDevice(dev: *mut i32) -> i32;
         pub fn cudaProfilerStart() -> i32;
         pub fn cudaProfilerStop() -> i32;
         pub fn cudaMalloc(p: *mut *mut c_void, bytes: usize) -> i32;
@@ -192,6 +193,30 @@ pub fn device_available() -> bool {
     }
     #[cfg(gb_no_cuda)]
     false
+}
+
+/// The current device's `(compute capability major, minor)`, cached independently for every device. `None` means the
+/// device or either attribute could not be queried; callers must not turn that into a capability-based skip or fallback.
+pub fn compute_capability() -> Option<(i32, i32)> {
+    #[cfg(not(gb_no_cuda))]
+    unsafe {
+        use std::sync::OnceLock;
+        static CACHE: [OnceLock<Option<(i32, i32)>>; 64] = [const { OnceLock::new() }; 64];
+        let mut dev = 0i32;
+        if ffi::cudaGetDevice(&mut dev) != 0 || !(0..64).contains(&dev) {
+            return None;
+        }
+        *CACHE[dev as usize].get_or_init(|| {
+            let (mut major, mut minor) = (0i32, 0i32);
+            const COMPUTE_CAPABILITY_MAJOR: i32 = 75;
+            const COMPUTE_CAPABILITY_MINOR: i32 = 76;
+            (ffi::cudaDeviceGetAttribute(&mut major, COMPUTE_CAPABILITY_MAJOR, dev) == 0
+                && ffi::cudaDeviceGetAttribute(&mut minor, COMPUTE_CAPABILITY_MINOR, dev) == 0)
+                .then_some((major, minor))
+        })
+    }
+    #[cfg(gb_no_cuda)]
+    None
 }
 
 /// Create the CUDA context now (the first runtime call otherwise pays for it inside the first allocation).
@@ -509,6 +534,20 @@ impl DevBuf {
     /// and receive ranges are disjoint parts of one buffer). It must not outlive `self`.
     pub(crate) fn alias(&self) -> core::mem::ManuallyDrop<DevBuf> {
         core::mem::ManuallyDrop::new(Self { ptr: self.ptr, bytes: self.bytes, owner: None })
+    }
+    /// A non-owning view of a byte range in any buffer, including an allocation of its own. It must not outlive `self`.
+    pub fn slice(&self, byte_offset: usize, bytes: usize) -> core::mem::ManuallyDrop<DevBuf> {
+        assert!(
+            byte_offset.checked_add(bytes).is_some_and(|end| end <= self.bytes),
+            "slice past the end of its buffer ({byte_offset} + {bytes} > {})",
+            self.bytes
+        );
+        let ptr = if self.ptr.is_null() {
+            core::ptr::null_mut()
+        } else {
+            unsafe { (self.ptr as *mut u8).add(byte_offset) as *mut c_void }
+        };
+        core::mem::ManuallyDrop::new(Self { ptr, bytes, owner: None })
     }
     /// The block this buffer is a view of (`None` for an allocation of its own).
     pub fn block(&self) -> Option<&std::sync::Arc<Block>> {
@@ -1188,6 +1227,31 @@ pub fn pageable_memory_access() -> bool {
             let mut v = 0i32;
             const PAGEABLE_MEMORY_ACCESS: i32 = 88; // cudaDevAttrPageableMemoryAccess
             ffi::cudaDeviceGetAttribute(&mut v, PAGEABLE_MEMORY_ACCESS, 0) == 0 && v == 1
+        }
+        #[cfg(gb_no_cuda)]
+        {
+            false
+        }
+    })
+}
+
+/// Whether the device shares the host's memory (`cudaDevAttrIntegrated`): true on the GB10, where `cudaMalloc`
+/// draws on the host pool and reclaims its page cache, so a memory plan is sized from `MemAvailable` alone. False
+/// on a discrete GPU (its own VRAM), where a plan must not ask it for more than `cudaMemGetInfo` reports free.
+/// Probed once; false when there is no device or the probe fails, so a discrete-aware planner falls back to the
+/// narrower figure.
+pub fn device_is_integrated() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        #[cfg(not(gb_no_cuda))]
+        unsafe {
+            let mut n = 0i32;
+            if ffi::cudaGetDeviceCount(&mut n) != 0 || n < 1 {
+                return false;
+            }
+            let mut v = 0i32;
+            const INTEGRATED: i32 = 18; // cudaDevAttrIntegrated
+            ffi::cudaDeviceGetAttribute(&mut v, INTEGRATED, 0) == 0 && v == 1
         }
         #[cfg(gb_no_cuda)]
         {

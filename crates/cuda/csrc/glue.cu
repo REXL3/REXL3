@@ -737,6 +737,22 @@ __global__ void gather_rows_scalar_k(const u16* src, const int* idx, u16* dst, i
     for (int v = threadIdx.x; v < w; v += blockDim.x) d[v] = ok ? s[v] : (u16)0;
 }
 
+// dst[idx[i], :] = src[i, :] (the inverse of gather_rows; a negative index skips the row).
+__global__ void scatter_rows_vec_k(const u16* src, const int* idx, u16* dst, int w) {
+    const int i = idx[blockIdx.x];
+    if (i < 0) return;
+    const uint4* s = (const uint4*)(src + (size_t)blockIdx.x * w);
+    uint4* d = (uint4*)(dst + (size_t)i * w);
+    for (int v = threadIdx.x; v < w / 8; v += blockDim.x) d[v] = s[v];
+}
+__global__ void scatter_rows_scalar_k(const u16* src, const int* idx, u16* dst, int w) {
+    const int i = idx[blockIdx.x];
+    if (i < 0) return;
+    const u16* s = src + (size_t)blockIdx.x * w;
+    u16* d = dst + (size_t)i * w;
+    for (int v = threadIdx.x; v < w; v += blockDim.x) d[v] = s[v];
+}
+
 }  // namespace
 
 // ==================================================================================================== launchers
@@ -925,6 +941,88 @@ __global__ void __launch_bounds__(SL_NT) small_linear_pair_k(const u16* x, const
     }
 }
 
+// Many-row fused pair: a block computes four rows by four columns from the concatenated [w0; w1] output space.
+// Every output keeps small_linear_pair_k's exact per-thread fmaf chain and reduction tree (xor butterfly, then the
+// eight warps in order); only x/w reuse and the grid change. Four columns retain enough occupancy to hide FMA latency.
+constexpr int SLP_R = 4;
+constexpr int SLP_J = 4;
+template <bool F32OUT>
+__global__ void __launch_bounds__(SL_NT, 2)
+small_linear_pair_rows_k(const u16* x, const __half* w0, const __half* w1, void* y0, void* y1, int rows, int k,
+                         int n0, int n1) {
+    __shared__ float sm[SL_NT / 32][16];
+    const int j0 = blockIdx.x * SLP_J;
+    const int r0 = blockIdx.y * SLP_R;
+    const int nvec = k / 8;
+    float acc[SLP_R][SLP_J];
+#pragma unroll
+    for (int r = 0; r < SLP_R; ++r)
+#pragma unroll
+        for (int j = 0; j < SLP_J; ++j) acc[r][j] = 0.f;
+    for (int v = threadIdx.x; v < nvec; v += SL_NT) {
+        float xf[SLP_R][8];
+#pragma unroll
+        for (int r = 0; r < SLP_R; ++r) {
+            const uint4 xu = (r0 + r < rows) ? __ldg((const uint4*)(x + (size_t)(r0 + r) * k) + v)
+                                             : make_uint4(0u, 0u, 0u, 0u);
+            unpack8(xu, xf[r]);
+        }
+#pragma unroll
+        for (int j = 0; j < SLP_J; ++j) {
+            const int col = j0 + j;
+            const bool second = col >= n0;
+            const int jj = second ? col - n0 : col;
+            const __half* w = second ? w1 : w0;
+            const uint4 wu = (col < n0 + n1) ? __ldg((const uint4*)(w + (size_t)jj * k) + v)
+                                             : make_uint4(0u, 0u, 0u, 0u);
+            float wf[8];
+            const __half2* h2 = (const __half2*)&wu;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 f = __half22float2(h2[i]);
+                wf[2 * i] = f.x;
+                wf[2 * i + 1] = f.y;
+            }
+#pragma unroll
+            for (int r = 0; r < SLP_R; ++r)
+#pragma unroll
+                for (int i = 0; i < 8; ++i) acc[r][j] = fmaf(xf[r][i], wf[i], acc[r][j]);
+        }
+    }
+    const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+    float s[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) s[i] = acc[i / SLP_J][i % SLP_J];
+#pragma unroll
+    for (int m = 16, half = 8; half >= 1; m >>= 1, half >>= 1) {
+        const bool hi = (lane & m) != 0;
+#pragma unroll
+        for (int i = 0; i < half; ++i) {
+            const float send = hi ? s[i] : s[i + half];
+            const float own = hi ? s[i + half] : s[i];
+            s[i] = own + __shfl_xor_sync(0xffffffffu, send, m);
+        }
+    }
+    s[0] = s[0] + __shfl_xor_sync(0xffffffffu, s[0], 1);
+    if ((lane & 1) == 0) sm[wid][lane >> 1] = s[0];
+    __syncthreads();
+    if (threadIdx.x < SLP_R * SLP_J) {
+        const int it = threadIdx.x;
+        float t = sm[0][it];
+        for (int wv = 1; wv < SL_NT / 32; ++wv) t = t + sm[wv][it];
+        const int r = r0 + it / SLP_J, col = j0 + it % SLP_J;
+        if (r < rows && col < n0 + n1) {
+            const bool second = col >= n0;
+            const int j = second ? col - n0 : col;
+            const int n = second ? n1 : n0;
+            void* y = second ? y1 : y0;
+            const size_t o = (size_t)r * n + j;
+            if (F32OUT) ((float*)y)[o] = t;
+            else ((u16*)y)[o] = f2bf(t);
+        }
+    }
+}
+
 // Specialization for rows <= 8, k == 2560 (nvec = 320 = 256 + 64): NT = rows is a compile-time constant, so the
 // row-bound check disappears and the v-loop collapses to two static loads (v = threadIdx.x, then threadIdx.x + 256
 // for threads 0..63) while every FMA chain and the reduction stay identical to small_linear_k — 0 differing bits by
@@ -1020,6 +1118,16 @@ static int small_linear_pair(const void* x, const void* w0, const void* w1, void
             SL_PAIR_QFN_CASE(5) SL_PAIR_QFN_CASE(6) SL_PAIR_QFN_CASE(7) SL_PAIR_QFN_CASE(8)
         }
 #undef SL_PAIR_QFN_CASE
+    }
+    if (rows > SL_RT && n0 + n1 >= SLP_J) {
+        const dim3 tiled_grid((n0 + n1 + SLP_J - 1) / SLP_J, (rows + SLP_R - 1) / SLP_R);
+        if (f32out)
+            small_linear_pair_rows_k<true><<<tiled_grid, SL_NT, 0, gb_stream(stream)>>>(
+                (const u16*)x, (const __half*)w0, (const __half*)w1, y0, y1, rows, k, n0, n1);
+        else
+            small_linear_pair_rows_k<false><<<tiled_grid, SL_NT, 0, gb_stream(stream)>>>(
+                (const u16*)x, (const __half*)w0, (const __half*)w1, y0, y1, rows, k, n0, n1);
+        return GB_CHECK_LAUNCH();
     }
     if (f32out)
         small_linear_pair_k<true><<<grid, SL_NT, 0, gb_stream(stream)>>>((const u16*)x, (const __half*)w0,
@@ -1122,6 +1230,17 @@ GB_EXPORT int gb_gather_rows(const void* src, const int* row_idx, void* dst, int
         gather_rows_vec_k<<<n, 128, 0, gb_stream(stream)>>>((const u16*)src, row_idx, (u16*)dst, width);
     else
         gather_rows_scalar_k<<<n, 128, 0, gb_stream(stream)>>>((const u16*)src, row_idx, (u16*)dst, width);
+    return GB_CHECK_LAUNCH();
+}
+
+// dst[row_idx[i], :] = src[i, :] for i < n (rows of `width` 16-bit elements, contiguous; a byte copy); a negative index skips the row.
+GB_EXPORT int gb_scatter_rows(const void* src, const int* row_idx, void* dst, int n, int width, void* stream) {
+    if (n < 0 || width < 0) return ERR_INVALID;
+    if (n == 0 || width == 0) return 0;
+    if (width % 8 == 0 && aligned16(src) && aligned16(dst))
+        scatter_rows_vec_k<<<n, 128, 0, gb_stream(stream)>>>((const u16*)src, row_idx, (u16*)dst, width);
+    else
+        scatter_rows_scalar_k<<<n, 128, 0, gb_stream(stream)>>>((const u16*)src, row_idx, (u16*)dst, width);
     return GB_CHECK_LAUNCH();
 }
 

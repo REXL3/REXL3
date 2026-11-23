@@ -33,7 +33,12 @@ impl std::error::Error for PackError {}
 impl Pack {
     /// Scan a pack. Refuses a pack with refused groups or header issues other than the known benign duplicates.
     pub fn open(dir: &Path) -> Result<Self, PackError> {
-        let ck = scan(dir, true).map_err(|e| PackError::Io(e.to_string()))?;
+        Self::from_checkpoint(scan(dir, true).map_err(|e| PackError::Io(e.to_string()))?)
+    }
+
+    /// [`Pack::open`] on a scan already made (`scan(dir, true)`), refused for the same reasons: a boot that needs the scan for something
+    /// else first opens its pack from it instead of scanning the same headers and markers again.
+    pub fn from_checkpoint(ck: Checkpoint) -> Result<Self, PackError> {
         if !ck.bad.is_empty() {
             return Err(PackError::Io(format!("{} EXL3 group(s) refused, e.g. {:?}", ck.bad.len(), ck.bad.iter().next())));
         }

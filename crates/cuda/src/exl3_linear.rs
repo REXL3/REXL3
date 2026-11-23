@@ -457,7 +457,12 @@ pub struct Exl3Weights {
     pub(crate) bias: Option<DevBuf>,
     pub k: usize,
     pub n: usize,
+    /// Whole bits per weight (the integer width the decode/prefill kernels run; `k2 / 2`).
     pub bits: usize,
+    /// Twice the bits per weight: the width the stored trellis holds. Odd for the half-integer widths
+    /// (3 = 1.5, 5 = 2.5, 7 = 3.5 bits) — the k2 kernels run those, `forward`/`forward_prefill_pinned`
+    /// are integer-only.
+    pub k2: usize,
     pub codebook: Codebook,
 }
 
@@ -478,11 +483,11 @@ pub(crate) struct Copy2d {
 }
 
 /// The copies that gather the trellis of some 128-column strips of a K x N layer (`ranges`: ascending, disjoint, half-open, in
-/// strips) into a trellis of the kept strips, one rectangle per range. Layout (see `exl3_linear.cu`): a tile is `8 * bits` 32-bit
-/// words, a strip is 8 consecutive tiles, and a row of tiles (`kt`) holds `N / 16` tiles in column order, so one strip of one `kt`
-/// row is a contiguous run of `64 * bits` words and the `K / 16` rows of a range are `N / 128` strips apart.
-pub(crate) fn strip_trellis_plan(k: usize, n: usize, bits: usize, ranges: &[(usize, usize)]) -> Vec<Copy2d> {
-    let strip = 64 * bits * 4; // bytes
+/// strips) into a trellis of the kept strips, one rectangle per range. Layout (see `exl3_linear.cu`): a tile is `16 * k2`
+/// bytes, a strip is 8 consecutive tiles, and a row of tiles (`kt`) holds `N / 16` tiles in column order, so one strip of one `kt`
+/// row is a contiguous run of `128 * k2` bytes and the `K / 16` rows of a range are `N / 128` strips apart.
+pub(crate) fn strip_trellis_plan(k: usize, n: usize, k2: usize, ranges: &[(usize, usize)]) -> Vec<Copy2d> {
+    let strip = 128 * k2; // bytes
     let src_pitch = (n / 128) * strip;
     let dst_pitch = ranges.iter().map(|&(lo, hi)| hi - lo).sum::<usize>() * strip;
     let mut dst_off = 0;
@@ -522,15 +527,26 @@ pub struct StripTimes {
 }
 
 impl Exl3Weights {
-    /// Whole bits per weight of a group the kernels can run: integer widths and K, N multiples of 128, which is everything
-    /// [`Self::from_loaded`] checks that does not depend on the data (the scale and trellis lengths follow from the shapes
-    /// `gb_exl3::checkpoint::parse_group` has already validated).
+    /// Whole bits per weight of a group as the integer-width kernels see them: `k2 / 2` (integer widths
+    /// round-trip exactly; half-integer widths — k2 = 3/5/7 — store k2/2 truncated and must run the k2 kernels
+    /// [`Self::forward_k2`] / [`Self::prefill_pinned_parts`], which take the true k2). K and N must be multiples
+    /// of 128. This is what everything [`Self::from_loaded`] checks that does not depend on the data (the scale and
+    /// trellis lengths follow from the shapes `gb_exl3::checkpoint::parse_group` has already validated).
     pub fn bits_of(g: &gb_exl3::checkpoint::Group) -> Result<usize, CudaError> {
-        let bits2 = g.bits.twice() as usize;
-        if bits2 % 2 != 0 || g.k % 128 != 0 || g.n % 128 != 0 {
+        let k2 = Self::k2_of(g)?;
+        Ok(k2 / 2)
+    }
+
+    /// Twice the whole bits per weight of a group: the width the stored trellis holds (`k2` = 3..16, odd for the
+    /// half-integer widths 1.5/2.5/3.5 bits), K and N multiples of 128. This is the width the k2 kernels run
+    /// ([`Self::forward_k2`], [`Self::k2_forward`]); `bits_of` is `k2_of` / 2 (exact for even `k2`, truncated for
+    /// the half-integer widths).
+    pub fn k2_of(g: &gb_exl3::checkpoint::Group) -> Result<usize, CudaError> {
+        let k2 = g.bits.twice() as usize;
+        if !(2..=16).contains(&k2) || g.k % 128 != 0 || g.n % 128 != 0 {
             return Err(INVALID);
         }
-        Ok(bits2 / 2)
+        Ok(k2)
     }
 
     /// Assemble a layer from device buffers the caller has filled (or will fill before the first launch) with exactly what
@@ -542,9 +558,9 @@ impl Exl3Weights {
         svh: DevBuf,
         bias: Option<DevBuf>,
     ) -> Result<Self, CudaError> {
-        let bits = Self::bits_of(g)?;
+        let k2 = Self::k2_of(g)?;
         let (k, n) = (g.k, g.n);
-        if trellis.bytes() != (k / 16) * (n / 16) * 16 * bits * 2
+        if trellis.bytes() != (k / 16) * (n / 16) * 16 * k2
             || suh.bytes() != k * 2
             || svh.bytes() != n * 2
             || bias.as_ref().is_some_and(|b| b.bytes() != n * 2)
@@ -552,14 +568,15 @@ impl Exl3Weights {
         {
             return Err(INVALID);
         }
-        Ok(Self { trellis, suh, svh, bias, k, n, bits, codebook: g.codebook })
+        Ok(Self { trellis, suh, svh, bias, k, n, bits: k2 / 2, k2, codebook: g.codebook })
     }
 
     /// [`Self::from_parts`] from a group's *numbers* rather than the group: what an expert page cache needs, because a slot is filled from
     /// the pack's bytes and no `Group` travels with it. The shape checks are the same.
     pub fn from_dims(d: Exl3Dims, trellis: DevBuf, suh: DevBuf, svh: DevBuf, bias: Option<DevBuf>) -> Result<Self, CudaError> {
         let (k, n, bits) = (d.k, d.n, d.bits);
-        if bits == 0 || trellis.bytes() != (k / 16) * (n / 16) * 16 * bits * 2 || suh.bytes() != k * 2 || svh.bytes() != n * 2 {
+        let k2 = 2 * bits;
+        if bits == 0 || trellis.bytes() != (k / 16) * (n / 16) * 16 * k2 || suh.bytes() != k * 2 || svh.bytes() != n * 2 {
             return Err(INVALID);
         }
         if let Some(b) = &bias {
@@ -567,7 +584,7 @@ impl Exl3Weights {
                 return Err(INVALID);
             }
         }
-        Ok(Self { trellis, suh, svh, bias, k, n, bits, codebook: d.codebook })
+        Ok(Self { trellis, suh, svh, bias, k, n, bits, k2, codebook: d.codebook })
     }
 
     /// The buffers in a fixed order (trellis, suh, svh, bias), named, for comparing two loads of the same pack.
@@ -580,15 +597,16 @@ impl Exl3Weights {
     }
 
     /// Upload a loaded checkpoint group. Scales and bias become fp16 (they are fp16-exact in the checkpoint except
-    /// a bf16 bias, which is rounded). Fractional widths (1.5, 2.5, 3.5 bits) are not supported.
+    /// a bf16 bias, which is rounded). Half-integer widths (1.5, 2.5, 3.5 bits) are stored as their k2 width and
+    /// run the k2 kernels (`forward_k2` / `prefill_pinned_parts`).
     pub fn from_loaded(g: &LoadedGroup) -> Result<Self, CudaError> {
-        let bits2 = g.group.bits.twice() as usize;
+        let k2 = Self::k2_of(&g.group)?;
         let (k, n) = (g.group.k, g.group.n);
-        if bits2 % 2 != 0 || k % 128 != 0 || n % 128 != 0 || g.suh.len() != k || g.svh.len() != n {
+        if g.suh.len() != k || g.svh.len() != n {
             return Err(INVALID);
         }
-        let bits = bits2 / 2;
-        if g.trellis.len() != (k / 16) * (n / 16) * 16 * bits {
+        let bits = k2 / 2;
+        if g.trellis.len() != (k / 16) * (n / 16) * 8 * k2 {
             return Err(INVALID);
         }
         if g.bias.as_ref().is_some_and(|b| b.len() != n) {
@@ -609,6 +627,7 @@ impl Exl3Weights {
             k,
             n,
             bits,
+            k2,
             codebook: g.group.codebook,
         })
     }
@@ -645,7 +664,7 @@ impl Exl3Weights {
         }
         let mut times = StripTimes::default();
         let st = Stream::new()?;
-        let mut trellis = DevBuf::alloc((self.k / 16) * kept * 64 * self.bits * 4)?;
+        let mut trellis = DevBuf::alloc((self.k / 16) * kept * 64 * self.k2 * 2)?;
         let mut suh = DevBuf::alloc(self.suh.bytes())?;
         let mut svh = DevBuf::alloc(kept * 128 * 2)?;
         let mut bias = match &self.bias {
@@ -654,7 +673,7 @@ impl Exl3Weights {
         };
         let t1 = std::time::Instant::now();
         times.alloc = t1.duration_since(t0).as_secs_f64();
-        for c in strip_trellis_plan(self.k, self.n, self.bits, ranges) {
+        for c in strip_trellis_plan(self.k, self.n, self.k2, ranges) {
             trellis.copy_2d_from(c.dst_off, c.dst_pitch, &self.trellis, c.src_off, c.src_pitch, c.width, c.height, &st)?;
         }
         suh.copy_from(&self.suh, self.suh.bytes(), &st)?;
@@ -666,7 +685,17 @@ impl Exl3Weights {
         }
         st.sync()?;
         times.copy = t1.elapsed().as_secs_f64();
-        let w = Exl3Weights { trellis, suh, svh, bias, k: self.k, n: kept * 128, bits: self.bits, codebook: self.codebook };
+        let w = Exl3Weights {
+            trellis,
+            suh,
+            svh,
+            bias,
+            k: self.k,
+            n: kept * 128,
+            bits: self.bits,
+            k2: self.k2,
+            codebook: self.codebook,
+        };
         times.total = t0.elapsed().as_secs_f64();
         Ok((w, times))
     }
@@ -679,6 +708,12 @@ impl Exl3Weights {
     /// Decode workspace for `m` rows (see the module docs for its zero-start contract).
     pub fn workspace_bytes(&self, m: usize) -> usize {
         linear_workspace_bytes(m, self.k, self.n, self.bits)
+    }
+
+    /// Twice the bits per weight: the width the stored trellis holds (odd for the half-integer widths — run
+    /// [`Self::forward_k2`] / [`Self::prefill_pinned_parts`] for those, not `forward`).
+    pub fn k2(&self) -> usize {
+        self.k2
     }
 
     /// Prefill scratch for `m` rows.
@@ -711,6 +746,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         self.check_io(x, y, m, x_dtype, y_dtype)?;
         if m > MAX_DECODE_ROWS || ws.bytes() < self.workspace_bytes(m) {
             return Err(INVALID);
@@ -756,6 +794,9 @@ impl Exl3Weights {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         self.check_io(x, y, m, x_dtype, y_dtype)?;
         let max_c = m.min(MAX_DECODE_ROWS);
         if ws.bytes() < self.workspace_bytes(max_c) {
@@ -829,6 +870,61 @@ impl Exl3Weights {
         )
     }
 
+    /// Decode forward for any stored width: the integer kernel when `k2` is even, the half-integer k2 kernel when
+    /// odd. Same contract as [`Exl3Weights::forward`]; `ws` needs [`Exl3Weights::workspace_bytes`] either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_any(
+        &self,
+        x: &DevBuf,
+        y: &mut DevBuf,
+        m: usize,
+        x_dtype: Dtype,
+        y_dtype: Dtype,
+        ws: &mut DevBuf,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        if self.k2 % 2 == 0 {
+            self.forward(x, y, m, x_dtype, y_dtype, ws, st)
+        } else {
+            self.forward_k2(x, y, m, x_dtype, y_dtype, self.k2, ws, st)
+        }
+    }
+
+    /// Pinned prefill for any stored width: the integer pinned prefill when `k2` is even, the half-integer parts
+    /// path (unpack + `gb_exl3_prefill_pinned_with_w`) when odd. Same contract as
+    /// [`Exl3Weights::forward_prefill_pinned`]; `scratch` needs [`Exl3Weights::prefill_scratch_bytes`] either way.
+    pub fn forward_prefill_pinned_any(
+        &self,
+        x: &DevBuf,
+        y: &mut DevBuf,
+        m: usize,
+        dtype: Dtype,
+        scratch: &mut DevBuf,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        if self.k2 % 2 == 0 {
+            self.forward_prefill_pinned(x, y, m, dtype, scratch, st)
+        } else {
+            Self::prefill_pinned_parts(
+                x,
+                y,
+                m,
+                dtype,
+                dtype,
+                self.k,
+                self.n,
+                self.k2,
+                self.codebook,
+                &self.trellis,
+                &self.suh,
+                &self.svh,
+                self.bias.as_ref(),
+                scratch,
+                st,
+            )
+        }
+    }
+
     /// The raw `gb_exl3_linear_k2` launch over caller-owned buffers: `x` `[m, k]`, `y` `[m, n]`, `k2 = 2 * bits`
     /// (2..16), `codebook`, `trellis`/`suh`/`svh` (optional `bias`) as stored, `ws` at least [`linear_workspace_bytes`].
     #[allow(clippy::too_many_arguments)]
@@ -888,6 +984,9 @@ impl Exl3Weights {
 
     /// W_q [k, n] fp16 row-major into `w` (k * n * 2 bytes).
     pub fn reconstruct(&self, w: &mut DevBuf, st: &Stream) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         if w.bytes() < self.k * self.n * 2 {
             return Err(INVALID);
         }
@@ -937,6 +1036,9 @@ impl Exl3Weights {
         scratch: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         self.check_io(x, y, m, x_dtype, y_dtype)?;
         if scratch.bytes() < self.prefill_scratch_bytes(m) {
             return Err(INVALID);
@@ -981,6 +1083,9 @@ impl Exl3Weights {
         scratch: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        if self.k2 % 2 != 0 {
+            return Err(CudaError(1));
+        }
         self.check_io(x, y, m, dtype, dtype)?;
         if scratch.bytes() < self.prefill_scratch_bytes(m) {
             return Err(INVALID);
@@ -1015,7 +1120,7 @@ impl Exl3Weights {
 
     /// [`Exl3Weights::forward_prefill_pinned`] over caller-owned decomposed parts (the bailing `Lin` image): `k2 = 2 * bits`
     /// covers every EXL3 width in the pack (`k2` 2..16: 1.0 through 8.0 bits, including the half-integer 1.5/2.5/3.5),
-    /// no bias. The same pinned cublasLt GEMM, the same rotations, row-invariant, any `x_dtype`/`y_dtype` pair the
+    /// optional bias. The same pinned cublasLt GEMM, the same rotations, row-invariant, any `x_dtype`/`y_dtype` pair the
     /// rotate kernels support (BF16/F16/F32 in and out). The trellis is decoded with `fmoe::unpack` into the scratch's
     /// `W_q` section (a pure function of the trellis, so the GEMM sees exactly the bits `gb_exl3_reconstruct` would have
     /// produced — and unlike it, every `k2` including the half-integer ones).
@@ -1033,6 +1138,7 @@ impl Exl3Weights {
         trellis: &DevBuf,
         suh: &DevBuf,
         svh: &DevBuf,
+        bias: Option<&DevBuf>,
         scratch: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), CudaError> {
@@ -1058,7 +1164,7 @@ impl Exl3Weights {
                 scratch.ptr_at(w_off),
                 suh.ptr(),
                 svh.ptr(),
-                core::ptr::null(),
+                bias.map_or(std::ptr::null(), |b| b.ptr() as *const _),
                 y.ptr(),
                 y_dtype as i32,
                 m as i32,
@@ -1072,7 +1178,7 @@ impl Exl3Weights {
         }
         #[cfg(gb_no_cuda)]
         {
-            let _ = (x, y, trellis, suh, svh, scratch, st);
+            let _ = (x, y, trellis, suh, svh, bias, scratch, st);
             Err(CudaError(-1))
         }
     }
@@ -1325,7 +1431,7 @@ pub mod sweep {
 #[cfg(all(test, not(gb_no_cuda)))]
 mod tests {
     use super::*;
-    use crate::rt::device_available;
+    use crate::rt::{compute_capability, device_available};
     use gb_exl3::checkpoint::{scan, Checkpoint, Group};
     use gb_exl3::f16::f16_to_f64;
     use gb_exl3::{codebook, forward, unpack, Bits};
@@ -1592,6 +1698,17 @@ mod tests {
 
     // ---------------------------------------------------------------- MiniCPM-V-4.7 (the Qwen3.5/3.6-35B-A3B text backbone + DSpark draft)
 
+    /// Cyberfrost's dense EXL3 projections (K, N), including the two tiny attention shapes.
+    const CYBERFROST_SHAPES: [(&str, usize, usize); 7] = [
+        ("GDN qkv", 2560, 10240),
+        ("GDN z", 2560, 6144),
+        ("GDN out / attention o", 6144, 2560),
+        ("attention q", 2560, 12288),
+        ("attention k/v", 2560, 512),
+        ("QSA qk", 2560, 640),
+        ("lm_head", 2560, 248320),
+    ];
+
     /// (the layers, K, N) of every EXL3 linear the text backbone and its DSpark draft run: hidden 2048, 16 query / 2 KV heads of 256,
     /// GDN 16 key x 32 value heads of 128, 256 experts of 512 plus a shared one, 248,192 padded logits; draft intermediate 6144 and a
     /// 10,240-wide fusion fc. Every other linear (router, in_proj_a/b, the shared expert gate) is not EXL3.
@@ -1641,6 +1758,57 @@ mod tests {
             assert_eq!(prefill_pin_for(k, n).unwrap(), default_pin, "{k}x{n} runs the default pinned tile");
         }
         assert!(decode_plan(100, 128).is_err() && decode_plan(128, 100).is_err());
+    }
+
+    #[test]
+    fn cyberfrost_shapes_have_the_measured_ada_decode_plans() {
+        if gpu().is_none() {
+            return;
+        }
+        let ada = decode_plan(2560, 6144).unwrap() == (2, 8);
+        let expected = if ada {
+            [(1, 8), (2, 8), (6, 8), (1, 8), (10, 4), (10, 4), (1, 8)]
+        } else {
+            [(1, 8), (4, 4), (8, 4), (1, 8), (4, 4), (4, 4), (1, 8)]
+        };
+        for (&(_, k, n), plan) in CYBERFROST_SHAPES.iter().zip(expected) {
+            assert_eq!(decode_plan(k, n).unwrap(), plan, "decode plan of {k}x{n}");
+            let (sk, wk) = plan;
+            assert!((k / 16) % (sk * wk) == 0);
+            assert!(k / 16 >= sk * wk, "every warp needs at least one k tile in {k}x{n}");
+            if ada && n < 100_000 {
+                assert!(n / 128 * sk <= 142, "{k}x{n} spills to another 142-SM wave");
+            }
+            prefill_pin_check(17, k, n).unwrap();
+            prefill_pin_check(4096, k, n).unwrap();
+        }
+    }
+
+    #[test]
+    fn cyberfrost_prefill_m17_prefix_is_row_invariant() {
+        let Some(st) = gpu() else { return };
+        for &(_, k, n) in CYBERFROST_SHAPES.iter().filter(|s| s.2 != 512 && s.2 != 640) {
+            let g = make_group(k, n, 6, Codebook::Mul1, false, 0xc0fe + n as u64);
+            let w = Exl3Weights::from_loaded(&g).unwrap();
+            let bad = sweep::row_invariance(&w, sweep::Path::Pinned, &[17], &st).unwrap();
+            assert_eq!(bad, 0, "pinned prefill {k}x{n}: M=17 differs from the M=4096 prefix");
+        }
+    }
+
+    #[test]
+    fn cyberfrost_decode_rows_are_invariant() {
+        if gpu().is_none() {
+            return;
+        }
+        for &(_, k, n) in &CYBERFROST_SHAPES {
+            if n > 100_000 {
+                check_row_invariance(k, n, 6, Codebook::Mul1, false, 2, &COMBOS[..1]);
+            } else {
+                for bits in [6, 7, 8] {
+                    check_row_invariance(k, n, bits, Codebook::Mul1, false, 17, &COMBOS[..1]);
+                }
+            }
+        }
     }
 
     /// Row invariance of the decode path at every MiniCPM shape and every width 3..8 (the runtime widths the model's packs use):
@@ -1785,6 +1953,7 @@ mod tests {
             k: w.k,
             n: kept * 128,
             bits: w.bits,
+            k2: w.k2,
             codebook: w.codebook,
         }
     }
@@ -1824,6 +1993,7 @@ mod tests {
             k,
             n,
             bits,
+            k2: 2 * bits,
             codebook: Codebook::Mul1,
         }
     }
@@ -1882,7 +2052,7 @@ mod tests {
             let want = le_bytes(&gather_strip_words(&words, k, n, bits, ranges));
             let kept: usize = ranges.iter().map(|&(lo, hi)| hi - lo).sum();
             let mut got = vec![0xA5u8; want.len()]; // poisoned: a byte no copy reaches stays 0xA5 and differs
-            apply_plan(&strip_trellis_plan(k, n, bits, ranges), &le_bytes(&words), &mut got);
+            apply_plan(&strip_trellis_plan(k, n, 2 * bits, ranges), &le_bytes(&words), &mut got);
             assert_eq!(got.len(), (k / 16) * kept * 64 * bits * 4, "k {k} n {n} bits {bits}");
             if got != want {
                 let at = got.iter().zip(&want).position(|(p, q)| p != q).unwrap();
@@ -1897,7 +2067,7 @@ mod tests {
             assert_eq!(got, want.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>(), "vector, k {k} n {n} {ranges:?}");
         }
         // the real lm_head (K 5120, N 248,320, 6 bits): two rectangles of 320 rows, the first 768 strips wide
-        let plan = strip_trellis_plan(5120, 248_320, 6, &TF_STRIPS);
+        let plan = strip_trellis_plan(5120, 248_320, 12, &TF_STRIPS);
         let strip = 64 * 6 * 4;
         assert_eq!(plan.len(), 2);
         assert_eq!(
@@ -2204,7 +2374,12 @@ mod tests {
         if gpu().is_none() {
             return;
         }
-        assert!(prefill_pin_name().contains("algo 67") && prefill_pin_name().contains("split-K 1"), "{}", prefill_pin_name());
+        assert!(
+            (prefill_pin_name().contains("algo 67") || prefill_pin_name().contains("algo 21"))
+                && prefill_pin_name().contains("split-K 1"),
+            "{}",
+            prefill_pin_name()
+        );
         prefill_init().unwrap();
         for (k, n) in PREFILL_SHAPES {
             for m in [1usize, 17, 128, 129, 4096] {
@@ -2248,7 +2423,17 @@ mod tests {
     #[test]
     fn pinned_prefill_equals_the_legacy_gemm_outside_its_unstable_sizes() {
         let Some(st) = gpu() else { return };
+        let (major, minor) = compute_capability().expect("current device compute capability");
+        if major < 9 {
+            eprintln!("[SKIPPED: requires sm_90+, device is sm_{major}{minor}]");
+            return;
+        }
         prefill_init().unwrap();
+        assert!(
+            prefill_pin_name().contains("algo 67"),
+            "sm_{major}{minor} must keep the algo-67 pin fail-closed: {}",
+            prefill_pin_name()
+        );
         let ms = [129usize, 130, 191, 192, 249, 250, 255, 256, 257, 300, 384, 392, 512, 777, 1000, 1024, 2048, 3000, 4095, 4096];
         for (k, n) in PREFILL_SHAPES {
             let w = synthetic_for_sweep(k, n);
@@ -2473,6 +2658,7 @@ mod tests {
             k,
             n,
             bits,
+            k2: 2 * bits,
             codebook: Codebook::Mul1,
         }
     }
@@ -2590,6 +2776,21 @@ mod tests {
         }
     }
 
+    /// Cold decode throughput of Cyberfrost's seven shapes at their 6/7/8-bit widths and M=1..16.
+    #[test]
+    #[ignore]
+    fn bench_cyberfrost_decode_gbps() {
+        let Some(st) = gpu() else { return };
+        for &(what, k, n) in &CYBERFROST_SHAPES {
+            let (sk, wk) = decode_plan(k, n).unwrap();
+            for bits in [6usize, 7, 8] {
+                let rotate = if k * n * bits / 8 > (192 << 20) { 0 } else { 192 << 20 };
+                let res = bench_shape(&st, k, n, bits, &[1, 2, 4, 8, 16], rotate);
+                report(&format!("cold {what} plan sk={sk} wk={wk}"), k, n, bits, &res);
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn bench_decode_gbps() {
@@ -2663,7 +2864,7 @@ mod tests {
         put(&mut trellis, unsafe { std::slice::from_raw_parts(host.as_ptr() as *const u8, host.len() * 2) });
         put(&mut su, unsafe { std::slice::from_raw_parts(suh.as_ptr() as *const u8, suh.len() * 2) });
         put(&mut sv, unsafe { std::slice::from_raw_parts(svh.as_ptr() as *const u8, svh.len() * 2) });
-        Exl3Weights { trellis, suh: su, svh: sv, bias: None, k, n, bits, codebook: Codebook::Mul1 }
+        Exl3Weights { trellis, suh: su, svh: sv, bias: None, k, n, bits, k2: 2 * bits, codebook: Codebook::Mul1 }
     }
 
     /// Time of the decode path per call (ms) with the layer in `arena`, as in [`bench_shape`]: `copies` distinct layers in
@@ -2746,6 +2947,30 @@ mod tests {
                 }
                 line += &format!(" | round spread {:.1}% / {:.1}% / {:.1}%", spread(&res[0]), spread(&res[1]), spread(&res[2]));
                 eprintln!("{line}");
+            }
+        }
+    }
+
+    /// End-to-end pinned-prefill throughput of Cyberfrost's five GEMM shapes (the two tiny projections omitted).
+    #[test]
+    #[ignore]
+    fn bench_cyberfrost_prefill_tflops() {
+        let Some(st) = gpu() else { return };
+        for &(_, k, n) in CYBERFROST_SHAPES.iter().filter(|s| s.2 != 512 && s.2 != 640) {
+            let bits = 6;
+            let host = random_trellis(k * n * bits / 16, 2);
+            let mut rng = Rng(5);
+            let suh: Vec<u16> = (0..k).map(|_| f64_to_f16(0.5 + rng.uniform())).collect();
+            let svh: Vec<u16> = (0..n).map(|_| f64_to_f16(0.5 + rng.uniform())).collect();
+            let w = synthetic_layer(&host, &suh, &svh, k, n, bits);
+            let xh_host: Vec<u16> = (0..4096 * k).map(|_| f64_to_f16(rng.normal())).collect();
+            let x = DevBuf::from_slice(&xh_host).unwrap();
+            for m in [512usize, 2048, 4096] {
+                let mut y = DevBuf::zeroed(m * n * 2).unwrap();
+                let mut scratch = DevBuf::zeroed(w.prefill_scratch_bytes(m)).unwrap();
+                let t = time_ms(&st, 10, |_| w.forward_prefill_pinned(&x, &mut y, m, Dtype::F16, &mut scratch, &st).unwrap());
+                let tf = 2.0 * m as f64 * k as f64 * n as f64 / (t * 1e-3) / 1e12;
+                eprintln!("pinned prefill {m}x{k}x{n} 6-bit: {t:.3} ms, {tf:.1} TFLOP/s");
             }
         }
     }

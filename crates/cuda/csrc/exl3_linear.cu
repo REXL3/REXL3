@@ -21,8 +21,10 @@
 #include <cublas_v2.h>
 #include <cublasLt.h>
 #include <stdint.h>
+#include <atomic>
 
 #include "common.cuh"
+#include "cuda_caps.cuh"
 #include "pdl.cuh"
 #include "exl3_linear_decode.cuh"
 
@@ -80,7 +82,7 @@ __device__ __forceinline__ void finish(float (&v)[4], int lane, const half* svh,
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         v[j] = v[j] * HAD_SCALE * __half2float(__ldg(svh + col + j));
-        if (bias) v[j] += __half2float(__ldg(bias + col + j));
+        if (bias) v[j] += __half2float(bias[col + j]);
     }
 }
 
@@ -430,9 +432,20 @@ __global__ void __launch_bounds__(32) unpack_kernel(const uint32_t* __restrict__
 // (K splits, warps a block) for a K x N layer: the shape's alone, so a layer keeps one reduction for every row count.
 struct Plan { int sk, wk; };
 
+bool is_sm_89() { return gbx_cuda::compute_capability() == 809; }
+
 Plan plan_for(int k, int n) {
     const int blocks = 192, min_tiles = 8;
     const int kt = k / 16, nb = n / 128;
+    if (is_sm_89()) {
+        // L40S (142 SMs) cold-decode plans, measured at 6/7/8 bits and M=1..16. The old GB10 target of 192 CTAs
+        // makes z/out two-wave launches; out is fastest with one 120-CTA wave, z with 96 CTAs and eight warps.
+        // The tiny K/V and QSA layers need more (shorter) splits even though that leaves SMs idle. These plans intentionally
+        // relax min_tiles: the kernel only needs each warp's positive, integral tile count (per_warp above), not eight tiles.
+        if (k == 6144 && n == 2560) return {6, 8};
+        if (k == 2560 && n == 6144) return {2, 8};
+        if (k == 2560 && (n == 512 || n == 640)) return {10, 4};
+    }
     int sk = 1, wk = nb >= 64 ? 8 : 4;
     if (nb < 64) {                                // a narrow layer needs K splits to fill the SMs at all
         while (nb * sk < blocks && sk < 64) sk *= 2;
@@ -623,16 +636,66 @@ cublasLtHandle_t lt_handle() {
 // each row against a 4096-row call) is what proves the claim on a given cuBLAS. The tile choices below are the fastest of the
 // algorithms that were bit-identical to cublasGemmEx's output at M = 4096 (measured per shape at M = 129 .. 4096 on GB10).
 struct Pin {
-    uint32_t tile, stages, custom;
+    int algo_id;
+    uint32_t tile, stages, custom, swizzle;
 };
-constexpr int kPinAlgoId = 67;
-constexpr Pin kPinDefault = {CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_64xAUTO, 30};
+constexpr Pin kPinDefault = {67, CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_64xAUTO, 30, 0};
 // down_proj (K = 17408, N = 5120): 128x224 tiles are 10% faster than 128x128 at M = 4096.
-constexpr Pin kPinDown = {CUBLASLT_MATMUL_TILE_128x224, CUBLASLT_MATMUL_STAGES_64xAUTO, 22};
-Pin pin_for(int k, int n) { return (k == 17408 && n == 5120) ? kPinDown : kPinDefault; }
+constexpr Pin kPinDown = {67, CUBLASLT_MATMUL_TILE_128x224, CUBLASLT_MATMUL_STAGES_64xAUTO, 22, 0};
+// Ada / Ampere (sm_80 / sm_89, where cublasLt lacks Blackwell's algo 67): CUTLASS m16n8k16 multistage algo 21, split-K 1,
+// no reduction, no workspace, verified row-invariant across M = 1..4096 on L40S.
+constexpr Pin kPinAdaDefault = {21, CUBLASLT_MATMUL_TILE_128x256, CUBLASLT_MATMUL_STAGES_32x3, 0, 0};
+constexpr Pin kPinAdaDown = {21, CUBLASLT_MATMUL_TILE_256x128, CUBLASLT_MATMUL_STAGES_32x3, 0, 0};
+// Cyberfrost shapes on the 142-SM L40S. These choices won an algo-21 tile/stage/swizzle sweep at M=512, 2048 and
+// 4096; each was also bit-identical for the first 17 rows of the same candidate's 4096-row call. Split-K stays one.
+constexpr Pin kPinAdaCfQkv = {21, CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_32x5, 0, 0};
+constexpr Pin kPinAdaCfZ = {21, CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_32x5, 0, 1};
+constexpr Pin kPinAdaCfOut = {21, CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_32x5, 0, 0};
+constexpr Pin kPinAdaCfQ = {21, CUBLASLT_MATMUL_TILE_128x128, CUBLASLT_MATMUL_STAGES_32x4, 0, 0};
+constexpr Pin kPinAdaCfHead = {21, CUBLASLT_MATMUL_TILE_256x128, CUBLASLT_MATMUL_STAGES_32x3, 0, 1};
+
+bool has_algo_67() {
+    static std::atomic<int> cached[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return true;  // keep the required algo-67 pin on probe failure
+    int available = cached[dev].load(std::memory_order_relaxed);
+    if (available == 0) {
+        cublasLtHandle_t lt = lt_handle();
+        cublasLtMatmulAlgo_t probe;
+        const bool ok = lt && cublasLtMatmulAlgoInit(lt, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F,
+                                                     CUDA_R_32F, CUDA_R_32F, 67, &probe) == CUBLAS_STATUS_SUCCESS;
+        available = ok ? 1 : -1;
+        cached[dev].store(available, std::memory_order_relaxed);
+    }
+    return available > 0;
+}
+
+bool use_ada_prefill_pin() {
+    const int major = gbx_cuda::compute_capability_major();
+    // Algo 21 is qualified only as the pre-Hopper fallback. On sm_90+ (including GB10), or when the capability
+    // cannot be established, keep algo 67 selected so LtProblem::init fails with cudaErrorNotSupported if it is absent.
+    return major >= 0 && major < 9 && !has_algo_67();
+}
+
+Pin pin_for(int k, int n) {
+    if (use_ada_prefill_pin()) {
+        if (is_sm_89()) {
+            if (k == 2560 && n == 10240) return kPinAdaCfQkv;
+            if (k == 2560 && n == 6144) return kPinAdaCfZ;
+            if (k == 6144 && n == 2560) return kPinAdaCfOut;
+            if (k == 2560 && n == 12288) return kPinAdaCfQ;
+            if (k == 2560 && n == 248320) return kPinAdaCfHead;
+        }
+        return (k == 17408 && n == 5120) ? kPinAdaDown : kPinAdaDefault;
+    }
+    return (k == 17408 && n == 5120) ? kPinDown : kPinDefault;
+}
 constexpr const char* kPinName =
     "cublasLt algo 67, split-K 1, no reduction, no workspace; tiles 128x128 stages 64xAUTO custom 30, "
     "K=17408 N=5120: 128x224 stages 64xAUTO custom 22";
+constexpr const char* kPinAdaName =
+    "cublasLt algo 21, split-K 1, no reduction, no workspace; default tiles 128x256 stages 32x3 custom 0 swizzle 0, "
+    "K=17408 N=5120: 256x128 stages 32x3; sm_89 Cyberfrost shapes: measured tiles/stages/swizzle";
 
 // One fp16 GEMM problem as cublasLt sees it: c [n, m] (column-major, i.e. [m, n] row-major) = w [n, k] @ xh [k, m].
 struct LtProblem {
@@ -658,11 +721,11 @@ struct LtProblem {
             cublasLtMatrixLayoutCreate(&b, CUDA_R_16F, k, m, k) != CUBLAS_STATUS_SUCCESS ||
             cublasLtMatrixLayoutCreate(&c, CUDA_R_32F, n, m, n) != CUBLAS_STATUS_SUCCESS)
             return (int)cudaErrorUnknown;
-        if (cublasLtMatmulAlgoInit(lt, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F, CUDA_R_32F,
-                                   kPinAlgoId, &algo) != CUBLAS_STATUS_SUCCESS)
-            return (int)cudaErrorNotSupported;
-        const uint32_t splitk = 1, red = CUBLASLT_REDUCTION_SCHEME_NONE, swizzle = 0;
         const Pin pin = pin_for(k, n);
+        if (cublasLtMatmulAlgoInit(lt, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F, CUDA_R_32F,
+                                   pin.algo_id, &algo) != CUBLAS_STATUS_SUCCESS)
+            return (int)cudaErrorNotSupported;
+        const uint32_t splitk = 1, red = CUBLASLT_REDUCTION_SCHEME_NONE, swizzle = pin.swizzle;
         auto set = [&](cublasLtMatmulAlgoConfigAttributes_t attr, const uint32_t& v) {
             return cublasLtMatmulAlgoConfigSetAttribute(&algo, attr, &v, sizeof(v)) == CUBLAS_STATUS_SUCCESS;
         };
@@ -879,7 +942,7 @@ GB_EXPORT int gb_exl3_prefill(const void* x, int x_dtype, const void* trellis, c
 // ---------------------------------------------------------------------------------------------------------------
 
 // Human-readable identity of the pinned algorithm (a static string).
-GB_EXPORT const char* gb_exl3_prefill_pin_name() { return kPinName; }
+GB_EXPORT const char* gb_exl3_prefill_pin_name() { return use_ada_prefill_pin() ? kPinAdaName : kPinName; }
 
 // The pinned algorithm's tile, stage count and custom option for a K x N layer (the cublasLt ids of pin_for): what the sweeps
 // (tests, tools) report and assert per shape. 0, or an error for a shape the pinned path does not take.

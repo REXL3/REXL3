@@ -9,8 +9,9 @@ size, which request switches it honours, its measured behaviour) is in that reci
 `profile.json`, `KNOWN_ISSUES.md` and `docs/` (inside the bundle you extract). Read this guide once,
 then keep the recipe's `KNOWN_ISSUES.md` beside you.
 
-> **Status: v0.1.1 is the latest release; v0.1.0 remains available.** The GitHub releases page names the
-> exact tags; use the tag of the release that holds your model.
+> **Status: v0.1.3 is the latest release; v0.1.0, v0.1.1 and v0.1.2 remain available.** The GitHub
+> releases page names the exact tags; use the tag of the release that holds your model. Where this guide
+> says "from v0.1.3", a recipe from an earlier release behaves as that release's notes describe.
 
 ## 1. How the documentation fits together
 
@@ -30,7 +31,7 @@ The examples in this guide download with the GitHub CLI (`gh`); the bundle's own
 against the public release URL.
 
 Conventions: commands are for Bash on the GB10 host unless said otherwise. `$TAG` is a release tag
-such as `v0.1.1`. A line starting with `#` inside a code block is a comment.
+such as `v0.1.3`. A line starting with `#` inside a code block is a comment.
 
 ## 2. Before you start
 
@@ -41,6 +42,7 @@ such as `v0.1.1`. A line starting with `#` inside a code block is a comment.
 | Host | An NVIDIA GB10 machine (DGX Spark class), **Ubuntu 24.04 on ARM64**. Another GPU, OS or architecture is not supported and `doctor` will say so. |
 | GPU | Idle. One server per machine; the launcher refuses to start on a busy GPU (exit code 22). Close other GPU workloads first. |
 | Memory and disk | See the recipe's sheet and `KNOWN_ISSUES.md`: model size, and the free space the download needs. A recipe can need most of the machine's memory, so do not run other large workloads beside it. |
+| Driver and packages | From v0.1.3: an NVIDIA 580-branch driver, build 580.142 or later, and for a two-node recipe `libnccl2` 2.30.7 or later, the same version on both nodes. `install-deps` installs what is missing; section 4.5 says how versions are judged. |
 | Privileges | A normal user with `sudo` available **for system packages only**. Never run `./launch.sh start` or the whole launcher as root; it refuses. |
 | System services | systemd 255 or newer with cgroup v2 and a working login user manager (the installer checks). |
 | Network | Outbound HTTPS to GitHub (the release) and Hugging Face (the model), and to the Ubuntu and NVIDIA package repositories. |
@@ -67,7 +69,7 @@ such as `v0.1.1`. A line starting with `#` inside a code block is a comment.
 For a single-node recipe:
 
 ```bash
-TAG=v0.1.1                        # the exact release tag from the GitHub releases page
+TAG=v0.1.3                        # the exact release tag from the GitHub releases page
 RUNTIME_ID=<runtime-id>           # the prefix of your model's asset names (section 4.2)
 
 DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
@@ -122,7 +124,7 @@ A release holds the assets of **every** model in it. For each model there is an 
 engine artifacts, are not needed to run a model. A release may publish the engine source once for all
 its models, as `rexl3-engine-source-<X.Y.Z>-<8hex>.tar.gz`, in place of one `-engine-source.tar.gz`
 per model; the release notes list it under "Assets and checksums". `<runtime-id>` is the prefix of your model's asset
-names on the release page (the [README](../README.md) lists the first-release runtime ids). Download
+names on the release page (the [README](../README.md) lists the runtime ids). Download
 only your model's two files, into a fresh directory each time:
 
 ```bash
@@ -198,8 +200,27 @@ the native engine binary, whether it ships in the bundle or is placed from a rel
 `approval.json`). It does **not** prove there is enough disk space, that the GPU is idle, that the port
 is free, or that inference works; those are checked later with their own error tokens (section 8).
 
-If `install-deps` or `doctor` exits 20 on the NVIDIA driver packages, read section 8 before changing
-anything on the host: it is a known issue of the release on an updated Ubuntu 24.04 host.
+**How host versions are judged (from v0.1.3).** Each recipe's `dependencies.lock.json` states a tested
+floor and the versions the release was qualified on, and the launcher accepts a later version of the
+same line with a warning. A routine `apt upgrade` does not stop it.
+
+- **NVIDIA driver:** any 580-branch build from 580.142 is accepted. A build after 580.178.04, the highest
+  that v0.1.3 was qualified on, prints `DRIVER_NOT_YET_QUALIFIED`. `libnvidia-compute-580` and
+  `nvidia-utils-580` must be the same build. Another branch (570 or 590) or a build below 580.142 is
+  refused.
+- **CUDA runtime, cuBLAS and NCCL packages:** a later version of the same major version prints
+  `DEPENDENCY_NOT_YET_QUALIFIED`. A two-node recipe needs `libnccl2` 2.30.7 or later on major version 2,
+  the same version on both nodes: upgrade both together, or hold the package on both. A package on
+  `apt-mark hold` counts as installed.
+- **The libraries the engine binary loaded:** a newer CUDA runtime, driver CUDA version or cuBLAS of
+  the same major version prints `NATIVE_NOT_YET_QUALIFIED`.
+- **A pending restart** prints `REBOOT_PENDING`.
+
+These four are warnings: the command continues and can still exit 0. Results on a version newer than
+the qualified ones are not covered by the release's qualification evidence, so name your versions when
+you report a problem. `doctor` prints `host_policy`, `dependency_qualification` and `host_versions`.
+Section 8 lists what is still refused. A recipe from v0.1.1 or v0.1.2 pins one exact driver build
+instead; section 8 has its row too.
 
 ### 4.6 Profiles and print-command
 
@@ -312,13 +333,29 @@ numbers are refused. A recipe can also ignore `enable_thinking` (a model that al
 
 Whether a request thinks when it names neither depends on the recipe and server build; `GET /v1/models`
 reports the reasoning controls and level names the recipe exposes, and the recipe's `KNOWN_ISSUES.md`
-states the default. On Qwen3.8-Flash-Next and Nemotron-3.5-Super-VL a request that names neither does
-**not** think, although their chat templates would; to turn thinking on, send it in
-`chat_template_kwargs` (their qualification runs sent both fields):
+states the default. On Qwen3.8-Flash-Next, Nemotron-3.5-Super-VL and MiniCPM-V-4.7 a request that names
+neither does **not** think, although their chat templates would; to turn thinking on, send it in
+`chat_template_kwargs`. For Qwen3.8-Flash-Next and Nemotron-3.5-Super-VL (their qualification runs sent
+both fields):
 
 ```json
 {"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"}}
-``` Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
+```
+
+For MiniCPM-V-4.7, whose template has no effort level:
+
+```json
+{"chat_template_kwargs": {"enable_thinking": true}}
+```
+
+Ling-3.1-Flash-1019 thinks by default from v0.1.3: a request that names neither field is served as if
+it sent `enable_thinking: true`, the reasoning comes back in `reasoning_content`, and its tokens count
+against `max_tokens`. With thinking turned off, this model still writes reasoning text and a stray
+`</think>` into the answer (a known issue of the recipe), so leave it on. In v0.1.1 and v0.1.2 the same
+recipe does not think unless asked. GLM-5.3-Flash always thinks: `enable_thinking: false` has no effect,
+and the response says so in the `X-Rexl3-Note` header.
+
+Thinking uses context and time: a long thought plus a long answer must fit `max_model_len`.
 
 ### 5.4 Sampling, seeds and repeatable output
 
@@ -352,8 +389,10 @@ reports drafted and accepted token counts.
 Send OpenAI-style `tools`, with `tool_choice` either `"auto"` (default) or `"none"`. The model returns
 `tool_calls`; run them yourself and send the results back as `tool` messages. Limits: at most 64 tools
 per request (more returns HTTP 413), and `tool_choice` of `"required"` or a named function is refused
-with HTTP 400. Some client libraries add `parallel_tool_calls` automatically; the server refuses it, so
-turn it off in the client. A tool turn that returns no calls is a normal answer, not an error; do not
+with HTTP 400. Some client libraries add `parallel_tool_calls` automatically. From v0.1.3 the server
+accepts it: `true`, null or absent returns every call the reply makes, and `false` ends the reply at
+its first complete tool call. Earlier releases refuse the field with HTTP 400, so turn it off in the
+client there. A tool turn that returns no calls is a normal answer, not an error; do not
 synthesise a call.
 
 ### 5.7 Images
@@ -402,7 +441,7 @@ answer use one request at a time.
 Refused by name with a 400, so you can find them quickly: `response_format` of `json_object` or
 `json_schema` (only plain text), `n` other than 1, `logit_bias`, non-zero `presence_penalty`,
 `frequency_penalty` or `repetition_penalty`, `tool_choice` `required` or a named function,
-`parallel_tool_calls`, per-token output `logprobs`, video and audio input, remote image URLs, and
+`parallel_tool_calls` before v0.1.3 (section 5.6), per-token output `logprobs`, video and audio input, remote image URLs, and
 fine-tuned or alternative model ids. There is no authentication, no TLS and no multi-model routing.
 
 ## 6. Day-to-day operation
@@ -410,7 +449,7 @@ fine-tuned or alternative model ids. There is no authentication, no TLS and no m
 ```bash
 ./launch.sh status                         # JSON; exit 0 = ready, 24 = not ready
 ./launch.sh logs --lines 80 --no-follow    # a bounded tail (1 to 1000 lines)
-./launch.sh stop                           # stops only the server this bundle started
+./launch.sh stop                           # stops only the server this bundle started; exit 0 or 24
 ./launch.sh diagnostics                    # a sanitized report you can share (review it first)
 ```
 
@@ -418,6 +457,11 @@ Use the **same bundle, profile and site** for `status`, `logs` and `stop` as for
 must stay running: close the terminal and the server stops (a normal drain), so use `tmux`, `screen`
 or your own service manager if you need it to survive a logout. The launcher does not install a service
 of its own.
+
+**Exit codes of `stop` (from v0.1.3).** `stop` waits for the server's graceful stop. Exit 0 with
+`STOPPED` is a clean stop. If the server does not finish in time, the launcher kills it, prints
+`STOPPED_FORCED` and exits 24, and `diagnostics` records `forced_stop: true`. The server has stopped
+in both cases, so a script should not treat exit 24 with `STOPPED_FORCED` as a failure to stop.
 
 **Where files are.** The bundle is the directory you extracted. Models and runtime state are under
 `${XDG_DATA_HOME:-$HOME/.local/share}/rexl3/`. Do not delete the state tree or the model cache as a
@@ -451,18 +495,24 @@ launcher prints an error **token** in capitals; the table lists the common ones 
 | --- | --- |
 | 0 | Succeeded (`status`: verified ready) |
 | 2 | Bad usage, an unsupported option, profile or site, or an incomplete profile |
-| 20 | A dependency or privilege is missing, a reboot is required, or model-download consent is missing |
+| 20 | A dependency or privilege is missing or at a refused version, a restart is required (`REBOOT_REQUIRED` after a run that changed the driver packages, or `DRIVER_MODULE_MISMATCH`), or model-download consent is missing. From v0.1.3 a restart that is only pending is the warning `REBOOT_PENDING`, not this exit |
 | 21 | Unsupported platform or GPU, or an unapproved environment override |
 | 22 | A conflict: busy GPU or port, too little model disk, an unsafe path, or a stale process identity |
 | 23 | Integrity failure: the bundle, native files or model do not match their locks |
-| 24 | Readiness or runtime failure, or `status` reporting not ready |
+| 24 | Readiness or runtime failure, `status` reporting not ready, or (from v0.1.3) `stop` that had to kill the server (`STOPPED_FORCED`) |
 | 130 | Interrupted |
 
 | What you see | Likely cause | What to do |
 | --- | --- | --- |
 | `UNSUPPORTED_OS`, `UNSUPPORTED_ARCH`, `UNSUPPORTED_GPU` | Not Ubuntu 24.04 ARM64 on a GB10 | Use a supported host |
 | `RUN_AS_NORMAL_USER` | You ran `start` as root or with `sudo` | Run as your normal user; only the installer uses `sudo` |
-| `install-deps` or `doctor` exits 20 on `libnvidia-compute-580` or `nvidia-utils-580` | The recipes pin the NVIDIA driver packages at exactly `580.173.02-0ubuntu0.24.04.1`; a host whose packages have moved past that build is refused, and `setup` and `start` refuse with it | See "Known issues" in the [v0.1.1 release notes](../releases/v0.1.1/NOTES.md): they give a single-node workaround (it skips the launcher's checks and is outside the release's qualification evidence); two-node profiles have none in this release |
+| `DRIVER_NOT_YET_QUALIFIED`, `DEPENDENCY_NOT_YET_QUALIFIED`, `NATIVE_NOT_YET_QUALIFIED`, `REBOOT_PENDING` (from v0.1.3) | Warnings, not failures: the host has a driver build, package or CUDA library newer than the versions the release was qualified on, or a restart is pending | Nothing is required; the command continues. Results on such a version are not covered by the release's qualification evidence. Restart when convenient after `REBOOT_PENDING` |
+| `SYSTEM_DEPENDENCY_VERSION_MISMATCH` (exit 20) | In a v0.1.3 recipe: a package is below its tested floor, on another major version, or an NCCL build for another CUDA major version; or the driver is not a 580-branch build at or above 580.142; or the two driver packages are different builds | Run `./launch.sh install-deps`, or install an accepted version with the host package manager; the message names what is accepted |
+| `DRIVER_PACKAGE_UNAVAILABLE` (exit 20, from v0.1.3) | The driver package `install-deps` would install is no longer offered by your package repositories | Install any 580-branch build at or above 580.142 with the host package manager, reboot, and rerun `./launch.sh doctor` |
+| `DRIVER_MODULE_MISMATCH` (exit 20, from v0.1.3) | The NVIDIA driver was upgraded without a restart, so the loaded kernel module is not the installed build | Restart the host; the launcher never reboots |
+| `DRIVER_VERSION_MISMATCH_ACROSS_RANKS`, `DEPENDENCY_VERSION_MISMATCH_ACROSS_RANKS`, `NATIVE_VERSION_MISMATCH_ACROSS_RANKS` (from v0.1.3) | The two nodes of a two-node profile have different driver, package or CUDA library versions. Each node alone may be accepted; the pair is not | Install the same version on both nodes |
+| A v0.1.1 or v0.1.2 recipe: `install-deps` or `doctor` exits 20 on `libnvidia-compute-580` or `nvidia-utils-580` | Those recipes pin the NVIDIA driver packages at exactly `580.173.02-0ubuntu0.24.04.1`; a host whose packages have moved past that build is refused, and `setup` and `start` refuse with it | Use the v0.1.3 version of the recipe. Otherwise see "Known issues" in the [v0.1.1 release notes](../releases/v0.1.1/NOTES.md): they give a single-node workaround (it skips the launcher's checks and is outside the release's qualification evidence); two-node profiles have none in those releases |
+| `STOPPED_FORCED` from `stop` (exit 24, from v0.1.3) | The server did not finish its graceful stop in time and the launcher killed it | The server has stopped. `diagnostics` records `forced_stop: true` and the server's exit code (section 6) |
 | `MODEL_DOWNLOAD_APPROVAL_REQUIRED` | The model is missing and you did not consent | Review the size, then add `--accept-model-download` |
 | `INSUFFICIENT_MODEL_DISK` | Not enough free disk for the remaining download | Free space, then rerun `setup`; partial files already count |
 | `MODEL_DOWNLOAD_FAILED` | Network or access problem | Restore access, rerun `setup`: it resumes at the same pin |
@@ -556,7 +606,7 @@ security problem follow [SECURITY](../SECURITY.md) instead: never an issue and n
 ./launch.sh --yes start [--profile P]                run in the foreground until READY, then serve
 ./launch.sh status [--profile P]                     0 = ready, 24 = not ready
 ./launch.sh logs [--profile P] --lines N --no-follow bounded log tail
-./launch.sh stop [--profile P]                       stop the server this bundle started
+./launch.sh stop [--profile P]                       stop the server this bundle started; 0 = clean, 24 = forced (STOPPED_FORCED)
 ./launch.sh diagnostics [--profile P]                sanitized report to share
 ./launch.sh reset-state [--profile P]                only after proving nothing is running
 ```

@@ -21,29 +21,50 @@ This repository is the **production** repository. It holds:
   development repository at the release's engine commit.
 
 Engine development, model validation and sealing happen in the development repository,
-`REXL3/REXL3-dev`; the engine source here is a snapshot of it, and `SOURCE_BUILD.md` says how to build it.
+`REXL3/REXL3-dev`; the engine source here is a snapshot of it, `SOURCE_BUILD.md` says how to build it,
+and [docs/REPRODUCIBLE_BUILDS.md](docs/REPRODUCIBLE_BUILDS.md) says what must match for two builds to
+give the same binaries.
 Rules for contributing are in
 [CONTRIBUTING.md](CONTRIBUTING.md); how a recipe gets here is in [docs/PROMOTION.md](docs/PROMOTION.md).
 
-> **Status: v0.1.1 is released** (2026-11-12). The v0.1.1 models below are published as assets of
-> the [v0.1.1 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.1), built from engine
-> commit `75031112ba1279b6da97d5604be5160648cc9f2c`. The
+> **Status: v0.1.3 is the latest release.** The v0.1.3 models below are published as assets of
+> the [v0.1.3 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.3), built from engine
+> commit `0c8bc43cf37318210544cd54da80b5b0bb6ccd76`. It is a fix release: every recipe in it was
+> qualified again on that one engine build. The earlier versions stay available: the
+> [v0.1.1 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.1) and the
+> [v0.1.2 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.2) (the same recipes, repackaged),
+> both on engine commit `75031112ba1279b6da97d5604be5160648cc9f2c`, and the
 > [v0.1.0 release](https://github.com/REXL3/REXL3/releases/tag/v0.1.0), built from engine commit
-> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`, holds the earlier versions.
+> `afc9b5dfb69d070a306ffe6696d9b4f96db4ddec`.
 
-## v0.1.1 models
+## v0.1.3 models
 
 | Model | Version | Architecture | Runtime id | Profiles: context, nodes, port | Vision | Pack sheet |
 | --- | --- | --- | --- | --- | --- | --- |
-| Qwen3.8-27B | v4 | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on | [qwen3.8-27b](docs/packs/qwen3.8-27b.md) |
-| Qwen3.8-Flash-Next | v3 | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (default) and `qwen38-flash-next-single-262k-draft`: 262,144 tokens, one node, port 8899 | off | [qwen3.8-flash-next](docs/packs/qwen3.8-flash-next.md) |
-| GLM-5.3-Flash | v2 | `glm` (glm5_next) | `glm53-flash-sage-2.25` | `glm53-flash-single`: 262,144 tokens, one node, port 8950 | on | [glm-5.3-flash](docs/packs/glm-5.3-flash.md) |
-| GLM-5.3-Flash, two nodes | v1 | `glm` (glm5_next) | `glm53-flash-tp2-sage-2.25` | `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on | [glm-5.3-flash-tp2](docs/packs/glm-5.3-flash-tp2.md) |
-| RED-SNOW-5.3-Flash, two nodes | v1 | `glm` (glm5_next) | `redsnow-5.3-flash-tp2-sage-4.91` | `redsnow-tp2-512k`: 524,288 tokens, two nodes, port 8952 | on | [red-snow-5.3-flash-tp2](docs/packs/red-snow-5.3-flash-tp2.md) |
-| Nemotron-3.5-Super-VL | v2 | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on | [nemotron-3.5-super-vl](docs/packs/nemotron-3.5-super-vl.md) |
-| MiniCPM-V-4.7-35B-A3B | v1 | `minicpmv4_7` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k`: 262,144 tokens, one node, port 8889 | on | [minicpm-v-4.7-35b-a3b](docs/packs/minicpm-v-4.7-35b-a3b.md) |
-| DeepSeek-V4.1-Flash-1017, two nodes | v1 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off | [deepseek-v4.1-flash-1017-tp2](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
-| Ling-3.1-Flash-1019 | v1 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-262k`: 262,144 tokens, one node, port 8889 | off | [ling-3.1-flash-1019](docs/packs/ling-3.1-flash-1019.md) |
+| Qwen3.8-27B | v5 | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on | [qwen3.8-27b](docs/packs/qwen3.8-27b.md) |
+| Qwen3.8-Flash-Next | v4 | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (default) and `qwen38-flash-next-single-262k-draft`: 262,144 tokens, one node, port 8899 | off | [qwen3.8-flash-next](docs/packs/qwen3.8-flash-next.md) |
+| CYBER-FROST-3.8 | v1 | `qwen4_exp` (family `qwen_flash_next`) | `cyberfrost-3.8-sage-rexl3-3.35` | `cyberfrost-3.8-single-262k`: 262,144 tokens, one node, port 8899 | off | none yet |
+| GLM-5.3-Flash | see the note below | `glm` (glm5_next) | `glm53-flash-sage-2.25` | `glm53-flash-single`: 262,144 tokens, one node, port 8950 | on | [glm-5.3-flash](docs/packs/glm-5.3-flash.md) |
+| GLM-5.3-Flash, two nodes | v2 | `glm` (glm5_next) | `glm53-flash-tp2-sage-2.25` | `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on | [glm-5.3-flash-tp2](docs/packs/glm-5.3-flash-tp2.md) |
+| RED-SNOW-5.3-Flash, two nodes | v2 | `glm` (glm5_next) | `redsnow-5.3-flash-tp2-sage-4.91` | `redsnow-tp2-512k`: 524,288 tokens, two nodes, port 8952 | on | [red-snow-5.3-flash-tp2](docs/packs/red-snow-5.3-flash-tp2.md) |
+| Nemotron-3.5-Super-VL | v3 | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on | [nemotron-3.5-super-vl](docs/packs/nemotron-3.5-super-vl.md) |
+| MiniCPM-V-4.7-35B-A3B | v2 | `minicpmv4_7` | `minicpmv47-35b-a3b-rexl3-sage-6.08` | `minicpmv47-single-262k`: 262,144 tokens, one node, port 8889 | on | [minicpm-v-4.7-35b-a3b](docs/packs/minicpm-v-4.7-35b-a3b.md) |
+| DeepSeek-V4.1-Flash-1017 | v2 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-1.55` | `dsv41-single-262k`: 262,144 tokens, one node, port 8940 | off | [deepseek-v4.1-flash-1017](docs/packs/deepseek-v4.1-flash-1017.md) |
+| DeepSeek-V4.1-Flash-1017, two nodes | v2 | `deepseek_v41` (family `deepseek-v4.1`) | `dsv41-flash-1017-sage-rexl3-1.55` | `dsv41-tp2-1m`: 1,048,576 tokens, two nodes, port 8940 | off | [deepseek-v4.1-flash-1017-tp2](docs/packs/deepseek-v4.1-flash-1017-tp2.md) |
+| Ling-3.1-Flash-1019 | v2 | `bailing_moe_v3` | `ling31-flash-1019-sage-1.51` | `ling31-single-262k`: 262,144 tokens, one node, port 8889 | off | [ling-3.1-flash-1019](docs/packs/ling-3.1-flash-1019.md) |
+
+Notes on this table:
+
+- **GLM-5.3-Flash, single node:** take its version from the
+  [v0.1.3 release page](https://github.com/REXL3/REXL3/releases/tag/v0.1.3), where its assets are named
+  `glm53-flash-sage-2.25-v<N>-...`. If that page holds no such assets, the single-node recipe is not
+  part of v0.1.3, and version 2 in the v0.1.1 and v0.1.2 releases is the current one.
+- **CYBER-FROST-3.8** is new in v0.1.3. Its `profile.json` also lists the opt-in choice
+  `cyberfrost-3.8-dflash-single-262k`, which is not part of v0.1.3; use the default choice.
+- **DeepSeek-V4.1-Flash-1017, single node,** is in v0.1.0 and v0.1.3, and not in v0.1.1 or v0.1.2.
+- **RED-SNOW-5.3-Flash** has no single-node recipe in v0.1.3.
+- A pack sheet names the version it describes. Where that is an earlier version than this table's, the
+  v0.1.3 release notes hold the current version's figures.
 
 ## First release (v0.1.0) models
 
@@ -119,7 +140,7 @@ release asset's name, so never use it to find the file. The steps:
 
 ```bash
 # 1. Download your model's approval and bundle from the exact tag
-TAG=v0.1.1
+TAG=v0.1.3
 RUNTIME_ID=<runtime-id>          # the prefix of your model's asset names on the release page
 DL=$(mktemp -d "$HOME/rexl3-dl.XXXXXX")
 gh release download "$TAG" -R REXL3/REXL3 -D "$DL" \
@@ -154,11 +175,17 @@ done
 ./launch.sh --yes start                       # foreground; verified READY before serving
 ```
 
-If `install-deps` or `doctor` exits 20 on the NVIDIA driver packages, the host's packages have moved
-past the build the recipes pin (`580.173.02-0ubuntu0.24.04.1`). This is a known issue of the release:
-see "Known issues" in the [v0.1.1 release notes](releases/v0.1.1/NOTES.md) and section 8 of the
-[user guide](docs/USER_GUIDE.md). The notes give a single-node workaround; two-node profiles have none
-in this release.
+From v0.1.3 the launcher judges host packages by known-working versions, not by one exact build. Any
+NVIDIA 580-branch driver build from 580.142 is accepted. A build after 580.178.04, the highest that
+v0.1.3 was qualified on, prints the warning `DRIVER_NOT_YET_QUALIFIED` and the command continues.
+`DEPENDENCY_NOT_YET_QUALIFIED`, `NATIVE_NOT_YET_QUALIFIED` and `REBOOT_PENDING` are warnings in the same
+way. Results on a version newer than the qualified ones are not covered by the release's qualification
+evidence. A two-node recipe also needs `libnccl2` 2.30.7 or later, the same version on both nodes.
+Section 8 of the [user guide](docs/USER_GUIDE.md) lists what is still refused.
+
+The recipes of v0.1.1 and v0.1.2 pin the driver packages at exactly `580.173.02-0ubuntu0.24.04.1`, and
+their `install-deps` and `doctor` exit 20 on a host that has moved past that build: see "Known issues"
+in the [v0.1.1 release notes](releases/v0.1.1/NOTES.md), or use v0.1.3.
 
 Run the launcher as your normal user, never with `sudo`. `--yes` approves routine package
 installation only; the model download needs the separate `--accept-model-download` consent. From a
@@ -260,8 +287,10 @@ All details below are read from the engine's source on dev main.
 | `GET /metrics` | Prometheus text: requests, queue, tokens, speculation, prefix-cache counters, build info |
 
 `response_format` values `json_object` and `json_schema` are refused (plain text only). `n` other
-than 1, `logit_bias`, non-zero penalties, `tool_choice` `required`/named function,
-`parallel_tool_calls` and per-token logprobs are refused by name with a 400.
+than 1, `logit_bias`, non-zero penalties, `tool_choice` `required`/named function and per-token
+logprobs are refused by name with a 400. From v0.1.3 `parallel_tool_calls` is accepted: `true`, null
+or absent returns every tool call the reply makes, and `false` ends the reply at its first complete
+tool call. Earlier releases refuse the field with a 400.
 
 ### Speculative decoding
 
@@ -314,8 +343,9 @@ thought.
 ### Memory admission planning
 
 Before reading a weight, the engine plans from `MemAvailable` and **refuses a configuration that does
-not fit** (fail-closed). `REXL3_MEMORY_FLOOR_GIB` sets the free-memory floor (default 8, fractions
-allowed, ≥0.25 validated). KV pool and slots are sized from the plan (`--slots`, `--kv-tokens`,
+not fit** (fail-closed). `REXL3_MEMORY_FLOOR_GIB` sets the free-memory floor (engine default 8, fractions
+allowed, ≥0.25 validated; a recipe's `profile.json` can set its own, as Ling-3.1-Flash-1019 does with
+1.5 from v0.1.3). KV pool and slots are sized from the plan (`--slots`, `--kv-tokens`,
 `--kv-headroom-tokens`); the prefix cache is carved from spare memory.
 
 ### EXL3 formats

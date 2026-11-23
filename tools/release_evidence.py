@@ -977,6 +977,117 @@ def require_thinking_exception_binding(doc, capability_cases, root, expected, *,
     require(strict['verdict'] == 'PASS' or (isinstance(strict.get('failure'), str) and strict['failure'].strip()),
             'a strict FAIL must record its failure')
 
+# Superseded history (REXL3/REXL3-dev#356, at the v0.1.3 engine commit). A qualifier that reruns a row whose probe changed
+# archives the earlier attempt instead of dropping it: the receipt lists every archived attempt with its rerun,
+# and ``superseded_archive`` names the exact archive bytes. The verifier binds both and ships their files as evidence.
+ATTEMPT_KEYS = frozenset({'id', 'gate', 'phase', 'status', 'probe_sha256', 'error', 'row_sha256', 'result',
+                          'elapsed_s', 'evidence', 'counters_before', 'counters_after', 'source_hashes'})
+
+
+def _validate_attempt_ref(ref, root):
+    require(isinstance(ref, dict) and set(ref) == {'path', 'sha256'}, 'invalid superseded evidence reference')
+    rel = relative_path(ref['path'])
+    full_hash(ref['sha256'])
+    require(sha256_file(safe_file(root, rel)) == ref['sha256'], 'superseded evidence hash drift')
+
+
+def _validate_attempt(attempt, root):
+    """One archived attempt or rerun: typed fields, and every result/evidence byte it names."""
+    require(isinstance(attempt, dict) and set(attempt) == ATTEMPT_KEYS, 'invalid superseded attempt')
+    require(isinstance(attempt['id'], str) and bool(attempt['id']), 'invalid superseded row id')
+    require(isinstance(attempt['gate'], str) and isinstance(attempt['phase'], str),
+            'invalid superseded row gate/phase')
+    require(attempt['status'] in ('PASS', 'FAIL'), 'invalid superseded row status')
+    if attempt['probe_sha256'] is not None:
+        full_hash(attempt['probe_sha256'])
+    full_hash(attempt['row_sha256'])
+    require(attempt['error'] is None or isinstance(attempt['error'], str), 'invalid superseded row error')
+    require(type(attempt['elapsed_s']) in (int, float) and attempt['elapsed_s'] >= 0,
+            'invalid superseded row elapsed time')
+    require(isinstance(attempt['evidence'], list), 'invalid superseded evidence list')
+    _validate_attempt_ref(attempt['result'], root)
+    for ref in attempt['evidence']:
+        _validate_attempt_ref(ref, root)
+    hashes = attempt['source_hashes']
+    require(hashes is None or (isinstance(hashes, dict) and all(isinstance(name, str) for name in hashes)),
+            'invalid measured source hashes')
+    for digest in (hashes or {}).values():
+        full_hash(digest)
+    for key in ('counters_before', 'counters_after'):
+        require(attempt[key] is None or isinstance(attempt[key], dict), 'invalid superseded counters')
+
+
+def archived_rows(path):
+    """The archive's rows, each checked against its own ``row_sha256`` (canonical JSON of the other fields)."""
+    raw = path.read_bytes()
+    require(not raw or raw.endswith(b'\n'), 'partial superseded archive')
+    rows = []
+    for line in raw.splitlines():
+        row = loads(line)
+        require(isinstance(row, dict), 'superseded row integrity failed')
+        digest = row.pop('row_sha256', None)
+        canonical = json.dumps(row, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                               allow_nan=False).encode('utf-8')
+        require(digest == hashlib.sha256(canonical).hexdigest(), 'superseded row integrity failed')
+        row['row_sha256'] = digest
+        rows.append(row)
+    return rows
+
+
+def validate_superseded(doc, *, evidence_root):
+    """Bind archived attempts, their bytes, and fingerprint-authorized reruns.
+
+    Absent in legacy receipts; current qualifiers always emit a list (empty before any supersession) and, when it is
+    not empty, the archive that holds the same attempts. A rerun must name the same row under a different probe
+    fingerprint (a same-fingerprint reroll is forbidden), and its result must be current gate evidence. An
+    all_pass receipt needs a PASS rerun for every superseded row outside performance_smoke.
+    """
+    if 'superseded' not in doc and 'superseded_archive' not in doc:
+        return
+    root = checked_path(evidence_root)
+    records, archive = doc.get('superseded'), doc.get('superseded_archive')
+    require(isinstance(records, list), 'superseded must be a list')
+    if not records:
+        require(archive is None, 'empty superseded history cannot name an archive')
+        return
+    _validate_attempt_ref(archive, root)
+    rows = archived_rows(safe_file(root, relative_path(archive['path'])))
+    require(len(rows) == len(records), 'superseded summary/archive count mismatch')
+    gate_refs = {(ref['path'], ref['sha256']) for gate in doc.get('gates', {}).values()
+                 for ref in gate.get('evidence', [])}
+    for entry, row in zip(records, rows):
+        require(isinstance(entry, dict) and set(entry) == ATTEMPT_KEYS | {'rerun'}, 'invalid superseded summary entry')
+        attempt = {key: entry[key] for key in ATTEMPT_KEYS}
+        _validate_attempt(attempt, root)
+        require({key: row.get(key) for key in ATTEMPT_KEYS} == attempt, 'superseded summary differs from archived attempt')
+        rerun = entry['rerun']
+        if rerun is None:
+            continue
+        _validate_attempt(rerun, root)
+        require(rerun['id'] == entry['id'], 'superseded rerun names another row')
+        require(rerun['probe_sha256'] != entry['probe_sha256'], 'same-fingerprint rerun is forbidden')
+        require(entry['status'] != 'FAIL' or entry['probe_sha256'] is not None,
+                'a legacy failure has no fingerprint authorizing rerun')
+        require((rerun['result']['path'], rerun['result']['sha256']) in gate_refs,
+                'superseded rerun result is not current gate evidence')
+    if doc.get('all_pass') is True:
+        for row_id in {entry['id'] for entry in records if entry['gate'] != 'performance_smoke'}:
+            require(any(entry['id'] == row_id and entry['rerun'] is not None and entry['rerun']['status'] == 'PASS'
+                        for entry in records), 'all_pass seal has a failed/missing rerun for ' + row_id)
+
+
+def superseded_files(receipt):
+    """Relative paths of the superseded archive and of every archived attempt's and rerun's result and evidence."""
+    paths = set()
+    if receipt.get('superseded_archive') is not None:
+        paths.add(relative_path(receipt['superseded_archive']['path']))
+    for entry in receipt.get('superseded') or []:
+        for attempt in (entry, entry.get('rerun')):
+            if attempt is not None:
+                paths.add(relative_path(attempt['result']['path']))
+                paths.update(relative_path(ref['path']) for ref in attempt['evidence'])
+    return paths
+
 
 def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
     """Validate typed PASS counts, every referenced byte, identity and raw case summaries.
@@ -1046,6 +1157,7 @@ def validate_receipt(path, *, evidence_root, expected, runtime_files=None):
     for gate, source in (carried or {}).items():
         if 'source_bundle' in source:
             validate_source_bundle(root, gate, source, gates[gate], expected, bundles)
+    validate_superseded(doc, evidence_root=root)
     return doc
 
 
@@ -1316,6 +1428,8 @@ def receipt_files(approval, root):
         paths.add(relative_path(receipt['identity_receipt']['path']))
         paths.update(relative_path(ref['path']) for gate in receipt['gates'].values() for ref in gate['evidence'])
         paths.update(carried_source_files(receipt.get('carried_gates'), root))
+        validate_superseded(receipt, evidence_root=root)
+        paths.update(superseded_files(receipt))
     require(not paths & forbidden, 'evidence asset collision')
     return {name: dict(record(safe_file(root, name)), mode=0o644) for name in sorted(paths)}
 

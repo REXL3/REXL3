@@ -1,0 +1,85 @@
+{
+  "schema": "rexl3.model-lock.v1",
+  "packs": {
+    "target": {
+      "repo": "r0b0tlab/MiniCPM-V-4.7-35B-A3B-EXL3-6.08bpw-REXL3-SAGE",
+      "revision": "25b7aa3361dd8e319c7503ebc002947ceb1fd290",
+      "fingerprint": "sha256:96eb01e7fdf81af2c1e248f81114dea2706c6383e63704774bf51fa85025458a",
+      "license": "Apache-2.0 (model card metadata of the pack repository)",
+      "files": {
+        "chat_template.jinja": {
+          "sha256": "c4531cacbf2a0ab65170433d7a4f371d11b7599cf96c04b192e6372432636c70",
+          "bytes": 7250
+        },
+        "config.json": {
+          "sha256": "fee3260a2262f42942f1641d330c05307786f1b0261054d704a5b457d4540e6f",
+          "bytes": 3555
+        },
+        "generation_config.json": {
+          "sha256": "7fa47217744f0e0918f6cf846e7541e4f322e6bc66917044cf2ad580699216c8",
+          "bytes": 186
+        },
+        "model-00001-of-00004.safetensors": {
+          "sha256": "4aa6c7522d8d23a71362bdc8ad3a6510b08f5d1f5b34024b774517dd9951ead2",
+          "bytes": 8594666808
+        },
+        "model-00002-of-00004.safetensors": {
+          "sha256": "aa679b56932ab09da779ae72f7b82baa5557fac5784559d0592685ac4db363a8",
+          "bytes": 8594756736
+        },
+        "model-00003-of-00004.safetensors": {
+          "sha256": "1ced2798c2397ae8fbcf5e889ac3db13bb60fb8e88edcb86ab21a1ca05872dd0",
+          "bytes": 8595038292
+        },
+        "model-00004-of-00004.safetensors": {
+          "sha256": "2d98f45303b30ce58dac6372aeab8044e07829f092536c1afa2c1d41aef6f585",
+          "bytes": 2512549880
+        },
+        "model.safetensors.index.json": {
+          "sha256": "b89563e286b4e69c642c6ee76c560b8ba14aea58ecfc307a1d9f94625fcdb0cd",
+          "bytes": 12702385
+        },
+        "preprocessor_config.json": {
+          "sha256": "c64289d04f36e48d9d059e3a0069f54062b2ef6044a807adb448b98449cb54de",
+          "bytes": 148
+        },
+        "processor_config.json": {
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytes": 2
+        },
+        "quantization_config.json": {
+          "sha256": "cb04d33ea43c0a1c0460a213cf1ff12a29ea1bed8a3ec7a70a26f885967e0d36",
+          "bytes": 25985139
+        },
+        "tokenizer.json": {
+          "sha256": "e4608c5d7b3f4f30ba83be16a82cdac856b2e7191d40f0a08cbacc76c2a926ee",
+          "bytes": 20001935
+        },
+        "tokenizer_config.json": {
+          "sha256": "03c8faa31145d89c815b86dffc9aa7fa732ebebb5cb1a47b1663c17d0477eab9",
+          "bytes": 8976
+        }
+      }
+    },
+    "draft": {
+      "repo": "r0b0tlab/MiniCPM-V-4.7-35B-A3B-DSpark-EXL3-6.00bpw",
+      "revision": "e1ea1a3045277ea69a108b4d477983affae0f3c1",
+      "fingerprint": "sha256:7731abc818a30cd7636af7d72de016d21371c3f5c5c46e5ab38121e602bdf5ab",
+      "license": "Apache-2.0 (model card metadata of the pack repository)",
+      "files": {
+        "config.json": {
+          "sha256": "5d010326a72ddae21d126d8a86bf5ffc829e6550177f141618069e60e3d7a8fb",
+          "bytes": 1873
+        },
+        "model.safetensors": {
+          "sha256": "728cdd789e20c142f1085e16f8381973f3a7018d4fabcbc776c13b6e77eff964",
+          "bytes": 451186749
+        },
+        "quantization_config.json": {
+          "sha256": "28c6e3b9784a7390b15dbccf0f8e7a2ddd9da836a395be6f1089026f0a6714a4",
+          "bytes": 48749
+        }
+      }
+    }
+  }
+}

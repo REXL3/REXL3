@@ -1163,7 +1163,7 @@ class BitIdentityAlias(unittest.TestCase):
 
 
 class SupersededHistory(ReceiptContract):
-    """A qualifier rerun of a row whose probe changed archives the earlier attempt (REXL3/REXL3-dev#356): the
+    """A qualifier rerun of a row whose probe changed archives the earlier attempt: the
     receipt's ``superseded`` list and ``superseded_archive`` are bound by the verifier and their files ship as
     evidence, so an approval sealed at the v0.1.3 engine commit verifies here with the same member set."""
 

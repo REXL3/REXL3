@@ -977,7 +977,7 @@ def require_thinking_exception_binding(doc, capability_cases, root, expected, *,
     require(strict['verdict'] == 'PASS' or (isinstance(strict.get('failure'), str) and strict['failure'].strip()),
             'a strict FAIL must record its failure')
 
-# Superseded history (REXL3/REXL3-dev#356, at the v0.1.3 engine commit). A qualifier that reruns a row whose probe changed
+# Superseded history (qualification receipts from the v0.1.3 engine commit on). A qualifier that reruns a row whose probe changed
 # archives the earlier attempt instead of dropping it: the receipt lists every archived attempt with its rerun,
 # and ``superseded_archive`` names the exact archive bytes. The verifier binds both and ships their files as evidence.
 ATTEMPT_KEYS = frozenset({'id', 'gate', 'phase', 'status', 'probe_sha256', 'error', 'row_sha256', 'result',

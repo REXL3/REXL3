@@ -1,0 +1,7 @@
+## Highlights
+
+- **DeepSeek-V4.1-Flash-1017** (EXL3 1.55 bits per weight, SAGE) on one GB10, version 2 (`dsv41-single-262k`: 262,144 tokens, 1 slot, q4 KV cache, port 8940, speculative decoding and prefix cache on, image input off), requalified on engine 0.1.3 with a fresh full gate chain. Version 1 shipped in v0.1.0. It pins pack revision `c40cf25c` (#128).
+  - Gates: all passed. Exactness 68 of 68, including chunked prefill equal to whole prefill at five prompt lengths up to 261,120 tokens, with 128- and 256-token chunks. Context needles 8 of 8 at 131,072 and 262,144 tokens.
+  - Speed on the release binary: 29.5 tok/s generation for one stream (median of 3 runs, each the median of 5 streamed replies of 256 tokens, short context). Prompt speed 1,279 and 1,034 tok/s at 50% and 100% of the window (cold prompts, median of 3 runs). Lowest free memory 2.5 GiB during those runs, with no swap, and 1.24 GiB over the whole qualification (on full-window prompts). Run nothing else on the host.
+  - Q200 182 of 200 (91.0%) with reasoning effort off, greedy, an 8,192-token budget for text and BFCL, one client worker on another host; 7 text replies ran to the budget and count as incorrect. GSM8K 78/80, HumanEval 40/40, IFEval 35/40, hard reasoning 16/20, BFCL hard-20 13/20. Every suite is at or above the floors sealed for version 1; hard reasoning is exactly at its floor, and its 4 misses are replies that ran to the budget.
+  - v0.1.0 measured 29.6 tok/s and 1,274 / 1,034 tok/s, with the same Q200 scores in every suite.

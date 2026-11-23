@@ -44,7 +44,7 @@ Rules for contributing are in
 | Qwen3.8-27B | v5 | `qwen3_5` (family `qwen`) | `qwen38-27b-dflash2-exl3-4.00` | `qwen38-single-262k`: 262,144 tokens, one node, port 8889 | on | [qwen3.8-27b](docs/packs/qwen3.8-27b.md) |
 | Qwen3.8-Flash-Next | v4 | `qwen4_exp` (family `qwen_flash_next`) | `qwen38-flash-next-exl3-3.05` | `qwen38-flash-next-single-262k` (default) and `qwen38-flash-next-single-262k-draft`: 262,144 tokens, one node, port 8899 | off | [qwen3.8-flash-next](docs/packs/qwen3.8-flash-next.md) |
 | CYBER-FROST-3.8 | v1 | `qwen4_exp` (family `qwen_flash_next`) | `cyberfrost-3.8-sage-rexl3-3.35` | `cyberfrost-3.8-single-262k`: 262,144 tokens, one node, port 8899 | off | [cyber-frost-3.8](docs/packs/cyber-frost-3.8.md) |
-| GLM-5.3-Flash | see the note below | `glm` (glm5_next) | `glm53-flash-sage-2.25` | `glm53-flash-single`: 262,144 tokens, one node, port 8950 | on | [glm-5.3-flash](docs/packs/glm-5.3-flash.md) |
+| GLM-5.3-Flash | v3 | `glm` (glm5_next) | `glm53-flash-sage-2.25` | `glm53-flash-single`: 262,144 tokens, one node, port 8950 | on | [glm-5.3-flash](docs/packs/glm-5.3-flash.md) |
 | GLM-5.3-Flash, two nodes | v2 | `glm` (glm5_next) | `glm53-flash-tp2-sage-2.25` | `glm53-flash-tp2-1m`: 1,048,576 tokens, two nodes, port 8950 | on | [glm-5.3-flash-tp2](docs/packs/glm-5.3-flash-tp2.md) |
 | RED-SNOW-5.3-Flash, two nodes | v2 | `glm` (glm5_next) | `redsnow-5.3-flash-tp2-sage-4.91` | `redsnow-tp2-512k`: 524,288 tokens, two nodes, port 8952 | on | [red-snow-5.3-flash-tp2](docs/packs/red-snow-5.3-flash-tp2.md) |
 | Nemotron-3.5-Super-VL | v3 | `nemotron_h_omni` | `nemotron35-super-vl-sage-3.85` | `nemotron35-super-vl-single-1m`: 1,048,576 tokens, one node, port 9100 | on | [nemotron-3.5-super-vl](docs/packs/nemotron-3.5-super-vl.md) |
@@ -55,10 +55,8 @@ Rules for contributing are in
 
 Notes on this table:
 
-- **GLM-5.3-Flash, single node:** take its version from the
-  [v0.1.3 release page](https://github.com/REXL3/REXL3/releases/tag/v0.1.3), where its assets are named
-  `glm53-flash-sage-2.25-v<N>-...`. If that page holds no such assets, the single-node recipe is not
-  part of v0.1.3, and version 2 in the v0.1.1 and v0.1.2 releases is the current one.
+- **GLM-5.3-Flash, single node:** its `profile.json` also lists the opt-in choice
+  `glm53-flash-2.48-dflash-single`, which is not part of v0.1.3; use the default choice.
 - **CYBER-FROST-3.8** is new in v0.1.3. Its `profile.json` also lists the opt-in choice
   `cyberfrost-3.8-dflash-single-262k`, which is not part of v0.1.3; use the default choice.
 - **DeepSeek-V4.1-Flash-1017, single node,** is in v0.1.0 and v0.1.3, and not in v0.1.1 or v0.1.2.
@@ -134,7 +132,7 @@ install a released recipe from the release's assets, never from a development ch
 
 A release holds the assets of **every** model in it. Each model has an approval record named
 `<runtime-id>-v<N>-approval.json` and a runnable bundle named `<runtime-id>-v<N>-bundle.tar.gz`, plus
-source and evidence archives you do not need to run it. Download only your model's two files. The
+source archives you do not need to run it. Download only your model's two files. The
 `bundle.archive` field inside the approval is the archive's name in the development release, not the
 release asset's name, so never use it to find the file. The steps:
 

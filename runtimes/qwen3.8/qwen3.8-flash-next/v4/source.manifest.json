@@ -1,0 +1,134 @@
+{
+  "files": {
+    ".gitignore": {
+      "bytes": 147,
+      "mode": 420,
+      "sha256": "14dc60464fadd8a5a9cb55dd348249747c983986c79d3d194c91d7735c150eea"
+    },
+    "KNOWN_ISSUES.md": {
+      "bytes": 21419,
+      "mode": 420,
+      "sha256": "ff2705cba3ff843d27c73a5d2c464a9434b0a162f10187a57ffd4a3a65570f52"
+    },
+    "LICENSE": {
+      "bytes": 34523,
+      "mode": 420,
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+    },
+    "NOTICE": {
+      "bytes": 1910,
+      "mode": 420,
+      "sha256": "621024793b8773dfbbf0d7438a44569ec1de35fe5be2d5b837e50499ae5203a7"
+    },
+    "README.md": {
+      "bytes": 34557,
+      "mode": 420,
+      "sha256": "14af19614b6849141323eb875371249bb222ec5d5c351a43174abfd8a591c0dd"
+    },
+    "TEMPLATE.json": {
+      "bytes": 1512,
+      "mode": 420,
+      "sha256": "38b0cc55c7efc6e839c288a714a0dbc5ef0784326299e838d828146432917c8d"
+    },
+    "THIRD_PARTY_NOTICES.md": {
+      "bytes": 29408,
+      "mode": 420,
+      "sha256": "b6090a0d7c57d115affbde801872b545a9d4392eb5eae06cfff67b3c60ec7b06"
+    },
+    "dependencies.lock.json": {
+      "bytes": 2789,
+      "mode": 420,
+      "sha256": "34b823098da8e77ca695f7006eca23f4d86b334732ab0edbb25b81f5d74809f2"
+    },
+    "docs/SETUP.md": {
+      "bytes": 27437,
+      "mode": 420,
+      "sha256": "8ccaa656c7b8ce8ce65a34612956040dddc32961858def09ce9e85c6fed6e78c"
+    },
+    "docs/TROUBLESHOOTING.md": {
+      "bytes": 12980,
+      "mode": 420,
+      "sha256": "dbd6c430ffa60b933c4fbdad65c3dae9b17c645f6450a8d3e6352c04ea05b9d7"
+    },
+    "launch.sh": {
+      "bytes": 2701,
+      "mode": 493,
+      "sha256": "f8a3ab0e3f50364bc351a417d31b6faa77a17c9fddb27c9b8764f9639c579842"
+    },
+    "model.lock.json": {
+      "bytes": 4849,
+      "mode": 420,
+      "sha256": "64c4048d9ed08892380baf11664cf9ef2ad9c92244691725b7e7231ac2516560"
+    },
+    "profile.json": {
+      "bytes": 3266,
+      "mode": 420,
+      "sha256": "e360d007aaee04b11de9e8b163d0609b1adbb5fabef95251ca6523cdafa5c064"
+    },
+    "requirements-runtime.lock": {
+      "bytes": 1426,
+      "mode": 420,
+      "sha256": "315afa98afdd809bce6129efc6f6ae6869d878811d6abbb7f85d418e91d24584"
+    },
+    "sbom/DEPENDENCY_NOTICES.md": {
+      "bytes": 2116247,
+      "mode": 420,
+      "sha256": "df474a1fe4bc909b29676808134e1faa156f32047ab95171bb900d6373eeb275"
+    },
+    "sbom/cargo.cdx.json": {
+      "bytes": 163127,
+      "mode": 420,
+      "sha256": "bd1edd35d559b7bfc19e232e0d937aeac897f5da855073d659c763e2a831f074"
+    },
+    "sbom/coverage.json": {
+      "bytes": 187,
+      "mode": 420,
+      "sha256": "33a987258ea54b3bda158e7a7897bf67f65675d1a7ccdd32b24d278ae93ee6ce"
+    },
+    "scripts/bootstrap.sh": {
+      "bytes": 13452,
+      "mode": 493,
+      "sha256": "308f271a4efab379cc826ae79bd448f3d49bb3115e785e5c4dd9b10e1cf5e183"
+    },
+    "scripts/contract.py": {
+      "bytes": 25069,
+      "mode": 493,
+      "sha256": "30c2041878ccbcb5614218784a463beedc4166ac61b474e16cbf099ac88b1d3a"
+    },
+    "scripts/doctor.py": {
+      "bytes": 10148,
+      "mode": 493,
+      "sha256": "2c959b09130a898ea1213a154f4fe3ee7528d8e766ae37cb5192db34eca6470c"
+    },
+    "scripts/fetch_models.py": {
+      "bytes": 19881,
+      "mode": 493,
+      "sha256": "c89c2cd968d8a6f751efcbba458faecfc2caffe82e0ac953b9828e3f91232a7a"
+    },
+    "scripts/install_dependencies.py": {
+      "bytes": 73436,
+      "mode": 493,
+      "sha256": "eca659ac7f5025c6dcbb6c445340e2ab41cf3f58abce5d44dda84f57e64cfc9b"
+    },
+    "scripts/remote_identity.py": {
+      "bytes": 38248,
+      "mode": 493,
+      "sha256": "bc74e5f278c17ac34b97c37f6c8bab11efbdae3373fb106eac5c1b1a22c7c5d8"
+    },
+    "scripts/runtime.py": {
+      "bytes": 62939,
+      "mode": 493,
+      "sha256": "a71523d05ba8af44832264cfd18bf11ebc5c1a9e1a6aada00a74fc238f61fe68"
+    },
+    "site.example.json": {
+      "bytes": 593,
+      "mode": 420,
+      "sha256": "8211e4e6d5a1b2e827ffbb4c896514ed51eeaad3abf80ed9147ec078dc286014"
+    }
+  },
+  "schema": "rexl3.generated-source.v1",
+  "template": {
+    "digest": "sha256:4ee34195f95c706c9dfb6820fbae229f6c19c76a1d0b46dc13a26fe0fa775f4a",
+    "version": "v1"
+  }
+}

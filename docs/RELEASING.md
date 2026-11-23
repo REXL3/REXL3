@@ -90,7 +90,9 @@ A `release/v<X.Y.Z>` branch is opened by a maintainer only (CONTRIBUTING.md sect
   {`dev_commit`, `dev_tree`, `engine_release_tag`, artifact digests}, `models` [{`family`, `model`,
   `version` (v<N>), `runtime_id`, `approval_sha256`, and for a carried-forward model
   `carried_forward`, `qualified_engine_release_tag`, `qualification_tier`, `scope_diff_base`}],
-  `notes`. The release PR attaches the release-scope classification (`tools/release_scope.py
+  `notes`. Two keys are optional: `engine.source_archives` ("Shared engine source archive" below) and
+  the top-level `evidence_assets` ("Evidence archives kept on the development release" below). The
+  release PR attaches the release-scope classification (`tools/release_scope.py
   classify` output) for each model, naming its tier and its scope base (the exact commit the tier
   was assessed against).
 - `releases/v<X.Y.Z>/NOTES.md` — the assembled release notes.
@@ -181,7 +183,9 @@ A manifest may carry the optional key `engine.source_archives` to publish each d
   digest with the manifest. An approval sealed with its own bundled executables and a legacy tag
   names no engine release and cannot share; a manifest that lists such a model omits the key.
 - The expected asset set is then four assets per model (approval, bundle, wrapper source, evidence),
-  one shared engine-source asset per distinct digest, and the engine artifacts.
+  one shared engine-source asset per distinct digest, and the engine artifacts. It is three assets
+  per model (approval, bundle, wrapper source) when the manifest also keeps the evidence archives on
+  the development release (next section).
 - Without the key nothing changes: `v0.1.0` and `v0.1.1` keep their per-model
   `<runtime-id>-v<N>-engine-source.tar.gz` assets and verify as published. To verify an older
   release, run `--verify` with `--repo-root` at an export of that release's tag when main has since
@@ -194,6 +198,58 @@ lists the same models, versions and approval hashes, and the same `engine` block
 `engine.source_archives`. Its models are not `carried_forward` (that names an earlier engine release
 than the manifest's). Its release PR changes only `releases/v<X.Y.Z>/`, `CHANGELOG.md` and the
 consumed fragments: no tree and no registry anchor changes, so nothing is resealed or requalified.
+
+## Evidence archives kept on the development release
+
+Every sealed approval binds one evidence archive (`evidence_asset`: its name, sha256, size and the
+sha256 of every file in it). The archive holds the qualification receipts and the raw run files they
+reference, and those run files can include details of the hosts the qualification ran on. By
+default a release publishes one `<runtime-id>-v<N>-evidence.tar.gz` per model.
+
+A manifest may carry the optional top-level key `evidence_assets` to keep those archives on the
+development release instead of publishing them:
+
+```json
+"evidence_assets": "dev-release"
+```
+
+- `"dev-release"` is the only accepted value. Any other value and the key inside `engine` or a
+  model entry are refused. The manifest's top-level keys are a closed set (`schema`, `version`,
+  `engine`, `models`, `notes`, `evidence_assets`; `tools/release_manifest.py`), so a misspelt
+  switch is refused instead of ignored. Check the mode before `--publish` all the same: the dry run
+  and the assembled notes both state it (below), and a published release cannot be changed.
+- Verification does not change. `tools/cut_release.py --publish` still downloads every model's
+  evidence archive from its development release, unpacks it in that model's own stage and verifies
+  it against the sealed approval with every other asset (archive digest, size and file inventory,
+  every receipt and every raw file a receipt references). A missing or altered archive refuses the
+  cut before the tag or the draft release exists.
+- What changes is the published asset set: the verified evidence archive is not uploaded, and it is
+  not expected on the release. The expected set is then the approval, the bundle and the wrapper
+  source per model, the engine source (per model, or shared with `engine.source_archives`) and the
+  engine artifacts. `--publish` and `--verify` both require exactly that set, so `--verify` refuses a
+  release of such a manifest that carries an evidence archive. The dry run prints an
+  `EVIDENCE_ON_DEV_RELEASE` line before `DRY_RUN_OK`, so the mode is visible before `--publish`.
+- Nothing sealed changes. The approval, its registry anchor and the promoted tree are the same bytes
+  either way, and the approval still names the evidence archive and its digest. The pull-request
+  checks (`verify`, `model-completeness`) read the development release, not the product release, and
+  authenticate each tree against the full evidence exactly as before.
+- `tools/assemble_release_notes.py` reads each model's sealed approval from the checkout (pinned to
+  the manifest's `approval_sha256`). The "Evidence" column then says the archive is not a release
+  asset, and "Assets and checksums" lists each archive's name, sha256 and size with the development
+  release that holds it, and states that the archives are not published with the release and are
+  available to the maintainers. A model's free-text `evidence` field is not shown for such a
+  manifest.
+- What a reader of the product release gives up: the published approval lists the digest of the
+  evidence archive and of every file in it, but the files themselves cannot be downloaded, so the
+  receipts cannot be re-checked from the product release alone. The bundle, the wrapper source and
+  the engine source are still published and still match the digests in the published approval. The
+  pack sheets (`docs/packs/`) for such a release must not point readers to an evidence release asset.
+- Without the key nothing changes: `v0.1.0`, `v0.1.1` and `v0.1.2` published their evidence
+  archives and verify as published.
+
+The switch is per release and is decided by the maintainers in the release PR, where the manifest
+is reviewed. It has to be on `main` in the tools before the ceremony: an older `cut_release.py`
+does not know the key and would publish the archives.
 
 ## The cut_release ceremony (maintainers only)
 
@@ -255,6 +311,9 @@ At the release PR:
 - [ ] The manifest lists the agreed release group (all in-scope models; no model outside the group).
 - [ ] If the manifest carries `engine.source_archives`, the block equals the output of
       `tools/release_manifest.py --source-archives` for this manifest.
+- [ ] If the release keeps its evidence archives on the development release, the manifest carries
+      `"evidence_assets": "dev-release"`, the dry run prints `EVIDENCE_ON_DEV_RELEASE`, and no pack
+      sheet or note points to an evidence release asset.
 - [ ] `releases/v<X.Y.Z>/NOTES.md` assembled from fragments via
       `tools/assemble_release_notes.py`; `CHANGELOG.md` entry added; consumed
       `changes/unreleased/*.md` fragments deleted.

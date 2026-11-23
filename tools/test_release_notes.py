@@ -5,7 +5,8 @@ from pathlib import Path
 
 from tools import assemble_release_notes as n
 from tools import release_evidence as e
-from tools.test_release_evidence import write, encoded
+from tools.test_approve_profile import SyntheticSeal
+from tools.test_release_evidence import write, encoded, sha
 
 VERSION = 'v0.1.0'
 HEX40 = 'a' * 40
@@ -135,6 +136,92 @@ class NotesTest(unittest.TestCase):
         write(self.root, f'releases/{VERSION}/manifest.json', encoded(bad))
         with self.assertRaises(ValueError):
             n.assemble(str(self.root), VERSION)
+
+
+class EvidenceColumnTest(unittest.TestCase):
+    """The Evidence column and the Assets section, with and without `evidence_assets: "dev-release"`."""
+    FAMILY, MODEL = 'qwen3.8', 'qwen3.8-27b'
+    FREE_TEXT = 'synthetic-demo-v1-evidence.tar.gz'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'prod'
+        seal = SyntheticSeal(self.tmp.name)
+        approval, self.approval, _ = seal.published_fixture_model(self.FAMILY, self.MODEL)
+        self.approval_bytes = approval.read_bytes()
+        write(self.root / 'runtimes' / self.FAMILY / self.MODEL / 'v1', 'approval.json', self.approval_bytes)
+        self.doc = manifest()
+        self.doc['models'][0].update(runtime_id='synthetic-demo', approval_sha256=sha(self.approval_bytes),
+                                     evidence=self.FREE_TEXT)
+        template = Path(n.__file__).resolve().parent.parent / 'docs/templates/RELEASE_NOTES.md'
+        write(self.root, 'docs/templates/RELEASE_NOTES.md', template.read_bytes())
+        write(self.root, 'changes/unreleased/slug.md', b'## Highlights\n- A release.\n')
+        self.save()
+
+    def save(self):
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.doc))
+
+    def notes(self):
+        self.assertEqual(n.assemble(str(self.root), VERSION), 0)
+        return (self.root / f'releases/{VERSION}/NOTES.md').read_text()
+
+    def test_without_the_key_the_column_and_the_assets_are_unchanged(self):
+        row = f'| qwen3.8/qwen3.8-27b |  |  |  |  |  |  | {self.FREE_TEXT} |'
+        approval_line = f"- qwen3.8/qwen3.8-27b v1: approval sha256 `{self.doc['models'][0]['approval_sha256']}`"
+        self.assertEqual(n.supported_models_table(self.doc).splitlines()[2], row)
+        self.assertEqual(n.assets_section(self.doc),
+                         f'- `rexl3-serve.tar.gz` sha256 `{HEX64}`\n' + approval_line)
+        # the production tree is not read for a manifest without the key
+        self.assertEqual(n.assets_section(self.doc, self.root / 'absent'), n.assets_section(self.doc))
+        notes = self.notes()
+        self.assertIn(row + '\n', notes)
+        self.assertIn(approval_line + '\n', notes)
+        self.assertNotIn('development release `', notes.split('## Assets and checksums')[1].split('## Provenance')[0])
+        self.assertNotIn('not published', notes)
+
+    def test_with_the_key_the_notes_name_the_sealed_archive_and_say_it_is_not_published(self):
+        self.doc['evidence_assets'] = 'dev-release'
+        self.save()
+        notes = self.notes()
+        evidence = self.approval['evidence_asset']
+        table = notes.split('## Supported models')[1].split('## New features')[0]
+        self.assertIn('| not a release asset; see Assets and checksums |', table)
+        # the manifest's free-text asset name is never shown as if it were a download
+        self.assertNotIn(self.FREE_TEXT, notes)
+        assets = notes.split('## Assets and checksums')[1].split('## Provenance')[0]
+        self.assertIn(f"- qwen3.8/qwen3.8-27b v1: approval sha256 `{sha(self.approval_bytes)}`; qualification evidence "
+                      f"`{evidence['archive']}` sha256 `{evidence['sha256']}` ({evidence['bytes']} bytes), bound by the "
+                      f"sealed approval and held on the private development release `{self.approval['approve_tag']}`\n",
+                      assets)
+        self.assertIn('are not published with this release and cannot be downloaded from it', assets)
+        self.assertIn('available to the maintainers', assets)
+        self.assertEqual(self.notes(), notes)  # idempotent
+
+    def test_with_the_key_the_approval_must_be_the_one_the_manifest_pins(self):
+        self.doc['evidence_assets'] = 'dev-release'
+        self.save()
+        tree = self.root / 'runtimes' / self.FAMILY / self.MODEL / 'v1'
+        other = dict(self.approval, evidence_asset=dict(self.approval['evidence_asset'], sha256='0' * 64))
+        (tree / 'approval.json').write_bytes(encoded(other))
+        with self.assertRaisesRegex(ValueError, 'local approval bytes differ from the manifest'):
+            n.assemble(str(self.root), VERSION)
+        (tree / 'approval.json').unlink()
+        with self.assertRaises((ValueError, OSError)):
+            n.assemble(str(self.root), VERSION)
+        self.assertFalse((self.root / f'releases/{VERSION}/NOTES.md').exists())
+        with self.assertRaisesRegex(ValueError, 'need the production tree'):
+            n.assets_section(self.doc)
+        with self.assertRaisesRegex(ValueError, 'need the production tree'):
+            n.supported_models_table(self.doc)
+
+    def test_an_invalid_value_is_refused(self):
+        self.doc['evidence_assets'] = 'private'
+        self.save()
+        with self.assertRaisesRegex(ValueError, 'invalid evidence_assets'):
+            n.assemble(str(self.root), VERSION)
+        with self.assertRaisesRegex(ValueError, 'invalid evidence_assets'):
+            n.assets_section(self.doc, self.root)
 
 
 if __name__ == '__main__':

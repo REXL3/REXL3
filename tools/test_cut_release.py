@@ -1,4 +1,7 @@
 """cut_release.py: dry-run gates and publish/verify ceremony, fully mocked at the API boundary."""
+import contextlib
+import gzip
+import io
 import json
 import re
 import shutil
@@ -427,6 +430,18 @@ class UnifiedReleaseCutTest(CutFixture):
         self.assertNotIn('synthetic-demo-v1-engine-source.tar.gz', published)
         self.assertEqual(published, c.model_assets(self.manifest, self.root))
 
+    def test_evidence_kept_on_the_dev_release_is_not_published_from_a_unified_release(self):
+        self.manifest['evidence_assets'] = 'dev-release'
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        api = self.api()
+        with patch.object(c, 'dev_tag_commit', return_value=self.f.commit):
+            self.assertEqual(self.cut(api, 'publish'), 0)
+        published = {asset['name'] for asset in api.releases[VERSION]['assets']}
+        self.assertEqual(published, {'synthetic-demo-v1-approval.json', 'synthetic-demo-v1-bundle.tar.gz',
+                                     'synthetic-demo-v1-source.tar.gz',
+                                     e.shared_engine_source_name(self.unified_tag), 'rexl3-serve.tar.gz'})
+        self.assertEqual({name for name, _ in api.uploads}, published)
+
 
 class DevReleaseApi(FakeApi):
     """FakeApi whose dev releases are routed by tag and whose dev tags resolve to commits."""
@@ -678,6 +693,24 @@ class SeparateStageTest(unittest.TestCase):
         self.assertEqual(c.cut(api, REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
         self.assertEqual({a['name'] for a in api.releases[VERSION]['assets']}, c.model_assets(self.manifest))
 
+    def test_evidence_kept_on_the_dev_release_is_verified_per_model_and_not_staged_for_upload(self):
+        self.manifest['evidence_assets'] = 'dev-release'
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        work = c.download_dev_assets(self.api(), self.manifest, self.root)
+        self.addCleanup(shutil.rmtree, work, True)
+        staged = {p.name for p in work.iterdir() if p.is_file()}
+        self.assertEqual(staged, c.model_assets(self.manifest))
+        self.assertFalse([name for name in staged if 'evidence' in name])
+        # each model's evidence was still downloaded and unpacked in its own stage for verification
+        for seal, (family, model, version) in ((self.a, (FAMILY, MODEL, 'v1')), (self.b, (*self.second, 'v2'))):
+            stage = work / '.stage' / family / model / version
+            self.assertEqual((stage / 'evidence.tar.gz').read_bytes(), (seal.assets / 'evidence.tar.gz').read_bytes())
+            for name in self.shared:
+                self.assertTrue((stage / name).is_file())
+        api = self.api()
+        self.assertEqual(c.cut(api, REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
+        self.assertEqual({a['name'] for a in api.releases[VERSION]['assets']}, c.model_assets(self.manifest))
+
     def test_one_shared_stage_hits_the_evidence_collision(self):
         # the defect this guards: every model extracted into one shared stage directory
         bad = mutant("dest = work / '.stage' / item['family'] / item['model'] / item['version']\n        dest.mkdir(parents=True)",
@@ -881,6 +914,208 @@ class VerifyTest(CutFixture):
         api.releases[VERSION]['assets'] = api.releases[VERSION]['assets'][:-1]
         with self.assertRaises(ValueError):
             self.cut(api, 'verify')
+
+
+EVIDENCE_NAMES = {'synthetic-demo-v1-evidence.tar.gz'}
+
+
+def retar(data, edit=None):
+    """The same evidence archive with other transport bytes: a different gzip header time, and with
+    ``edit`` (member name) one flipped byte in that member. Both stay well-formed archives."""
+    raw = bytearray(gzip.decompress(data))
+    if edit is not None:
+        marker = raw.find(edit.encode())
+        if marker < 0:
+            raise AssertionError('member not found: ' + edit)
+        raw[marker + 512] ^= 1  # first content byte of the member that follows its 512-byte header
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, filename='', mode='wb', mtime=1) as stream:
+        stream.write(bytes(raw))
+    return out.getvalue()
+
+
+class EvidenceOnDevReleaseTest(CutFixture):
+    """`evidence_assets: "dev-release"`: every evidence archive is verified, none is published."""
+
+    def setUp(self):
+        super().setUp()
+        # cut_release's work directories (mkdtemp) land in this test's directory and go with it
+        stage_root = patch.object(tempfile, 'tempdir', self.tmp.name)
+        stage_root.start()
+        self.addCleanup(stage_root.stop)
+
+    def keep_on_dev(self, value='dev-release', keep=True):
+        self.manifest.pop('evidence_assets', None)
+        if keep:
+            self.manifest['evidence_assets'] = value
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+
+    def evidence_id(self):
+        return next(a['id'] for a in self.fixtures['dev_release']['assets'] if a['name'] == 'evidence.tar.gz')
+
+    def replace_dev_evidence(self, data):
+        """Replace the dev release's evidence bytes; GitHub's own size and digest describe the new bytes,
+        so only the sealed approval can tell them from the original."""
+        asset_id = self.evidence_id()
+        self.fixtures['assets'][asset_id] = data
+        for asset in self.fixtures['dev_release']['assets']:
+            if asset['id'] == asset_id:
+                asset.update(size=len(data), digest='sha256:' + sha(data))
+
+    def test_without_the_key_the_expected_set_and_the_uploads_are_unchanged(self):
+        self.assertNotIn('evidence_assets', self.manifest)
+        self.assertEqual(c.model_assets(literal_manifest()), LITERAL_NAMES)
+        api = self.api()
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        self.assertEqual({name for name, _ in api.uploads}, PUBLISHED_NAMES)
+        evidence = (self.f.assets / 'evidence.tar.gz').read_bytes()
+        self.assertEqual(dict(api.uploads)['synthetic-demo-v1-evidence.tar.gz'], evidence)
+
+    def test_with_the_key_the_expected_set_has_no_evidence_archive(self):
+        doc = dict(literal_manifest(), evidence_assets='dev-release')
+        self.assertEqual(c.model_assets(doc), LITERAL_NAMES - {'qwen38-27b-dflash2-exl3-4.00-v3-evidence.tar.gz'})
+        self.keep_on_dev()
+        self.assertEqual(c.model_assets(self.manifest, self.root), PUBLISHED_NAMES - EVIDENCE_NAMES)
+
+    def test_publish_uploads_everything_but_the_evidence_and_verify_passes(self):
+        self.keep_on_dev()
+        api = self.api()
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        self.assertEqual(api.created_refs['refs/tags/' + VERSION], MERGE)
+        self.assertIs(api.releases[VERSION]['draft'], False)
+        self.assertEqual({a['name'] for a in api.releases[VERSION]['assets']}, PUBLISHED_NAMES - EVIDENCE_NAMES)
+        self.assertEqual({name for name, _ in api.uploads}, PUBLISHED_NAMES - EVIDENCE_NAMES)
+        evidence = (self.f.assets / 'evidence.tar.gz').read_bytes()
+        self.assertNotIn(evidence, [data for _, data in api.uploads])
+        self.assertEqual(self.cut(api, 'verify'), 0)
+
+    def test_the_evidence_is_still_downloaded_and_verified_against_the_approval(self):
+        self.keep_on_dev()
+        api = self.api()
+        downloads, verified = [], []
+        original_download, original_verify = api.download, e.verify_assets
+
+        def download(path):
+            downloads.append(path)
+            return original_download(path)
+
+        def verify_assets(approval, **kwargs):
+            # the unpacked evidence and its transport archive are in the stage the verifier reads
+            stage = Path(approval).parent
+            verified.append(e.asset_record(stage / 'evidence.tar.gz') == self.doc['evidence_asset']
+                            and e.receipt_files(self.doc, stage) == self.doc['evidence_asset']['members'])
+            return original_verify(approval, **kwargs)
+
+        api.download = download
+        with patch.object(e, 'verify_assets', verify_assets):
+            self.assertEqual(self.cut(api, 'publish'), 0)
+        self.assertIn(f'/repos/{DEV}/releases/assets/{self.evidence_id()}', downloads)
+        self.assertEqual(verified, [True])
+
+    def test_a_tampered_dev_evidence_archive_still_refuses_the_cut(self):
+        original = (self.f.assets / 'evidence.tar.gz').read_bytes()
+        member = sorted(self.doc['evidence_asset']['members'])[0]
+        for case, data, error in (
+                ('one byte of one evidence file changed', retar(original, edit=member), 'archive inventory drift'),
+                ('same files, other archive bytes', retar(original), 'asset hash/bytes/inventory mismatch: evidence.tar.gz'),
+                # the cut trailer leaves every member readable, so only the sealed digest and size catch it
+                ('trailer cut off', original[:-20], 'asset hash/bytes/inventory mismatch: evidence.tar.gz')):
+            for keep in (True, False):
+                with self.subTest(case=case, kept_on_dev=keep):
+                    self.keep_on_dev(keep=keep)
+                    self.assertNotEqual(data, original)
+                    self.replace_dev_evidence(data)
+                    api = self.api()
+                    with self.assertRaisesRegex(ValueError, error):
+                        self.cut(api, 'publish')
+                    # refused before anything public exists: no tag, no draft, no upload
+                    self.assertEqual(api.created_refs, {})
+                    self.assertEqual(api.releases, {})
+                    self.assertEqual(api.uploads, [])
+        # the untampered archive passes in both modes, so each refusal above is the tampering
+        for keep in (True, False):
+            with self.subTest(case='original', kept_on_dev=keep):
+                self.keep_on_dev(keep=keep)
+                self.replace_dev_evidence(original)
+                self.assertEqual(self.cut(self.api(), 'publish'), 0)
+
+    def test_a_cut_that_skipped_verification_for_kept_evidence_would_pass_the_tampered_archive(self):
+        # the defect the test above guards: treating "not published" as "not verified"
+        bad = mutant('        e.verify_assets(approval, registry=registry,',
+                     '        if publish_evidence:\n            e.verify_assets(approval, registry=registry,')
+        self.keep_on_dev()
+        self.replace_dev_evidence(retar((self.f.assets / 'evidence.tar.gz').read_bytes()))
+        self.assertEqual(bad.cut(self.api(), REPO, VERSION, 'publish', repo_root=str(self.root)), 0)
+        with self.assertRaisesRegex(ValueError, 'asset hash/bytes/inventory mismatch: evidence.tar.gz'):
+            self.cut(self.api(), 'publish')
+
+    def test_a_missing_dev_evidence_archive_still_refuses_the_cut(self):
+        self.keep_on_dev()
+        asset_id = self.evidence_id()
+        self.fixtures['dev_release']['assets'] = [a for a in self.fixtures['dev_release']['assets'] if a['id'] != asset_id]
+        api = self.api()
+        with self.assertRaises((ValueError, OSError)) as caught:
+            self.cut(api, 'publish')
+        self.assertIn('evidence.tar.gz', str(caught.exception))
+        self.assertEqual(api.created_refs, {})
+        self.assertEqual(api.uploads, [])
+
+    def test_verify_refuses_an_evidence_archive_on_a_release_that_keeps_them_on_dev(self):
+        self.keep_on_dev()
+        api = self.api()
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        api.releases[VERSION]['assets'].append({'id': 999, 'name': 'synthetic-demo-v1-evidence.tar.gz', 'size': 10,
+                                                'digest': 'sha256:' + HEX64, 'state': 'uploaded'})
+        with self.assertRaisesRegex(ValueError, 'published assets differ from the manifest: synthetic-demo-v1-evidence.tar.gz'):
+            self.cut(api, 'verify')
+
+    def test_verify_without_the_key_still_requires_the_published_evidence(self):
+        self.keep_on_dev()
+        api = self.api()
+        self.assertEqual(self.cut(api, 'publish'), 0)
+        del self.manifest['evidence_assets']
+        write(self.root, f'releases/{VERSION}/manifest.json', encoded(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'published assets differ from the manifest: synthetic-demo-v1-evidence.tar.gz'):
+            self.cut(api, 'verify')
+
+    def test_a_staged_evidence_file_is_refused_at_upload(self):
+        self.keep_on_dev()
+        work = c.download_dev_assets(self.api(), self.manifest, self.root)
+        self.addCleanup(shutil.rmtree, work, True)
+        self.assertEqual({p.name for p in work.iterdir() if p.is_file()}, PUBLISHED_NAMES - EVIDENCE_NAMES)
+        (work / 'synthetic-demo-v1-evidence.tar.gz').write_bytes((self.f.assets / 'evidence.tar.gz').read_bytes())
+        api = self.api()
+        release = api.post(f'/repos/{REPO}/releases', {'tag_name': VERSION, 'draft': True, 'prerelease': False})
+        with self.assertRaisesRegex(ValueError, 'unexpected upload file: synthetic-demo-v1-evidence.tar.gz'):
+            c.upload_assets(api, REPO, release['id'], work, self.manifest, repo_root=self.root)
+        self.assertNotIn('synthetic-demo-v1-evidence.tar.gz', {name for name, _ in api.uploads})
+
+    def test_an_invalid_value_refuses_every_mode(self):
+        for value in ('published', 'private', '', None, True, ['dev-release']):
+            for mode in ('dry', 'publish', 'verify'):
+                with self.subTest(value=value, mode=mode):
+                    self.keep_on_dev(value)
+                    api = self.api()
+                    if mode == 'verify':
+                        api.releases[VERSION] = {'id': 200, 'tag_name': VERSION, 'draft': False, 'assets': []}
+                    with self.assertRaisesRegex(ValueError, 'invalid evidence_assets'):
+                        self.cut(api, mode)
+                    self.assertEqual(api.created_refs, {})
+                    self.assertEqual(api.uploads, [])
+
+    def test_the_dry_run_names_the_mode_only_when_the_key_is_set(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.cut(self.api()), 0)
+        self.assertNotIn('EVIDENCE_ON_DEV_RELEASE', out.getvalue())
+        self.assertEqual(out.getvalue().count('\n'), 1)
+        self.keep_on_dev()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.cut(self.api()), 0)
+        first, second = out.getvalue().splitlines()
+        self.assertTrue(first.startswith('EVIDENCE_ON_DEV_RELEASE '))
+        self.assertTrue(second.startswith('DRY_RUN_OK '))
 
 
 if __name__ == '__main__':

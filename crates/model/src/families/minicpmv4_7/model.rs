@@ -59,7 +59,7 @@ use gb_cuda::exl3_linear::{Dtype, Exl3Weights, MAX_DECODE_ROWS};
 use gb_cuda::gdn::{self, Batch, PreInputs, PreWeights, Record};
 use gb_cuda::glue::AttnPrepCfg;
 use gb_cuda::graph::{CaptureError, Graph};
-use gb_cuda::{fmoe, fn_moe, glue, DevBuf, Stream};
+use gb_cuda::{fmoe, fn_moe, glue, logprob, DevBuf, Stream};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -985,6 +985,97 @@ impl MiniCpmModel {
             self.logits.download_range(r * stride * 2, &mut out[r * vocab..(r + 1) * vocab])?;
         }
         Ok(())
+    }
+
+    /// The log-probability records of the first `chosen.len()` rows of the last prefill chunk, appended to `out`: each row is
+    /// reduced on the device to its log-sum-exp over the real vocabulary (the pad columns are never read), the logit of token
+    /// `chosen[r]` (-1: none) and its top `out.k` logits, in the head's dtype (`gb_cuda::logprob`: fp16 by default, bf16 under
+    /// `REXL3_MINICPM_LOGITS=bf16`; `logprob::rows_f16` for fp16), and only those are read back. The head runs in pieces of [`WINDOW_ROWS`] rows on the chunk's
+    /// normed trunk rows, as [`MiniCpmModel::last_rows_logits`] does. It overwrites the logits and candidate buffers; reads no
+    /// per-slot state, writes none.
+    pub fn chunk_row_records(&mut self, chosen: &[i32], out: &mut gb_engine::score::RowRecords) -> Result<(), ModelError> {
+        let (h, vocab, stride, k, cap) = (self.cfg.hidden, self.vocab_size(), self.logits_stride(), out.k, WINDOW_ROWS);
+        let ws_need =
+            if self.logits_f16 { logprob::workspace_bytes_f16(cap, vocab, k) } else { logprob::workspace_bytes(cap, vocab, k) };
+        if chosen.len() > self.last_rows || k == 0 || k > logprob::MAX_TOP || k > vocab || ws_need > self.topk_ws.bytes() {
+            return Err(ModelError::Request(format!(
+                "a readout of {} rows with the top {k} of {vocab}: the last chunk left {} rows",
+                chosen.len(),
+                self.last_rows
+            )));
+        }
+        // the candidate buffers hold `MAX_CANDIDATES` entries a window row: the chosen ids go in front of the top ids, the
+        // normalisers behind the top values
+        const { assert!(logprob::MAX_TOP + 2 <= MAX_CANDIDATES) };
+        let (ids_at, norm_at) = (cap * 4, cap * logprob::MAX_TOP * 4);
+        let yd = self.head_dtype();
+        let mut at = 0;
+        while at < chosen.len() {
+            let n = (chosen.len() - at).min(cap);
+            self.stream.sync()?;
+            self.topk_ids.upload(&chosen[at..at + n])?;
+            let x = self.h.subview(at * h * 2, n * h * 2);
+            self.w.lm_head.forward(&x, &mut self.logits, n, Dtype::BF16, yd, &mut self.ws, &self.stream)?;
+            self.poison_pad(n)?;
+            if self.logits_f16 {
+                // SAFETY: as the bf16 branch below, on fp16 logits
+                unsafe {
+                    logprob::rows_f16(
+                        self.logits.ptr().cast_const(),
+                        n,
+                        stride,
+                        vocab,
+                        k,
+                        self.topk_ids.ptr().cast_const(),
+                        self.topk_vals.ptr_at(norm_at),
+                        self.topk_ids.ptr_at(ids_at),
+                        self.topk_vals.ptr(),
+                        self.topk_ws.ptr(),
+                        self.topk_ws.bytes(),
+                        &self.stream,
+                    )
+                }?;
+            } else {
+                // SAFETY: bf16 logits `[n, stride]`; i32 chosen `[n]` at the front of the ids buffer and the top ids behind it; the
+                // top values at the front of the values buffer and the `[n, 2]` normalisers behind them; the top-k workspace.
+                unsafe {
+                    logprob::rows(
+                        self.logits.ptr().cast_const(),
+                        n,
+                        stride,
+                        vocab,
+                        k,
+                        self.topk_ids.ptr().cast_const(),
+                        self.topk_vals.ptr_at(norm_at),
+                        self.topk_ids.ptr_at(ids_at),
+                        self.topk_vals.ptr(),
+                        self.topk_ws.ptr(),
+                        self.topk_ws.bytes(),
+                        &self.stream,
+                    )
+                }?;
+            }
+            self.stream.sync()?;
+            let (mut norm, mut ids, mut vals) = (vec![0f32; n * 2], vec![0i32; n * k], vec![0f32; n * k]);
+            self.topk_vals.download_range(norm_at, &mut norm)?;
+            self.topk_ids.download_range(ids_at, &mut ids)?;
+            self.topk_vals.download_range(0, &mut vals)?;
+            out.lse.extend(norm.chunks_exact(2).map(|p| p[0]));
+            out.chosen.extend(norm.chunks_exact(2).map(|p| p[1]));
+            out.top_ids.extend(ids.iter().map(|&t| t as u32));
+            out.top_logits.extend(vals);
+            at += n;
+        }
+        Ok(())
+    }
+
+    /// The full-vocabulary logits of the last row of the last prefill chunk ([`MiniCpmModel::last_rows_logits`]), widened to f32
+    /// from the head's dtype.
+    pub fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        let mut row = vec![0u16; self.vocab_size()];
+        self.last_rows_logits(self.last_rows.saturating_sub(1), 1, &mut row)?;
+        let f16 = self.logits_f16;
+        Ok(row.into_iter().map(|v| if f16 { gb_exl3::f16::f16_to_f64(v) as f32 } else { gb_cuda::num::bf16_to_f32(v) }).collect())
     }
 
     /// Keep the first `keep` rows of `slot`'s last window.

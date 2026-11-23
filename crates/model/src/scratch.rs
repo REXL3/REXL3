@@ -174,6 +174,7 @@ impl Scratch {
             &self.fk2,
             &self.ids,
             &self.positions,
+            &self.rope3,
             &self.row_slot,
             &self.seq_start,
             &self.seq_slot,

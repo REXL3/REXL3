@@ -147,6 +147,10 @@ pub struct ToolSplitter {
     buf: String,
     in_call: bool,
     closed: bool,
+    /// The most calls one reply may carry (`parallel_tool_calls: false` is 1); `None` is no cap.
+    max_calls: Option<usize>,
+    /// Calls completed so far.
+    n_calls: usize,
 }
 
 /// A family's parser for the inside of one tool-call block: `None` when it is not a call the family's template would produce.
@@ -248,10 +252,25 @@ impl ToolSplitter {
 
     /// A splitter for a family's own markers and block syntax.
     pub fn with_syntax(schemas: ToolSchemas, syntax: ToolSyntax) -> Self {
-        Self { schemas, syntax, buf: String::new(), in_call: false, closed: false }
+        Self { schemas, syntax, buf: String::new(), in_call: false, closed: false, max_calls: None, n_calls: 0 }
     }
 
-    /// True once an outer DSML calls container (`</｜DSML｜function_calls>` / `</｜DSML｜ calls>`) has closed.
+    /// Close the splitter once its first call completes (`parallel_tool_calls: false`): later text, and any later call, is dropped,
+    /// and [`ToolSplitter::is_closed`] turns true so the server ends the reply there. Text before the call and the call itself are
+    /// exactly what the uncapped splitter returns.
+    pub fn at_most_one_call(mut self) -> Self {
+        self.max_calls = Some(1);
+        self
+    }
+
+    /// Count one completed call; true when that reached the cap.
+    fn count_call(&mut self) -> bool {
+        self.n_calls += 1;
+        self.max_calls.is_some_and(|m| self.n_calls >= m)
+    }
+
+    /// True once an outer DSML calls container (`</｜DSML｜function_calls>` / `</｜DSML｜ calls>`) has closed, or the call cap of
+    /// [`ToolSplitter::at_most_one_call`] is reached.
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -332,6 +351,7 @@ impl ToolSplitter {
                         self.in_call = false;
                         if let Some(c) = call {
                             calls.push(c);
+                            self.count_call();
                         }
                     }
                     break;
@@ -340,7 +360,15 @@ impl ToolSplitter {
                 self.buf = self.buf[e + close.len()..].to_string();
                 self.in_call = false;
                 match parse(&block, &self.schemas) {
-                    Some(c) => calls.push(c),
+                    Some(c) => {
+                        calls.push(c);
+                        if self.count_call() {
+                            // the cap is reached: whatever follows the call is not part of this reply
+                            self.closed = true;
+                            self.buf.clear();
+                            break;
+                        }
+                    }
                     None => out.push_str(&format!("{open}{block}{close}")), // not a call we understand: keep it visible
                 }
             } else if let Some(o) = self.buf.find(open) {
@@ -488,6 +516,70 @@ mod tests {
             assert_eq!(text, "Let me check.", "step {step}");
             assert_eq!(calls.len(), 2, "step {step}");
             assert_eq!(calls[0], calls[1]);
+        }
+    }
+
+    /// Feed `full` in `step`-char pieces then finish; (visible text, calls, closed after the last push).
+    fn run_split(mut sp: ToolSplitter, full: &str, step: usize) -> (String, Vec<ToolCall>, bool) {
+        let (mut text, mut calls) = (String::new(), Vec::new());
+        let chars: Vec<char> = full.chars().collect();
+        for ch in chars.chunks(step) {
+            let (t, c) = sp.push(&ch.iter().collect::<String>());
+            text.push_str(&t);
+            calls.extend(c);
+        }
+        let closed = sp.is_closed();
+        let (t, c) = sp.finish();
+        text.push_str(&t);
+        calls.extend(c);
+        (text, calls, closed)
+    }
+
+    #[test]
+    fn at_most_one_call_keeps_the_first_call_and_closes_however_the_stream_is_chunked() {
+        let second = CALL.replace("Paris", "Lyon");
+        let full = format!("Let me check.\n\n{CALL}\n\nand also\n\n{second}\n\ndone");
+        for step in [1usize, 2, 3, 5, 7, 16, 1000] {
+            // uncapped: what the server returns today (both calls, the text between them, the tail)
+            let (text, calls, closed) = run_split(ToolSplitter::new(schemas()), &full, step);
+            assert_eq!(text, "Let me check.\n\nand also\n\ndone", "step {step}");
+            assert_eq!(calls.len(), 2, "step {step}");
+            assert!(!closed, "step {step}");
+            // capped: the text before the first call and the first call, byte for byte the same; nothing after it
+            let (one_text, one_calls, one_closed) = run_split(ToolSplitter::new(schemas()).at_most_one_call(), &full, step);
+            assert_eq!(one_text, "Let me check.", "step {step}");
+            assert_eq!(one_calls, calls[..1], "step {step}");
+            assert!(one_closed, "step {step}: the server ends the reply on is_closed");
+        }
+    }
+
+    #[test]
+    fn at_most_one_call_counts_only_parsed_calls() {
+        // an unparseable block stays visible text and does not use up the one call
+        let full = format!("<tool_call>\nnot a function\n</tool_call> then {CALL} after");
+        let (text, calls, closed) = run_split(ToolSplitter::new(schemas()).at_most_one_call(), &full, 4);
+        assert!(text.contains("not a function") && !text.contains("after"), "{text:?}");
+        assert_eq!(calls.len(), 1);
+        assert!(closed);
+        // no call at all: the splitter never closes and the text is unchanged
+        let (text, calls, closed) = run_split(ToolSplitter::new(schemas()).at_most_one_call(), "just text", 3);
+        assert_eq!((text.as_str(), calls.len(), closed), ("just text", 0, false));
+    }
+
+    #[test]
+    fn at_most_one_call_closes_a_dsml_reply_after_its_first_invoke() {
+        let invoke = |city: &str| {
+            format!("<｜DSML｜ invoke name=\"get_weather\">\n<｜DSML｜ parameter name=\"city\" string=\"true\">{city}</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n")
+        };
+        let full = format!("Checking.\n\n<｜DSML｜ calls>\n{}{}</｜DSML｜ calls>", invoke("Paris"), invoke("Lyon"));
+        for step in [1usize, 3, 1000] {
+            let (_, calls, _) = run_split(ToolSplitter::with_syntax(schemas(), DSML_TOOL_SYNTAX), &full, step);
+            assert_eq!(calls.len(), 2, "step {step}");
+            let sp = ToolSplitter::with_syntax(schemas(), DSML_TOOL_SYNTAX).at_most_one_call();
+            let (text, one, closed) = run_split(sp, &full, step);
+            assert_eq!(one, calls[..1], "step {step}");
+            assert_eq!(serde_json::from_str::<Value>(&one[0].arguments).unwrap(), json!({"city": "Paris"}));
+            assert!(closed && !text.contains("Lyon"), "step {step}: {text:?}");
         }
     }
 

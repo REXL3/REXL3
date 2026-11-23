@@ -1607,6 +1607,9 @@ impl Dsv41Model {
         // contribution. Without a span this is the raw ids, unchanged.
         let dead_ids = super::vision_serve::dead_ids(host_ids, splice);
         let eng_ids: &[i32] = if splice.is_empty() { host_ids } else { &dead_ids };
+        // model.py passes token_types >= 0 down to every MoE router: image-span rows select bias_vl,
+        // not the text bias. Keep the device mask alive for the whole op walk.
+        let image_mask = super::vision_serve::image_mask_rows(rows, splice).map(|mask| DevBuf::from_slice(&mask)).transpose()?;
         let mut op_times: std::collections::BTreeMap<&'static str, f64> = std::collections::BTreeMap::new();
         for op in plan {
             let t_op = if timing {
@@ -2103,7 +2106,7 @@ impl Dsv41Model {
                     } else {
                         l.router.logits(&s.hidden, Dtype::F16, rows, &mut s.logits, st)?;
                     }
-                    l.router.select_top_p(&s.logits, rows, None, decode_top_p, &mut s.picks, &mut s.wts, st)?;
+                    l.router.select_top_p(&s.logits, rows, image_mask.as_ref(), decode_top_p, &mut s.picks, &mut s.wts, st)?;
                     if l.experts.streamed.is_some() {
                         st.sync()?;
                         let mut picks = vec![0i32; rows * s.moe.shape().1];
@@ -3530,6 +3533,7 @@ mod tests {
         set("compress_ratios", serde_json::json!([0, 0]));
         set("kv_source_layer_ids", serde_json::json!([]));
         set("index_source_layer_ids", serde_json::json!([]));
+        set("candidate_source_layer_id", 0.into());
         set("index_n_heads", 2.into());
         set("index_head_dim", 16.into());
         set("index_topk", 8.into());

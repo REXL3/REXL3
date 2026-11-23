@@ -531,7 +531,8 @@ pub fn prep_gate_fused_prefill(
 
 /// One launch replacing `kda::window_chunked` + `kda::norm` + `kda::commit_from` on the P2 prefill path
 /// (`prefill && !p1_dense`): the `chunk_kernel<64>` body (glm_p2_kda.cu, verbatim), then the LAST CTA per head
-/// (gridDim.x = 2, a per-head self-resetting atomic counter in `head_cnt`, `heads` zeroed i32s) runs the exact
+/// (gridDim.x = 2, a per-head self-resetting atomic counter in `head_cnt`, `heads + 1` zeroed i32s: the last one counts
+/// the heads done, and the parity flips only when all are, after every CTA has read it) runs the exact
 /// `norm_kernel<4>` math for that head over every row and the exact `commit_tail_kernel` body for the head's
 /// channels (whole-chunk prefill: keep = null, seq 0, conv shift off `raw` + parity flip). Bit-identical per
 /// element to the three separate launches; every output byte is exactly the source kernels'.
@@ -553,7 +554,10 @@ pub fn chunk_norm_commit_fused(
     ko_xh: Option<&mut DevBuf>,
 ) -> Result<(), CudaError> {
     debug_assert!(rows >= 1 && slot < pool.n_slots && d.heads == pool.dims.heads);
-    debug_assert!(d.heads <= head_cnt.bytes() / 4);
+    // the per-head counters and the grid-wide one at index `heads`: a shorter buffer would take an atomic out of bounds
+    if d.heads + 1 > head_cnt.bytes() / 4 {
+        return Err(CudaError(1));
+    }
     let rc = unsafe {
         ffi::gb_ling_kda_prefill_chunk_norm_commit(
             ws.q().ptr() as *const f32,

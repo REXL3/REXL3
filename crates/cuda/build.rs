@@ -8,6 +8,12 @@
 //!
 //! The build identity is exported to the crate as `REXL3_NVCC_VERSION`, `REXL3_CUDA_ARCH` and `REXL3_KERNEL_HASH` (FNV-1a
 //! over every file in `csrc/`, the arch and each file's flags), so a running server can say exactly which kernels it runs.
+//!
+//! nvcc compiles a staged copy of `csrc/`, not the checkout's files (`kernel_build.rs`): the copy's path and modification
+//! times are the same in every checkout, which is what makes one commit build to one file on every node.
+
+#[path = "kernel_build.rs"]
+pub mod kernel_build;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +22,7 @@ use std::sync::Mutex;
 use std::{env, fs, thread};
 
 /// Flags every kernel file is compiled with (part of the kernel hash).
-const NVCC_FLAGS: &[&str] = &["-c", "-O3", "--std=c++17", "-Xcompiler", "-fPIC", "-lineinfo", "-I", "csrc"];
+pub const NVCC_FLAGS: &[&str] = &["-c", "-O3", "--std=c++17", "-Xcompiler", "-fPIC", "-lineinfo", "-I", "csrc"];
 
 /// `REXL3_<name>`, else the old `GB_<name>` with a warning.
 fn setting(name: &str) -> Option<String> {
@@ -37,6 +43,41 @@ fn fnv1a(h: &mut u64, bytes: &[u8]) {
     }
 }
 
+/// The arch-and-flags prefix of the kernel hash. Source names and bytes are folded in after this value.
+/// Keep this exactly in sync with `tools/release_scope.py::kernel_hash`; the compiler identity is stamp-only.
+pub fn initial_kernel_hash(arch: &str, flags: &[&str]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    fnv1a(&mut hash, arch.as_bytes());
+    fnv1a(&mut hash, flags.join(" ").as_bytes());
+    hash
+}
+
+/// The persisted identity that decides whether every object must be recompiled.
+pub fn kernel_build_stamp(arch: &str, flags: &[&str], nvcc_version: &str, kernel_hash: u64) -> String {
+    format!("arch={arch}\nnvcc_flags={}\nnvcc_version={nvcc_version}\nkernel_hash={kernel_hash:016x}\n", flags.join(" "))
+}
+
+/// Whether an object can be reused. A changed identity makes every object stale, even with newer mtimes.
+pub fn kernel_object_is_fresh(
+    source: &Path,
+    object: &Path,
+    header_mtime: Option<std::time::SystemTime>,
+    identity_changed: bool,
+) -> bool {
+    !identity_changed
+        && match (fs::metadata(object).and_then(|m| m.modified()).ok(), fs::metadata(source).and_then(|m| m.modified()).ok()) {
+            (Some(om), Some(sm)) => om >= sm && header_mtime.is_none_or(|hm| om >= hm),
+            _ => false,
+        }
+}
+
+/// Invalidate the old identity before touching any object. A failed build must not leave a valid stamp behind.
+pub fn invalidate_stamp_before_compile(stamp: &Path, compiling: bool) {
+    if compiling {
+        let _ = fs::remove_file(stamp);
+    }
+}
+
 /// `13.0.88` from `nvcc --version` ("Cuda compilation tools, release 13.0, V13.0.88").
 fn nvcc_version(nvcc: &Path) -> String {
     let out =
@@ -44,7 +85,7 @@ fn nvcc_version(nvcc: &Path) -> String {
     out.split_whitespace().rev().find_map(|w| w.strip_prefix('V')).unwrap_or("unknown").to_string()
 }
 
-fn find_cuda() -> Option<PathBuf> {
+pub fn find_cuda() -> Option<PathBuf> {
     if setting("NO_CUDA").is_some() {
         return None; // force the stub build (used to test machines without a GPU toolchain)
     }
@@ -143,6 +184,7 @@ fn extra_flags(src: &Path) -> Vec<String> {
 fn main() {
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=kernel_build.rs");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     for v in ["CUDA_ARCH", "NO_CUDA"] {
         println!("cargo:rerun-if-env-changed=REXL3_{v}");
@@ -159,19 +201,25 @@ fn main() {
     };
     let nvcc = cuda.join("bin/nvcc");
     let arch = setting("CUDA_ARCH").unwrap_or_else(|| "sm_121".into());
-    let mut hash = 0xcbf29ce484222325u64;
-    fnv1a(&mut hash, arch.as_bytes());
-    fnv1a(&mut hash, NVCC_FLAGS.join(" ").as_bytes());
+    let nvcc_version = nvcc_version(&nvcc);
+    let mut hash = initial_kernel_hash(&arch, NVCC_FLAGS);
     let mut all: Vec<PathBuf> = fs::read_dir("csrc").expect("csrc").filter_map(|e| e.ok().map(|e| e.path())).collect();
     all.sort();
     for p in &all {
         fnv1a(&mut hash, p.file_name().unwrap().to_string_lossy().as_bytes());
         fnv1a(&mut hash, &fs::read(p).expect("read a kernel source"));
     }
-    println!("cargo:rustc-env=REXL3_NVCC_VERSION={}", nvcc_version(&nvcc));
+    println!("cargo:rustc-env=REXL3_NVCC_VERSION={nvcc_version}");
     println!("cargo:rustc-env=REXL3_CUDA_ARCH={arch}");
     println!("cargo:rustc-env=REXL3_KERNEL_HASH={hash:016x}");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let stamp_path = out.join("rexl3-kernel-build.stamp");
+    let stage = kernel_build::stage_or_warn("cuda", Path::new("csrc"));
+    // Where the sources were compiled from is part of the identity: objects made in place, by an older build script or
+    // after a failed staging, carry this checkout's path and are not reused once staging works.
+    let sources = stage.as_deref().map_or("in place".to_string(), |d| d.display().to_string());
+    let stamp = format!("{}sources={sources}\n", kernel_build_stamp(&arch, NVCC_FLAGS, &nvcc_version, hash));
+    let identity_changed = fs::read_to_string(&stamp_path).ok().as_deref() != Some(stamp.as_str());
     let mut srcs: Vec<PathBuf> = fs::read_dir("csrc")
         .expect("csrc")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -186,29 +234,26 @@ fn main() {
     let objs: Vec<PathBuf> = srcs.iter().map(|s| out.join(s.file_stem().unwrap()).with_extension("o")).collect();
     let mut stale = Vec::new();
     for (s, obj) in srcs.iter().zip(objs.iter()) {
-        let up_to_date =
-            match (fs::metadata(obj).and_then(|m| m.modified()).ok(), fs::metadata(s).and_then(|m| m.modified()).ok()) {
-                (Some(om), Some(sm)) => om >= sm && hdr_mtime.is_none_or(|hm| om >= hm),
-                _ => false,
-            };
-        if !up_to_date {
+        if !kernel_object_is_fresh(s, obj, hdr_mtime, identity_changed) {
             stale.push((s, obj));
         }
     }
+    invalidate_stamp_before_compile(&stamp_path, !stale.is_empty());
+    let cuda_bin = cuda.join("bin");
     let compile = |s: &Path, obj: &Path| {
-        let mut cmd = Command::new(&nvcc);
-        if let Some(orig_path) = env::var_os("PATH") {
-            let mut paths = vec![cuda.join("bin")];
-            paths.extend(env::split_paths(&orig_path));
-            if let Ok(joined) = env::join_paths(paths) {
-                cmd.env("PATH", joined);
-            }
-        } else {
-            cmd.env("PATH", cuda.join("bin"));
+        let extra = extra_flags(s);
+        let file = s.file_name().expect("a kernel source has a file name").to_string_lossy();
+        kernel_build::Compile {
+            nvcc: &nvcc,
+            cuda_bin: &cuda_bin,
+            stage: stage.as_deref(),
+            flags: NVCC_FLAGS,
+            arch: &arch,
+            extra: &extra,
+            file: &file,
+            object: obj,
         }
-        cmd.args(NVCC_FLAGS).arg(format!("-arch={arch}"));
-        cmd.args(extra_flags(s)).arg("-o").arg(obj).arg(s);
-        cmd.status().expect("run nvcc").success()
+        .run()
     };
     let jobs = nvcc_jobs(env::var("NUM_JOBS").ok().as_deref());
     let failed = run_bounded(jobs, stale.len(), |i| compile(stale[i].0, stale[i].1));
@@ -218,6 +263,10 @@ fn main() {
     let _ = fs::remove_file(&lib);
     let st = Command::new("ar").arg("crs").arg(&lib).args(&objs).status().expect("run ar");
     assert!(st.success(), "ar failed");
+    // Commit the identity only after every object compiled and the archive was rebuilt successfully.
+    if !stale.is_empty() {
+        fs::write(&stamp_path, &stamp).expect("write kernel build stamp");
+    }
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=gbkernels");
     println!("cargo:rustc-link-search=native={}", cuda.join("lib64").display());

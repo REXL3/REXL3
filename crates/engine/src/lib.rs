@@ -254,6 +254,15 @@ pub trait Backend {
     fn score_rows_supported(&self) -> bool {
         false
     }
+    /// A score request was admitted into `slot`; `all_rows` says whether it is the `prompt_logprobs` readout. A backend whose
+    /// readout is per slot ([`Backend::take_score_records`]) starts or drops the slot's records here; the default ignores it.
+    fn score_begin(&mut self, _slot: usize, _all_rows: bool) {}
+    /// The compact form of the readout `slot` just finished ([`score::RowRecords`], one row per prompt token), from a backend
+    /// that reduces each row on the device instead of returning it ([`Backend::take_score_rows`] is then empty). Read once at
+    /// completion, before the slot is released; the default has none.
+    fn take_score_records(&mut self, _slot: usize) -> Option<score::RowRecords> {
+        None
+    }
     fn vocab_size(&self) -> usize;
     /// Whether [`Backend::step_tree`] verifies real trees (a backend that does not keeps the default `false` and only ever gets chains).
     fn supports_trees(&self) -> bool {
@@ -400,6 +409,12 @@ pub trait Backend {
     /// live sequence may still claim free by evicting entries before a prefill begins (`Engine::pool_room`). `None` (every backend's default,
     /// and every cache with a region of its own): the region's limit alone keeps entries out of the sequences' way.
     fn prefix_pool_room(&self) -> Option<PoolRoom> {
+        None
+    }
+    /// Pages of the cache's block pool no entry holds right now (the backend's own count: live slots and pending captures are outside the
+    /// index). `None` when the backend does not report a page count; planning then skips the page-aware eviction (every family that can run
+    /// out of pages should report it).
+    fn prefix_free_pages(&self) -> Option<usize> {
         None
     }
     /// Put `slot` in the state a prefill of the first `len` tokens of the entry's prompt would have left it in: the sequence starts over from
@@ -1311,12 +1326,42 @@ impl<B: Backend> Engine<B> {
         );
         cuts.retain(|&c| !st.index.contains(path, &prompt, c));
         if !cuts.is_empty() {
-            // a snapshot needs a free slot: evict the least recently used entries until there is one per cut, and take fewer cuts (the
-            // latest ones: the end of the prompt serves the next turn) when the whole cache is smaller than the plan
+            // a cut past the cache's reach (more pages than the whole region holds, which `PrefixIndex::insert` would refuse) is skipped
+            // before it is captured, and counted as that refused insert. The cuts are nested prefixes of one prompt, so a longer cut not
+            // fitting says nothing about a shorter one: each is judged on its own, and every cut that fits stays (the shared
+            // system-prompt cut before an end cut past the reach, in particular). A pool-page cache has no page budget of its own
+            // (`page_blocks == 0`): its room step, not this region cap, makes space for its captures in the shared KV pool.
+            let reach = st.budget.page_blocks;
+            if reach != 0 {
+                let planned = cuts.len();
+                cuts.retain(|&c| c.div_ceil(gb_sched::prefix::BLOCK_TOKENS) <= reach);
+                st.index.stats.no_room += (planned - cuts.len()) as u64;
+            }
+            // at most one cut per snapshot slot of the whole cache, the latest ones (the end of the prompt serves the next turn)
+            if cuts.len() > st.budget.snapshot_slots {
+                cuts.drain(..cuts.len() - st.budget.snapshot_slots);
+            }
+        }
+        if !cuts.is_empty() {
+            // a snapshot needs a free slot: evict the least recently used entries until there is one per cut
             let free = self.backend.prefix_free_snapshots();
             for v in st.index.evict_for_snapshots(cuts.len(), free) {
                 self.backend.prefix_release(v);
             }
+            if let Some(free_pages) = self.backend.prefix_free_pages() {
+                // and room for every planned capture's pages (nested cuts share their pages, so the largest cut is what they need):
+                // evict the least recently used entries nothing pins until the pages fit. A cut the room could not be made for (only
+                // pinned entries were left) is skipped on its own, counted like one past the reach; the shorter cuts that fit stay.
+                let need_pages = cuts.iter().copied().max().unwrap_or(0).div_ceil(gb_sched::prefix::BLOCK_TOKENS);
+                for v in st.index.evict_for_pages(need_pages, free_pages) {
+                    self.backend.prefix_release(v);
+                }
+                let free_pages = self.backend.prefix_free_pages().unwrap_or(0);
+                let planned = cuts.len();
+                cuts.retain(|&c| c.div_ceil(gb_sched::prefix::BLOCK_TOKENS) <= free_pages);
+                st.index.stats.no_room += (planned - cuts.len()) as u64;
+            }
+            // take fewer cuts (the latest ones) when the free slots are fewer than the plan
             let free = self.backend.prefix_free_snapshots();
             if free < cuts.len() {
                 cuts.drain(..cuts.len() - free);
@@ -1565,10 +1610,11 @@ impl<B: Backend> Engine<B> {
             if let Some(c) = p.cache.take() {
                 self.prefix_commit(c);
             }
+            let records = self.backend.take_score_records(p.slot);
             self.backend.release(p.slot);
             self.admission.release(p.slot);
             let logits_rows = self.backend.take_score_rows();
-            self.scores.push((p.id, score::Scored { logits_row: row.values, logits_rows, cached_tokens: p.hit }));
+            self.scores.push((p.id, score::Scored { logits_row: row.values, logits_rows, records, cached_tokens: p.hit }));
             return;
         }
         let first = match try_choose(&row.values, &row.ids, p.req.prompt.len() as u64, &p.req.sampling) {
@@ -2535,6 +2581,11 @@ pub trait ServeEngine {
     fn score_supported(&self) -> bool {
         false
     }
+    /// Whether the `prompt_logprobs` readout (`ScoreRequest { all_rows: true }`) is served; a separate capability from
+    /// [`ServeEngine::score_supported`].
+    fn score_rows_supported(&self) -> bool {
+        false
+    }
     fn score_validate(&self, _req: &score::ScoreRequest) -> Result<(), SubmitError> {
         Err(score::unsupported())
     }
@@ -2619,6 +2670,9 @@ impl<B: Backend> ServeEngine for Engine<B> {
     }
     fn score_supported(&self) -> bool {
         Engine::score_supported(self)
+    }
+    fn score_rows_supported(&self) -> bool {
+        Engine::score_rows_supported(self)
     }
     fn score_validate(&self, req: &score::ScoreRequest) -> Result<(), SubmitError> {
         Engine::score_validate(self, req)

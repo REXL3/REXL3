@@ -86,19 +86,41 @@ pub fn topk_f16(
         return Err(INVALID);
     }
     // SAFETY: extents checked above; asynchronous on `st`
-    let rc = unsafe {
-        ffi::gb_glm_topk_f16(
-            logits.ptr(),
-            i32_of(rows)?,
-            i32_of(stride)?,
-            i32_of(valid)?,
-            i32_of(count)?,
-            ids.ptr(),
-            vals.ptr(),
-            workspace.ptr(),
-            workspace.bytes(),
-            st.raw(),
-        )
-    };
+    unsafe {
+        topk_f16_raw(logits.ptr(), rows, stride, valid, count, ids.ptr(), vals.ptr(), workspace.ptr(), workspace.bytes(), st)
+    }
+}
+
+/// Raw-pointer form of [`topk_f16`], for a caller that packs its chosen ids and normalisers into the top-k buffers.
+/// The caller guarantees the same extents as [`topk_f16`] and a workspace of `ws_bytes` bytes.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn topk_f16_raw(
+    logits: *const core::ffi::c_void,
+    rows: usize,
+    stride: usize,
+    valid: usize,
+    count: usize,
+    ids: *mut core::ffi::c_void,
+    vals: *mut core::ffi::c_void,
+    workspace: *mut core::ffi::c_void,
+    ws_bytes: usize,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    let need = topk_workspace_bytes(rows, valid, count);
+    if rows == 0 || need == 0 || need > ws_bytes || valid > stride || count == 0 || count > valid {
+        return Err(INVALID);
+    }
+    let rc = ffi::gb_glm_topk_f16(
+        logits,
+        i32_of(rows)?,
+        i32_of(stride)?,
+        i32_of(valid)?,
+        i32_of(count)?,
+        ids,
+        vals,
+        workspace,
+        ws_bytes,
+        st.raw(),
+    );
     CudaError::check(rc)
 }

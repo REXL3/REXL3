@@ -52,6 +52,10 @@ struct Fake {
     identity: Option<String>,
     /// The positions a slot holds (`None`: [`CONTEXT`]); the engine-level prefix tests run prompts of thousands of tokens.
     context: Option<usize>,
+    /// The fake reads the records of a chunk out (the `prompt_logprobs` readout); each row's record carries the chosen id it was
+    /// handed, and `asked` keeps those ids per call.
+    readout: bool,
+    asked: Vec<Vec<i32>>,
 }
 
 /// One draft round's asks: (slot, anchor, max) of each stream.
@@ -232,6 +236,22 @@ impl MiniCpmRuntime for Fake {
         Ok(arena
             .book_with_path(len, self.delta[slot], prefix::arm_path(!self.coopmk))
             .map(|id| Captured { len, handle: PrefixHandle { snap: id, pages: (0..len.div_ceil(256) as u32).collect() } }))
+    }
+    fn row_records_supported(&self) -> bool {
+        self.readout
+    }
+    fn chunk_row_records(&mut self, chosen: &[i32], out: &mut RowRecords) -> Result<(), ModelError> {
+        self.asked.push(chosen.to_vec());
+        for &c in chosen {
+            out.lse.push(1.0);
+            out.chosen.push(c as f32);
+            out.top_ids.extend(0..out.k as u32);
+            out.top_logits.extend(std::iter::repeat_n(0.5, out.k));
+        }
+        Ok(())
+    }
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        Ok(vec![0.25; VOCAB])
     }
 }
 
@@ -1332,4 +1352,109 @@ fn the_shipped_policy_caches_a_tool_loop_from_turn_two_and_never_goes_back() {
     let mut old = engine_with(gb_engine::PrefixConfig::default());
     let old_cached: Vec<usize> = turns.iter().map(|t| serve_one(&mut old, t, true).1).collect();
     assert_eq!(old_cached[..5], [0, 0, 0, 0, 0], "the default policy: what the gate reported ({old_cached:?})");
+}
+
+/// The readout runs the chunks a plain prefill of the prompt runs (the same absolute grid and path, with the prefix arena too,
+/// where a plain prefill goes through the cache's slicing routine; no candidates, no snapshot), asks every row about the prompt
+/// token after it, across chunk boundaries too, and the last row about none; its records stay with its slot.
+#[test]
+fn a_readout_asks_each_row_about_the_next_prompt_token_on_the_prefill_grid() {
+    let mut b = cached(64, 2);
+    b.m.readout = true;
+    b.m.context = Some(1000);
+    assert!(b.score_rows_supported() && !b.score_supported(), "the readout, not last-row scoring");
+    let prompt: Vec<u32> = (0..130).map(|i| (i * 5 + 1) % VOCAB as u32).collect();
+    // no readout begun in the slot: refused before the runtime is touched
+    assert!(b.score_slice(1, &prompt, 0, &[]).is_err());
+    assert!(b.m.calls.is_empty() && b.m.begun.is_empty() && b.take_error().is_none());
+    b.score_begin(1, true);
+    b.score_begin(0, false);
+    let mut done = 0;
+    let mut last = None;
+    while done < prompt.len() {
+        // cuts are ignored: the readout neither reads nor writes the prefix cache
+        let step = b.score_slice(1, &prompt, done, &[100]).unwrap();
+        assert!(step.captured.is_empty());
+        assert_eq!(step.row.is_some(), step.done == prompt.len());
+        done = step.done;
+        last = step.row;
+    }
+    assert_eq!(last.map(|r| r.len()), Some(VOCAB), "the engine's full last row");
+    assert_eq!(
+        b.m.calls,
+        vec![(0, 64, PrefillPath::Tiled, None), (64, 64, PrefillPath::Tiled, None), (128, 2, PrefillPath::Tiled, None)]
+    );
+    assert!(b.m.slices.is_empty(), "no snapshot is taken or looked for");
+    assert_eq!(b.m.begun, vec![1], "the slice that starts the prompt begins the slot");
+    // the same grid a plain prefill of the prompt takes through the cache's routine with no cuts
+    let mut plain = cached(64, 2);
+    plain.m.context = Some(1000);
+    let mut d = 0;
+    let mut ends = Vec::new();
+    while d < prompt.len() {
+        d = plain.prefill_slice(1, &prompt, &[], d, 1).done;
+        ends.push(d);
+    }
+    assert_eq!(ends, vec![64, 128, 130]);
+    let asked: Vec<i32> = b.m.asked.concat();
+    let want: Vec<i32> = (1..130).map(|i| prompt[i] as i32).chain([-1]).collect();
+    assert_eq!(asked, want);
+    assert!(b.take_score_records(0).is_none());
+    let rec = b.take_score_records(1).unwrap();
+    assert_eq!((rec.rows(), rec.k, rec.top_ids.len()), (130, 20, 130 * 20));
+    assert!(b.take_score_records(1).is_none(), "read once");
+    // the engine's row limit near a deadline moves the readout's grid as it moves a plain prefill's (the same bits: row invariance)
+    b.score_begin(2, true);
+    b.m.calls.clear();
+    assert!(b.set_prefill_row_limit(Some(32)));
+    assert_eq!(b.score_slice(2, &prompt, 0, &[]).unwrap().done, 32);
+    assert_eq!(b.score_slice(2, &prompt, 32, &[]).unwrap().done, 64);
+    b.set_prefill_row_limit(None);
+    b.release(2);
+    // a failed slice fails the request through its result, ends the slot, drops the records and leaves nothing for `take_error`
+    b.score_begin(1, true);
+    b.m.fail = Some(ModelError::Request("boom".into()));
+    let err = b.score_slice(1, &prompt, 0, &[]).err().expect("the failed slice");
+    assert!(!err.fatal && err.message.contains("boom"), "{err:?}");
+    assert!(b.take_error().is_none() && b.take_score_records(1).is_none());
+    assert_eq!(b.m.ended.last(), Some(&1));
+    // a readout that is released before it ends leaves no records behind
+    b.score_begin(1, true);
+    b.score_slice(1, &prompt, 0, &[]).unwrap();
+    b.release(1);
+    assert!(b.take_score_records(1).is_none());
+}
+
+/// A runtime that does not read records out does not serve the readout: the capability is off, so the engine refuses the
+/// request by name, and a slice that arrives anyway is refused without touching the runtime.
+#[test]
+fn a_runtime_without_the_readout_does_not_serve_it() {
+    let mut b = MiniCpmBackend::with_runtime(Fake::default(), 64);
+    assert!(!b.score_rows_supported() && !b.score_supported());
+    b.score_begin(0, true);
+    assert!(b.score_slice(0, &[1, 2, 3], 0, &[]).is_err());
+    assert!(b.m.calls.is_empty() && b.m.begun.is_empty() && b.take_score_records(0).is_none() && b.take_error().is_none());
+}
+
+/// The readout through the engine on the shipped config (prefix cache on): one record per prompt token, nothing generated,
+/// last-row scoring refused by name, and no cache entry left behind for a later request of the same prompt.
+#[test]
+fn the_engine_serves_the_readout_and_a_later_request_finds_no_entry_from_it() {
+    let mut e = shipped_engine();
+    e.backend.m.readout = true;
+    let prompt = words(31, 1200);
+    let req = |all_rows| gb_engine::score::ScoreRequest { prompt: prompt.clone(), cache: false, all_rows };
+    assert!(e.score_submit(req(false)).is_err(), "last-row scoring is not served by this family");
+    let id = e.score_submit(req(true)).unwrap();
+    e.run().unwrap();
+    let mut scores = e.take_scores();
+    assert_eq!((scores.len(), scores[0].0), (1, id));
+    let s = scores.remove(0).1;
+    assert!(e.take_outputs().is_empty() && s.logits_rows.is_empty());
+    let rec = s.records.expect("the compact form");
+    assert_eq!((rec.rows(), s.cached_tokens), (1200, 0));
+    let want: Vec<f32> = (1..1200).map(|i| prompt[i] as f32).chain([-1.0]).collect();
+    assert_eq!(rec.chosen, want);
+    let (_, cached) = serve_one(&mut e, &prompt, true);
+    assert_eq!(cached, 0, "the readout left no snapshot");
 }

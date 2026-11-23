@@ -9,7 +9,10 @@
 //! `prefix_free_snapshots`, `prefix_restore`, `prefix_release` and `prefill_slice_cuts`, with the same slicing routine for cached and
 //! uncached prefill, and the guard that a restored slot only continues into a prompt of the arithmetic its snapshot was made under.
 //! Image and video prompts are cached too (E5b: the engine's index keys carry each image's content key, the namespace the
-//! preprocessing's identity, and a cut is only taken outside every visual group)
+//! preprocessing's identity, and a cut is only taken outside every visual group). The teacher-forced prompt readout
+//! (`prompt_logprobs`, `Backend::score_rows_supported`) runs the chunks a plain prefill runs and reduces every row on the device
+//! in the head's dtype (`gb_cuda::logprob::rows_f16` for the default fp16 head, `gb_cuda::logprob` under `REXL3_MINICPM_LOGITS=bf16`)
+//! over the real vocabulary; last-row scoring (`/v1/decisions`) is not served.
 //!
 //! **Failure isolation.** A step is validated per request on the host before anything is launched: a slot that does not exist, rows
 //! past the context, an id outside the vocabulary, a slot named twice, a window wider than 64 rows or a pool without a page for it. A
@@ -28,6 +31,7 @@ use crate::forward::{Candidates, PrefillPath, SpliceOp};
 use crate::rows::RowBatch;
 use crate::serve::feature_ref;
 use gb_engine::prefix::{PrefixCaps, PrefixHandle};
+use gb_engine::score::RowRecords;
 use gb_engine::{Backend, BackendError, CutStep, ImageSpan, PrefillStep, Proposal, ProposeRequest, RowOutput, RowRequest};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,6 +129,19 @@ pub trait MiniCpmRuntime {
     ) -> Result<Option<gb_engine::prefix::Captured>, ModelError> {
         Err(ModelError::Config("prefix snapshots need the device model".into()))
     }
+    /// Whether this runtime reads out the log-probability records of a prefill chunk ([`MiniCpmRuntime::chunk_row_records`]),
+    /// which the `prompt_logprobs` readout needs. The model does; a runtime that does not say so has the readout refused by name.
+    fn row_records_supported(&self) -> bool {
+        false
+    }
+    /// [`MiniCpmModel::chunk_row_records`]: the records of the rows of the prefill chunk that just ran.
+    fn chunk_row_records(&mut self, _chosen: &[i32], _out: &mut RowRecords) -> Result<(), ModelError> {
+        Err(ModelError::Request("this MiniCPM-V-4.7 runtime does not read out prompt log-probabilities".into()))
+    }
+    /// The full-vocabulary logits of the last row of the prefill chunk that just ran, as f32.
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        Err(ModelError::Request("this MiniCPM-V-4.7 runtime does not read out prompt log-probabilities".into()))
+    }
 }
 
 impl MiniCpmRuntime for MiniCpmModel {
@@ -212,6 +229,15 @@ impl MiniCpmRuntime for MiniCpmModel {
     ) -> Result<Option<gb_engine::prefix::Captured>, ModelError> {
         prefix::capture(self, arena, slot, len)
     }
+    fn row_records_supported(&self) -> bool {
+        true
+    }
+    fn chunk_row_records(&mut self, chosen: &[i32], out: &mut RowRecords) -> Result<(), ModelError> {
+        self.chunk_row_records(chosen, out)
+    }
+    fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        self.chunk_last_row_logits()
+    }
 }
 
 /// A slot that was restored from a snapshot and has not yet continued: the cut and the arithmetic path its snapshot was made under.
@@ -241,6 +267,8 @@ pub struct MiniCpmBackend<M: MiniCpmRuntime = MiniCpmModel> {
     error: Option<BackendError>,
     fatal: Option<BackendError>,
     prefix: Option<PrefixState>,
+    /// The `prompt_logprobs` readouts in flight, by slot (`Backend::score_begin`): the records of the rows scored so far.
+    records: BTreeMap<usize, RowRecords>,
 }
 
 fn nan_row(n: usize) -> RowOutput {
@@ -314,7 +342,7 @@ impl MiniCpmBackend<MiniCpmModel> {
 impl<M: MiniCpmRuntime> MiniCpmBackend<M> {
     pub fn with_runtime(m: M, chunk: usize) -> Self {
         assert!(chunk > 0, "prefill chunk is nonzero");
-        Self { m, chunk, deadline_rows: None, error: None, fatal: None, prefix: None }
+        Self { m, chunk, deadline_rows: None, error: None, fatal: None, prefix: None, records: BTreeMap::new() }
     }
 
     /// The rows of the grid the engine-driven slices are cut on: the chunk, or the engine's row limit when it is smaller. Only the
@@ -499,6 +527,32 @@ impl<M: MiniCpmRuntime> MiniCpmBackend<M> {
         Ok(PrefillStep { done: end, row: c.map(|c| row_of(&c, 0, candidates)) })
     }
 
+    /// One slice of a `prompt_logprobs` readout (text only: a score request has no images): the chunk a plain prefill of the
+    /// prompt would run next (the same absolute grid, prefill path and forward as `prefill_slice` and the cache's slicing routine
+    /// with no cuts), then the records of its rows, read while its normed trunk rows are still on the device. No snapshot is
+    /// taken or restored (the readout is submitted without the prefix cache); the last slice also returns the last row's logits.
+    fn score_slice_inner(&mut self, slot: usize, prompt: &[u32], done: usize) -> Result<gb_engine::score::ScoreStep, ModelError> {
+        let n = prompt.len();
+        if done >= n {
+            return Err(ModelError::Request("empty or completed score slice".into()));
+        }
+        if done == 0 {
+            self.m.begin_slot(slot)?;
+            if let Some(p) = self.prefix.as_mut() {
+                p.restored.remove(&slot);
+            }
+        }
+        self.m.flush()?;
+        let end = next_chunk_end(done, n, self.effective_chunk().min(self.m.prefill_rows()));
+        self.run_chunk(slot, done, &prompt[done..end], n, None)?;
+        // row `i` predicts token `i + 1`; the prompt's last row has none
+        let chosen: Vec<i32> = (done..end).map(|i| prompt.get(i + 1).map_or(-1, |&t| t as i32)).collect();
+        let rec = self.records.get_mut(&slot).ok_or_else(|| ModelError::Request("no readout was begun in this slot".into()))?;
+        self.m.chunk_row_records(&chosen, rec)?;
+        let row = if end == n { Some(self.m.chunk_last_row_logits()?) } else { None };
+        Ok(gb_engine::score::ScoreStep { done: end, row, captured: Vec::new() })
+    }
+
     /// One slice of a prompt with image or video spans (E5b): the chunk ends where [`Geometry::chunk_end`] says, its rows carry the
     /// canvas triples of the whole prompt (explicit when it touches a frame, a plain offset otherwise), the spans' feature rows are
     /// spliced over the pad tokens, and the slot's rope delta is set when the prompt completes. Everything that can be refused is
@@ -591,6 +645,43 @@ impl<M: MiniCpmRuntime> Backend for MiniCpmBackend<M> {
     /// Row-invariant slicing (the forward's bits do not depend on the chunk grid, `a_tiled_prefill_leaves_the_same_bits_in_any_chunk_grid`):
     /// the engine's slices go on the absolute grid of the limit. A visual group that fits the model's chunk is still carried whole, so
     /// a slice over an image can be longer than the limit (the geometry rule; the bits do not depend on it either way).
+    /// The teacher-forced readout only: last-row scoring (`score_supported`) is not served by this family.
+    fn score_rows_supported(&self) -> bool {
+        self.m.row_records_supported()
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        self.records.remove(&slot);
+        if all_rows && self.m.row_records_supported() {
+            self.records.insert(slot, RowRecords::new(gb_engine::score::RECORD_TOP.min(self.m.vocab_size())));
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<RowRecords> {
+        self.records.remove(&slot)
+    }
+    fn score_slice(
+        &mut self,
+        slot: usize,
+        prompt: &[u32],
+        done: usize,
+        _cuts: &[usize],
+    ) -> Result<gb_engine::score::ScoreStep, BackendError> {
+        if let Some(e) = self.fatal.clone() {
+            return Err(e);
+        }
+        if !self.records.contains_key(&slot) {
+            return Err(gb_engine::score::unsupported_backend());
+        }
+        self.score_slice_inner(slot, prompt, done).map_err(|e| {
+            self.records.remove(&slot);
+            if e.is_fatal() {
+                self.record(&format!("prompt readout of slot {slot}"), &e);
+            } else {
+                self.m.end_slot(slot);
+            }
+            // a recoverable error fails this request alone, through the returned value (not `take_error`)
+            self.fatal.clone().unwrap_or_else(|| BackendError::retryable(format!("prompt readout of slot {slot}: {e}")))
+        })
+    }
     fn set_prefill_row_limit(&mut self, rows: Option<usize>) -> bool {
         self.deadline_rows = rows.map(|r| r.max(1));
         true
@@ -867,6 +958,7 @@ impl<M: MiniCpmRuntime> Backend for MiniCpmBackend<M> {
     }
 
     fn release(&mut self, slot: usize) {
+        self.records.remove(&slot); // a readout that was cancelled or failed leaves its records behind
         if let Some(p) = self.prefix.as_mut() {
             p.restored.remove(&slot);
         }

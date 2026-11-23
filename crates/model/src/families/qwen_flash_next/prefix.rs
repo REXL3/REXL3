@@ -428,6 +428,11 @@ pub fn slice_with_cuts(m: &mut FlashNextModel, a: &mut SnapshotArena, req: Slice
     // the DFlash2 draft's context starts at the last window before the prompt's end or before the first cut still to come
     m.set_dflash_from(slot, super::dflash::ctx_from(prompt.len(), cuts, done));
     let end = slice_end(done, prompt.len(), chunk.min(m.opts.prefill_rows), cuts);
+    if end < prompt.len() && end >= 2 {
+        // the slice after this one is known now: its n-gram table pages are read while this one runs
+        let after = slice_end(end, prompt.len(), chunk.min(m.opts.prefill_rows), cuts);
+        m.ple_readahead(&prompt[end - 2..after]);
+    }
     let ids = prompt[done..end].to_vec();
     let b = RowBatch::from_requests(&[RowRequest { slot, first_position: done as u64, tokens: ids }]);
     let row = m.prefill_chunk(&b, PrefillPath::for_prompt(prompt.len()), (end == prompt.len()).then_some(candidates))?;

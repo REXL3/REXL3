@@ -960,8 +960,8 @@ pub struct SolveOpts {
     /// Wall time for the local search of one layer.
     pub budget: Duration,
     pub seed: u64,
-    /// Stop after this many full sweeps without improvement (a sweep tries, for every expert, its swap with every expert of the other
-    /// ranks).
+    /// Run at most this many full sweeps, stopping at the first sweep without improvement (a sweep tries, for every expert, its swap
+    /// with every expert of the other ranks). Zero returns the initial assignment without local search.
     pub max_sweeps: usize,
     /// A swap is applied only when it lowers the training objective by at least this much (units of the cost summed over steps).
     /// Small gains on thousands of steps are mostly the training sample's noise, which a held-out half punishes: raising this trades
@@ -1742,5 +1742,19 @@ mod tests {
             assert_eq!(self.experts(), experts);
             assert_eq!(self.layers().collect::<Vec<_>>(), layers.to_vec());
         }
+    }
+
+    #[test]
+    fn max_sweeps_caps_total_sweeps_and_zero_skips_local_search() {
+        let t = synthetic("sweep-cap", 32, &[1], 32, 17);
+        let steps = steps_of(&[&t], Grouping::Recorded, 1);
+        let problem = LayerProblem::build(&[&t], 0, &steps, Cost::Pairs);
+        let initial = lpt(&problem, 2);
+        let initial_objective = evaluate(&problem, &initial, 2).busiest as u64;
+        let base = SolveOpts { budget: Duration::from_secs(30), seed: 5, min_gain: 1, from_contiguous: false, max_sweeps: 0 };
+        assert_eq!(solve_layer(&problem, 2, &base), (initial, initial_objective));
+        let one = solve_layer(&problem, 2, &SolveOpts { max_sweeps: 1, ..base });
+        // A converged greedy search stops on its first non-improving sweep; a larger total cap cannot change that result.
+        assert_eq!(solve_layer(&problem, 2, &SolveOpts { max_sweeps: 40, ..base }), one);
     }
 }

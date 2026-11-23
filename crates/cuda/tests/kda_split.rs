@@ -292,3 +292,91 @@ fn a_rank_of_32_heads_leaves_the_64_head_layers_bits_for_its_heads() {
     }
     eprintln!("{total_rows} rows: the 32-head ranks equal the 64-head layer bit for bit (outputs, state, conv history)");
 }
+
+/// `heads_of` on weights that are views into blocks (the model's: views of the plan's regions) takes every tensor but `conv_w` as a subview of
+/// its source (the same block, the address of the heads' first byte: no device memory), and copies only `conv_w` (three disjoint ranges the
+/// conv kernel reads as one array), `heads_of_copied_bytes` of it. On sources that are allocations of their own it copies each tensor, and
+/// both give the same bytes.
+#[test]
+fn a_rank_of_32_heads_views_its_weights_in_place_and_copies_only_the_conv() {
+    if !device_available() {
+        eprintln!("no CUDA device: skipping");
+        return;
+    }
+    let st = Stream::new().unwrap();
+    let full = Dims::glm();
+    let (h, half) = (full.heads, full.heads / 2);
+    let mut rng = Rng(0xA11A5);
+    let hw = HostW::random(&mut rng, h);
+    let dw = DevW::new(&hw);
+    // the same bytes in allocations of their own (no block): the copy path
+    let own = |src: &DevBuf| {
+        let mut d = DevBuf::alloc(src.bytes()).unwrap();
+        d.upload(&src.to_vec::<u8>().unwrap()).unwrap();
+        assert!(d.block().is_none());
+        d
+    };
+    let ow = DevW {
+        b: own(&dw.b),
+        f_a: own(&dw.f_a),
+        g_a: own(&dw.g_a),
+        f_b: own(&dw.f_b),
+        g_b: own(&dw.g_b),
+        conv_w: own(&dw.conv_w),
+        a_log: own(&dw.a_log),
+        dt_bias: own(&dw.dt_bias),
+        o_norm: own(&dw.o_norm),
+    };
+    let (vd, hid) = (D, full.hidden);
+    for rank in 0..2 {
+        let (h0, h1) = (rank * half, (rank + 1) * half);
+        let lw = LayerWeights::heads_of(&dw.view(), full, h0, h1, &st).unwrap();
+        let v = lw.view();
+        let src = dw.view();
+        let aliased: [(&str, &DevBuf, &DevBuf, usize, usize); 8] = [
+            ("b", v.b, src.b, h0 * hid * 2, half * hid * 2),
+            ("f_a", v.f_a, src.f_a, 0, src.f_a.bytes()),
+            ("g_a", v.g_a, src.g_a, 0, src.g_a.bytes()),
+            ("f_b", v.f_b, src.f_b, h0 * vd * RANK * 2, half * vd * RANK * 2),
+            ("g_b", v.g_b, src.g_b, h0 * vd * RANK * 2, half * vd * RANK * 2),
+            ("A_log", v.a_log, src.a_log, h0 * 4, half * 4),
+            ("dt_bias", v.dt_bias, src.dt_bias, h0 * vd * 4, half * vd * 4),
+            ("o_norm", v.o_norm, src.o_norm, 0, src.o_norm.bytes()),
+        ];
+        for (name, got, from, off, bytes) in aliased {
+            let (gb, fb) = (got.block().expect(name), from.block().expect(name));
+            assert!(std::sync::Arc::ptr_eq(gb, fb), "rank {rank} {name}: not a view of its source's block (a copy)");
+            assert_eq!(got.ptr() as usize, from.ptr_at(off) as usize, "rank {rank} {name}: not at the heads' first byte");
+            assert_eq!(got.bytes(), bytes, "rank {rank} {name}: bytes");
+        }
+        // the conv: three thirds of the heads' channels, one copy of its own
+        let cw = v.conv_w;
+        assert!(
+            !cw.block().is_some_and(|b| std::sync::Arc::ptr_eq(b, src.conv_w.block().unwrap())),
+            "rank {rank} conv_w: a view"
+        );
+        assert_eq!(cw.bytes(), LayerWeights::heads_of_copied_bytes(h0, h1), "rank {rank} conv_w bytes");
+        assert_eq!(LayerWeights::heads_of_copied_bytes(h0, h1), 3 * half * vd * CONV_TAPS * 2);
+        // the copy path gives the same bytes, tensor by tensor
+        let lo = LayerWeights::heads_of(&ow.view(), full, h0, h1, &st).unwrap();
+        let w = lo.view();
+        for (name, a, b) in [
+            ("b", v.b, w.b),
+            ("f_a", v.f_a, w.f_a),
+            ("g_a", v.g_a, w.g_a),
+            ("f_b", v.f_b, w.f_b),
+            ("g_b", v.g_b, w.g_b),
+            ("conv_w", v.conv_w, w.conv_w),
+            ("A_log", v.a_log, w.a_log),
+            ("dt_bias", v.dt_bias, w.dt_bias),
+            ("o_norm", v.o_norm, w.o_norm),
+        ] {
+            assert!(b.block().is_none(), "rank {rank} {name}: the copy path made a view");
+            same(&format!("rank {rank} {name} view == copy"), &a.to_vec::<u8>().unwrap(), &b.to_vec::<u8>().unwrap());
+        }
+        eprintln!(
+            "rank {rank}: 8 of 9 tensors are views of the source in place; conv_w copied ({} B); the copy path's bytes are the same",
+            cw.bytes()
+        );
+    }
+}

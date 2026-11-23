@@ -2,3 +2,14 @@
 # multiply-adds on its own, so results do not change. Other targets (CI on x86) are left alone.
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=native"]
+
+# Every rustc run goes through .cargo/rustc-remap, which replaces the checkout's path and Cargo's home by fixed
+# names in what the compiler writes, so one commit builds to the same files in any directory and for any user
+# (docs/REPRODUCIBLE_BUILDS.md). The path is relative to this repository's root.
+[build]
+rustc-wrapper = ".cargo/rustc-remap"
+
+# No debug information for the C code of dependencies: it would carry the path of Cargo's home, which differs between
+# users. Rust debug information is unaffected (the release profile keeps debug = 1). A CFLAGS already set wins.
+[env]
+CFLAGS = "-g0"

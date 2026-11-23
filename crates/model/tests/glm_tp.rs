@@ -196,13 +196,34 @@ fn load(dir: &std::path::Path, layers: usize) -> GlmModel {
 /// Rank `rank` of two under the KDA head split as the rank planner loads it (lane E, the rank strips): the pack mapped with the rank's
 /// heads (`GlmConfig::with_kda_rank`), so only its qkv strips are placed and read, and the model holds its heads' state from the start.
 fn load_rank_strips(dir: &std::path::Path, layers: usize, rank: usize) -> GlmModel {
+    load_split(dir, layers, rank, true, false)
+}
+
+/// Rank `rank` of two as the rank planner loads it: with only its heads' qkv strips (`kda_strips`, `GlmConfig::with_kda_rank`) and / or only
+/// its vocabulary half of the lm_head (`lm_held`, `GlmConfig::with_lm_rank`: `REXL3_GLM_TP_SPLIT` with `lm-held`).
+fn load_split(dir: &std::path::Path, layers: usize, rank: usize, kda_strips: bool, lm_held: bool) -> GlmModel {
     use gb_model::families::glm::{config::GlmConfig, GlmPack};
     gb_cuda::rt::init_context().unwrap();
-    let cfg = GlmConfig::from_dir(dir).unwrap().with_kda_rank(rank, 2).unwrap();
+    let mut cfg = GlmConfig::from_dir(dir).unwrap();
+    if kda_strips {
+        cfg = cfg.with_kda_rank(rank, 2).unwrap();
+    }
+    if lm_held {
+        cfg = cfg.with_lm_rank(rank, 2).unwrap();
+    }
     let ck = gb_exl3::checkpoint::scan(dir, false).unwrap();
     let pack = GlmPack::from_checkpoint(&ck, cfg).unwrap();
     let b = boot_mapped(dir, pack, Some(layers), &LoadOptions::from_env(8 * GIB), 0.0).unwrap();
-    eprintln!("rank {rank} with its qkv strips: {:.3} GiB of regions", gib(b.device.regions.bytes()));
+    eprintln!(
+        "rank {rank} with {}: {:.3} GiB of regions",
+        match (kda_strips, lm_held) {
+            (true, true) => "its qkv strips and its vocabulary half",
+            (true, false) => "its qkv strips",
+            (false, true) => "its vocabulary half",
+            (false, false) => "everything",
+        },
+        gib(b.device.regions.bytes())
+    );
     GlmModel::new_chunked(
         b.pack.config.clone(),
         b.device,
@@ -316,7 +337,17 @@ fn two_ranks_with_the_head_split_equal_the_single_node_model_byte_for_byte() {
         .ok()
         .map(|v| v.split(',').map(|x| x.trim().replace('+', ",")).collect())
         .unwrap_or_else(|| {
-            vec!["none".into(), "kda".into(), "lm".into(), "mla".into(), "kda,lm,mla".into(), "sh".into(), "kda,lm,mla,sh".into()]
+            vec![
+                "none".into(),
+                "kda".into(),
+                "lm".into(),
+                "lm-held".into(),
+                "mla".into(),
+                "kda,lm,mla".into(),
+                "sh".into(),
+                "kda,lm,mla,sh".into(),
+                "kda,lm-held,mla,sh".into(),
+            ]
         });
     let strips_modes: Vec<bool> = match std::env::var("REXL3_GLM_TP_RANK_STRIPS").ok().as_deref() {
         Some("0") => vec![false],
@@ -336,8 +367,10 @@ fn two_ranks_with_the_head_split_equal_the_single_node_model_byte_for_byte() {
     for (set, rank_strips) in &runs {
         let (set, rank_strips) = (set, *rank_strips);
         let bits = split_from_vars(|_| Some(set.clone())).unwrap();
-        let (mut a, mut b) = if rank_strips {
-            (load_rank_strips(&dir, layers, 0), load_rank_strips(&dir, layers, 1))
+        // `lm-held`: each rank holds only its vocabulary half of the lm_head, as the rank planner maps it
+        let lm_held = bits & gb_model::families::glm::model::tp::SPLIT_LM_HELD != 0;
+        let (mut a, mut b) = if rank_strips || lm_held {
+            (load_split(&dir, layers, 0, rank_strips, lm_held), load_split(&dir, layers, 1, rank_strips, lm_held))
         } else {
             (load(&dir, layers), load(&dir, layers))
         };
@@ -429,6 +462,76 @@ fn two_ranks_with_the_head_split_equal_the_single_node_model_byte_for_byte() {
 /// split's decode-path arm. The launch audit per rank: every prompt chunk all-P2
 /// (the dense linears, the expert runs, a part swap a MoE layer) with the chunked recurrence over HALF the single node's heads under a KDA
 /// split; windows none. `REXL3_GLM_TP_SPLITS` / `REXL3_GLM_TP_RANK_STRIPS` choose the runs as for the P1 test.
+/// The rank planner's price of the head split's buffers and the P2 parts (`model::tp::split_planned_bytes`, charged under the opt-in reserve
+/// by `tp_boot::price_rank`) is what the two ranks allocate, item by item, for every split set: two ranks loaded as the planner loads them
+/// (their qkv strips), made a group, split, under P2. The planned figures come from the pack's shapes alone, before the load.
+#[test]
+#[ignore]
+fn the_rank_planner_prices_the_head_split_and_the_p2_parts_to_the_byte() {
+    use gb_model::families::glm::model::tp::{split_from_vars, split_names, split_planned_bytes, SPLIT_KDA};
+    use gb_model::families::glm::{config::GlmConfig, GlmPack};
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let _guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    for set in ["kda", "mla", "lm", "sh", "kda,lm,mla,sh"] {
+        let bits = split_from_vars(|_| Some(set.to_string())).unwrap();
+        let mut ranks = Vec::new();
+        let mut planned = Vec::new();
+        for rank in 0..2 {
+            // a KDA split rank loads its qkv strips (as the planner maps it); without the KDA split it loads every head
+            let whole = GlmConfig::from_dir(&dir).unwrap();
+            let cfg = if bits & SPLIT_KDA != 0 { whole.with_kda_rank(rank, 2).unwrap() } else { whole };
+            let ck = gb_exl3::checkpoint::scan(&dir, false).unwrap();
+            let pack = GlmPack::from_checkpoint(&ck, cfg.clone()).unwrap();
+            // the planner's figure over the layers this test loads
+            let mut w = pack.weights.clone();
+            w.layers.truncate(layers);
+            planned.push(split_planned_bytes(&w, &cfg, bits, rank, CHUNK, true).unwrap());
+            let b = boot_mapped(&dir, pack, Some(layers), &LoadOptions::from_env(8 * GIB), 0.0).unwrap();
+            let mut m = GlmModel::new_chunked(
+                b.pack.config.clone(),
+                b.device,
+                &ModelOptions { slots: SLOTS, kv_blocks: 64, max_context: 8192, layers },
+                CHUNK,
+            )
+            .unwrap();
+            m.set_prefill_contract(PrefillContract::P2).unwrap();
+            ranks.push(m);
+        }
+        let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(120)).into_iter();
+        let (mut a, mut b) = (ranks.remove(0), ranks.remove(0));
+        a.enable_tp(Arc::new(comms.next().unwrap()), ExpertOwnership::range(288, 0, 2).unwrap()).unwrap();
+        b.enable_tp(Arc::new(comms.next().unwrap()), ExpertOwnership::range(288, 1, 2).unwrap()).unwrap();
+        // the split's own probes swap bytes only on a capturable communicator; the loopback group's calls block on the peer, so each
+        // rank splits on its own thread
+        let (a, b) = std::thread::scope(|sc| {
+            let ha = sc.spawn(move || {
+                a.enable_head_split(bits).unwrap();
+                a
+            });
+            let hb = sc.spawn(move || {
+                b.enable_head_split(bits).unwrap();
+                b
+            });
+            (ha.join().expect("rank 0"), hb.join().expect("rank 1"))
+        });
+        for (rank, m) in [&a, &b].into_iter().enumerate() {
+            let got = m.split_allocated_bytes().unwrap();
+            eprintln!(
+                "SPLIT_PRICE {} rank {rank} layers {layers}: planned {:?} allocated {:?} (total {} vs {} B)",
+                split_names(bits),
+                planned[rank],
+                got,
+                planned[rank].total(),
+                got.total()
+            );
+            assert_eq!(got, planned[rank], "split {}: rank {rank}'s buffers are not the planner's price", split_names(bits));
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn p2_two_ranks_with_the_head_split_equal_the_single_node_p2_model_byte_for_byte() {
@@ -448,7 +551,17 @@ fn p2_two_ranks_with_the_head_split_equal_the_single_node_p2_model_byte_for_byte
     let sets: Vec<String> = std::env::var("REXL3_GLM_TP_SPLITS")
         .ok()
         .map(|v| v.split(',').map(|x| x.trim().replace('+', ",")).collect())
-        .unwrap_or_else(|| vec!["kda".into(), "mla".into(), "kda,lm,mla".into(), "sh".into(), "kda,lm,mla,sh".into()]);
+        .unwrap_or_else(|| {
+            vec![
+                "kda".into(),
+                "mla".into(),
+                "kda,lm,mla".into(),
+                "sh".into(),
+                "kda,lm,mla,sh".into(),
+                "lm-held".into(),
+                "kda,lm-held,mla,sh".into(),
+            ]
+        });
     let strips_modes: Vec<bool> = match std::env::var("REXL3_GLM_TP_RANK_STRIPS").ok().as_deref() {
         Some("0") => vec![false],
         Some("1") => vec![true],
@@ -465,8 +578,10 @@ fn p2_two_ranks_with_the_head_split_equal_the_single_node_p2_model_byte_for_byte
     for (set, rank_strips) in &runs {
         let (set, rank_strips) = (set, *rank_strips);
         let bits = split_from_vars(|_| Some(set.clone())).unwrap();
-        let (mut a, mut b) = if rank_strips {
-            (load_rank_strips(&dir, layers, 0), load_rank_strips(&dir, layers, 1))
+        // `lm-held`: each rank holds only its vocabulary half of the lm_head, as the rank planner maps it
+        let lm_held = bits & gb_model::families::glm::model::tp::SPLIT_LM_HELD != 0;
+        let (mut a, mut b) = if rank_strips || lm_held {
+            (load_split(&dir, layers, 0, rank_strips, lm_held), load_split(&dir, layers, 1, rank_strips, lm_held))
         } else {
             (load(&dir, layers), load(&dir, layers))
         };
@@ -1231,5 +1346,70 @@ fn p2_the_single_node_backend_seals_its_captures_and_refuses_a_mismatched_restor
     eprintln!(
         "one node: the backend's in-chunk capture is sealed, a mismatched restore refused, cold and warm answers BYTE-IDENTICAL"
     );
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// V3 (`REXL3_GLM_TOWER_LEND`) on the two-node prefix cache: [`p2_two_ranks_restore_their_own_snapshots_byte_for_byte`]'s script (P2, the
+/// serving split, a fresh prompt then restores at 16, 496, 1,040 and 2,272 tokens) with rank 0's tower borrowing its scratch from rank 0's
+/// prefill scratch while another thread encodes images on it throughout. The fresh and every restored prompt answer as the single node
+/// does, on both ranks; every encode gives the tower's own scratch's bytes; both parties took the lease.
+#[test]
+#[ignore]
+fn p2_two_ranks_restore_their_own_snapshots_with_a_lent_tower_byte_for_byte() {
+    use gb_model::families::glm::model::tp::split_from_vars;
+    use gb_model::serve::ImageEncoder;
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    let toks = Rng(0x51ce_7a11_d00d_f00d).tokens(2300);
+    let cuts = [16usize, 496, 1040, 2272];
+    let mut a = load(&dir, layers);
+    a.set_prefill_contract(PrefillContract::P2).unwrap();
+    a.set_graphs(false);
+    a.enable_prefix_cache(4).unwrap();
+    let reference = restore_script(&mut a, &toks, &cuts);
+    drop(a);
+    // the tower's own features of two images
+    let pack = gb_model::families::glm::GlmFamily::map_pack(&dir).unwrap();
+    let pp = glm_preprocessor(&dir, 1024);
+    let pres: Vec<gb_vision::Preprocessed> =
+        [synth_rgb(448, 448, 1), synth_rgb(560, 392, 4)].iter().map(|im| pp.preprocess(im).unwrap()).collect();
+    let (mut own, _, _) = glm_encoder(&dir, &pack, 1024, None, false);
+    let jobs: Vec<(gb_vision::Preprocessed, Vec<u8>)> =
+        pres.iter().map(|p| (p.clone(), glm_feature_bytes(&own.encode(p).unwrap().features))).collect();
+    drop(own);
+    let bits = split_from_vars(|_| Some("kda,lm,mla,sh".into())).unwrap();
+    let (mut a, mut b) = (load_rank_strips(&dir, layers, 0), load_rank_strips(&dir, layers, 1));
+    let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(120)).into_iter();
+    for (m, r) in [(&mut a, 0), (&mut b, 1)] {
+        m.set_prefill_contract(PrefillContract::P2).unwrap();
+        m.enable_tp(Arc::new(comms.next().unwrap()), ExpertOwnership::range(288, r, 2).unwrap()).unwrap();
+        m.enable_head_split(bits).unwrap();
+        m.enable_prefix_cache(4).unwrap();
+    }
+    let lease = a.lend_prefill_scratch().unwrap().expect("rank 0 has a prefill scratch");
+    let (lent, _, lent_bytes) = glm_encoder(&dir, &pack, 1024, Some(lease.clone()), false);
+    assert!(lent_bytes > 0);
+    let hammer = Hammer::start(lent, jobs);
+    let t = std::time::Instant::now();
+    let (d0, d1) = std::thread::scope(|sc| {
+        let h0 = sc.spawn(|| restore_script(&mut a, &toks, &cuts));
+        let h1 = sc.spawn(|| restore_script(&mut b, &toks, &cuts));
+        (h0.join().expect("rank 0"), h1.join().expect("rank 1"))
+    });
+    let (encodes, bad, _enc) = hammer.finish();
+    let (taken, waited) = lease.counts();
+    eprintln!(
+        "restores with a lent tower ({:.1} MiB lent) in {:.1?}: {encodes} concurrent encodes ({bad} differ); lease taken {taken:?}, waited {waited:?}",
+        lent_bytes as f64 / 1048576.0,
+        t.elapsed()
+    );
+    assert_eq!(bad, 0, "an encode on the lent scratch differs from the own scratch's");
+    assert!(encodes > 0 && taken[0] > 0 && taken[1] > 0 && lease.is_free());
+    assert_eq!(d0, d1, "the two ranks' answers differ");
+    assert_eq!(d0, reference, "with a lent tower the group's fresh or restored answers differ from the P2 single node's");
+    eprintln!("BYTE-IDENTICAL with a lent tower and encodes running: the fresh prompt and the restores at {cuts:?}, both ranks");
+    drop((a, b));
     eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
 }

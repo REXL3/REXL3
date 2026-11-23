@@ -244,6 +244,101 @@ pub const ROCE_SITES_PART_SWAP: [usize; 3] = [8 << 20, 32 << 20, 64 << 20];
 /// (`roce_site_plan`'s `kda_gather`, passed by `roce_site_plan_here` since Lane P's P5b): 4 x 52 MiB = 208 MiB a rank.
 pub const ROCE_SITES_PREFILL_GATHER: [usize; 3] = [4 << 20, 16 << 20, 32 << 20];
 
+/// `REXL3_GLM_ROCE_SITES`: which RoCE sites a rank registers. Unset or `all` (the default): every size class above ([`roce_site_plan`],
+/// the plan every shipped profile runs, byte for byte). `sized`: only the classes this rank's prefill chunk and slot count can reach
+/// ([`sized_site_plan`] of the [`SiteShape`] [`plan_from_split`] records): the smallest site that holds any message the rank can send is
+/// the same site as under `all`, so every message takes the path and the size class it takes today, and the classes no message reaches
+/// are not pinned (`4 x` their caps of mapped host memory a rank). A Hello fact through the plan (`glm_sites=`): both ranks must agree.
+pub const ROCE_SITES_ENV: &str = "REXL3_GLM_ROCE_SITES";
+
+/// [`ROCE_SITES_ENV`] from its value: `false` = `all` (unset, empty or `all`), `true` = `sized`, a typo refused by name.
+pub fn roce_sites_sized_from(v: Option<&str>) -> Result<bool, String> {
+    match v.map(str::trim) {
+        None | Some("" | "all") => Ok(false),
+        Some("sized") => Ok(true),
+        Some(other) => Err(format!("{ROCE_SITES_ENV}={other:?}: `all` (the default) or `sized`")),
+    }
+}
+
+/// This process's [`ROCE_SITES_ENV`] (a malformed value is refused by [`plan_from_split`]; here it reads as `all`).
+pub fn roce_sites_sized() -> bool {
+    roce_sites_sized_from(std::env::var(ROCE_SITES_ENV).ok().as_deref()).unwrap_or(false)
+}
+
+/// What sizes a rank's RoCE sites under [`ROCE_SITES_ENV`]`=sized`: the rows of its prefill chunk (`alloc::prefill_chunk_for`, the
+/// most rows of a P2 part swap or a prefill gather: `GlmModel::forward` refuses a longer chunk) and its slots (with the engine's
+/// [`MAX_DRAFTS`], the most rows of a decode or verify window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SiteShape {
+    pub prefill_rows: usize,
+    pub slots: usize,
+}
+
+/// The shape [`plan_from_split`] recorded for this process (the boot plans once, before the Hello and the communicator).
+static SITE_SHAPE: Mutex<Option<SiteShape>> = Mutex::new(None);
+
+/// Record this process's [`SiteShape`] (read by [`roce_site_plan_here`] under `sized`).
+pub fn set_site_shape(shape: SiteShape) {
+    *SITE_SHAPE.lock().unwrap_or_else(|p| p.into_inner()) = Some(shape);
+}
+
+/// The most drafts one stream offers a round on a GLM rank's engine ([`engine_over_budget`]'s `EngineConfig::max_drafts`; the copy
+/// drafter's 7 and the NextN chain's `alloc::MTP_MAX_DEPTH` are within it): a window holds at most `1 + MAX_DRAFTS` rows a slot.
+pub const MAX_DRAFTS: usize = 7;
+
+/// Bytes a prompt row of the P2 part swap (one fp32 row of `hidden` 4,096: `model/tp/p2.rs`).
+pub const PART_SWAP_ROW_BYTES: usize = 16 << 10;
+
+/// Bytes a prompt row of the prefill KDA-out gather (a rank's half of 64 heads x 128, fp16: `model/tp/p2_split.rs`).
+pub const PREFILL_GATHER_ROW_BYTES: usize = 8 << 10;
+
+/// The boot's larger connection probe (`model/tp.rs`, `enable_head_split`): an 8 MiB step swap, carried by the step's 8 MiB site, which
+/// [`sized_site_plan`] therefore always keeps.
+pub const STEP_PROBE_BYTES: usize = 8 << 20;
+
+/// The most rows of a window of `slots` slots: `1 + MAX_DRAFTS` a slot, at most `alloc::WINDOW_ROWS`.
+pub fn window_rows_for(slots: usize) -> usize {
+    (slots.max(1) * (1 + MAX_DRAFTS)).min(WINDOW_ROWS)
+}
+
+/// `classes` up to and including the first that holds `need` bytes (all of them when none does): every message of at most `need`
+/// bytes finds the same smallest site in the prefix as in the whole list.
+fn classes_holding(classes: &[usize], need: usize) -> Vec<usize> {
+    let n = classes.iter().position(|&c| c >= need).map_or(classes.len(), |i| i + 1);
+    classes[..n].to_vec()
+}
+
+/// [`roce_site_plan`] under [`ROCE_SITES_ENV`]`=sized`: each user's list cut to the classes `shape` reaches. The step: the decode sites,
+/// the bulk ones up to the first that holds [`window_rows_for`]`(slots) x` [`STEP_ROW_BYTES`], and the 8 MiB site of the boot probe
+/// ([`STEP_PROBE_BYTES`]; it also keeps the sum limit at 8 MiB). The part swap up to the first that holds `prefill_rows x`
+/// [`PART_SWAP_ROW_BYTES`], the gather up to `prefill_rows x` [`PREFILL_GATHER_ROW_BYTES`]. At 2,048 rows and one slot: the 4, 32 (gather)
+/// and 64 MiB sites go, 400 MiB of pinned host memory a rank.
+pub fn sized_site_plan(
+    contract: super::contract::PrefillContract,
+    kda_gather: bool,
+    shape: SiteShape,
+) -> crate::families::nemotron_h_omni::tp_roce::SitePlan {
+    use crate::families::nemotron_h_omni::tp_roce::{SitePlan, SiteUser};
+    let mut step = step_sites_for(window_rows_for(shape.slots));
+    if !step.contains(&STEP_PROBE_BYTES) {
+        step.push(STEP_PROBE_BYTES);
+    }
+    let mut plan = SitePlan::step(&step);
+    if let Some(&top) = step.last().filter(|&&c| c > 1 << 20) {
+        plan = plan.with_sum_max(top);
+    }
+    if contract.p2_prefill(true) {
+        plan = plan.with(SiteUser::PartSwap, &classes_holding(&ROCE_SITES_PART_SWAP, shape.prefill_rows * PART_SWAP_ROW_BYTES));
+        if kda_gather {
+            plan = plan.with(
+                SiteUser::PrefillGather,
+                &classes_holding(&ROCE_SITES_PREFILL_GATHER, shape.prefill_rows * PREFILL_GATHER_ROW_BYTES),
+            );
+        }
+    }
+    plan
+}
+
 /// The RoCE sites a rank registers, by user (`tp_roce::SitePlan`): the step's [`ROCE_SITES`] always; the part swap's under the P2
 /// contract; the prefill gather's under P2 with the KDA split (`kda_gather`, P5b).
 pub fn roce_site_plan(
@@ -267,9 +362,14 @@ pub fn roce_site_plan(
 
 /// This process's plan: the prefill gather's sites when this rank runs the KDA split (`REXL3_GLM_TP_SPLIT` with `kda`, a fact of the
 /// Hello, so both ranks build the same regions) under P2 (Lane P's P5b: its prompt chunks gather the heads' core outputs).
+/// Under [`ROCE_SITES_ENV`]`=sized`, [`sized_site_plan`] of the [`SiteShape`] the plan recorded (before it is recorded: the full plan).
 pub fn roce_site_plan_here() -> crate::families::nemotron_h_omni::tp_roce::SitePlan {
     let kda_split = super::model::tp::split_from_env().is_ok_and(|b| b & super::model::tp::SPLIT_KDA != 0);
-    roce_site_plan(super::contract::current(), kda_split)
+    let shape = if roce_sites_sized() { *SITE_SHAPE.lock().unwrap_or_else(|p| p.into_inner()) } else { None };
+    match shape {
+        Some(s) => sized_site_plan(super::contract::current(), kda_split, s),
+        None => roce_site_plan(super::contract::current(), kda_split),
+    }
 }
 
 /// The RoCE path counters of this rank's group (lane T: `tp_roce::RoceTp::paths_line`), or nothing on NCCL alone.
@@ -353,6 +453,12 @@ pub struct RankPlan {
     /// The NextN layer is loaded (`--spec mtp|auto` with drafting on, a pack that has it): its regions (the rank's share of its experts)
     /// are in `weight_bytes`, its cache in the plan's KV bytes per token.
     pub mtp: bool,
+    /// The graph caches' limits the rank runs with (`GraphBudget::for_boot`: one-slot limits under the opt-in and `--prefix-cache pool`), `None`: the
+    /// default limits.
+    pub graph_budget: Option<super::model::GraphBudget>,
+    /// What this rank allocates after the plan beyond the memory profile's items, priced before the load and taken out of the room the KV
+    /// pool is planned from (`rank_extras`): only with `memory::PRICE_UNMODELLED_ENV` on, all 0 otherwise.
+    pub priced: super::rank_extras::RankExtras,
 }
 
 /// Whether a rank (or one node) loads the NextN layer: the same rule as `engine::build_engine`.
@@ -379,8 +485,14 @@ pub fn plan_rank(o: &ServeOptions) -> Result<RankPlan, ModelError> {
     let (cuda_free, _) = gb_cuda::rt::mem_info()?;
     let host = hostmem::MemInfo::read();
     let free_now = hostmem::planning_free(cuda_free as u64, host.as_ref());
+    // the rank's reading to the MiB and what the whole-GiB rounding leaves out of the plan (the single node prints `memory_view`)
+    eprintln!("{}", hostmem::memory_view_exact_line(cuda_free as u64, host.as_ref(), o.floor_bytes));
     let own = rank_ownership(o, &cfg)?;
-    Ok(RankPlan { fingerprint, ..plan_from(o, cfg, ck, free_now, scan_s, own)? })
+    let p = RankPlan { fingerprint, ..plan_from(o, cfg, ck, free_now, scan_s, own)? };
+    if p.priced.total() > 0 {
+        eprintln!("{}", p.priced.line(o.tp.as_ref().map_or(0, |t| t.rank)));
+    }
+    Ok(p)
 }
 
 /// This rank's share of the routed experts: `ExpertOwnership::range` of its place in the group when the group has a communicator, `None`
@@ -422,6 +534,15 @@ pub fn rank_kda_split(o: &ServeOptions) -> Result<Option<(usize, usize)>, ModelE
     Ok((sharded() && bits & super::model::tp::SPLIT_KDA != 0).then_some((t.rank, t.ranks)))
 }
 
+/// The place `(rank, ranks)` of a rank that holds only its vocabulary half of the lm_head (`REXL3_GLM_TP_SPLIT` with `lm-held`, opt-in, a
+/// sharded group): it maps, plans and allocates only those strips of the head (`GlmConfig::with_lm_rank`). `None` otherwise (every shipped
+/// profile: the whole head, the plan unchanged).
+pub fn rank_lm_held(o: &ServeOptions) -> Result<Option<(usize, usize)>, ModelError> {
+    let Some(t) = o.tp.as_ref().filter(|t| t.is_group()) else { return Ok(None) };
+    let bits = super::model::tp::split_from_env().map_err(ModelError::Config)?;
+    Ok((sharded() && bits & super::model::tp::SPLIT_LM_HELD != 0).then_some((t.rank, t.ranks)))
+}
+
 /// [`plan_rank`] at a given free figure (before the load): the planner's half, pure (the CPU check of the cluster file's flags).
 pub fn plan_from(
     o: &ServeOptions,
@@ -431,7 +552,7 @@ pub fn plan_from(
     scan_s: f64,
     own: Option<ExpertOwnership>,
 ) -> Result<RankPlan, ModelError> {
-    plan_from_split(o, cfg, ck, free_now, scan_s, own, rank_kda_split(o)?)
+    plan_from_splits(o, cfg, ck, free_now, scan_s, own, rank_kda_split(o)?, rank_lm_held(o)?)
 }
 
 /// [`plan_from`] for a rank of the KDA head split at `kda_split` (`(rank, ranks)`, [`rank_kda_split`]): the configuration becomes the
@@ -446,13 +567,85 @@ pub fn plan_from_split(
     own: Option<ExpertOwnership>,
     kda_split: Option<(usize, usize)>,
 ) -> Result<RankPlan, ModelError> {
+    let reserve = memory::reserve_mode_from(|k| std::env::var(k).ok()).map_err(ModelError::Config)?;
+    let price = memory::price_unmodelled().map_err(ModelError::Config)?;
+    plan_from_splits_with(o, cfg, ck, free_now, scan_s, own, kda_split, None, reserve, price)
+}
+
+/// [`plan_from_split`] with the vocabulary half of a rank that holds only that half of the lm_head (`lm_held`, `(rank, ranks)`,
+/// [`rank_lm_held`]): the configuration becomes the rank's (`GlmConfig::with_lm_rank`), so the pack is mapped with those strips of the head
+/// only (the weight bytes). `None`: [`plan_from_split`], unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_from_splits(
+    o: &ServeOptions,
+    cfg: GlmConfig,
+    ck: Checkpoint,
+    free_now: u64,
+    scan_s: f64,
+    own: Option<ExpertOwnership>,
+    kda_split: Option<(usize, usize)>,
+    lm_held: Option<(usize, usize)>,
+) -> Result<RankPlan, ModelError> {
+    let reserve = memory::reserve_mode_from(|k| std::env::var(k).ok()).map_err(ModelError::Config)?;
+    let price = memory::price_unmodelled().map_err(ModelError::Config)?;
+    plan_from_splits_with(o, cfg, ck, free_now, scan_s, own, kda_split, lm_held, reserve, price)
+}
+
+/// [`plan_from_split`] with the reserve mode and the price switch given (the tests; [`plan_from_split`] reads them from
+/// `memory::RESERVE_MARGIN_ENV` and `memory::PRICE_UNMODELLED_ENV`): with `price` the rank's extras are priced ([`price_rank`]) and taken
+/// out of the room the KV pool is planned from, whatever the reserve mode.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_from_split_with(
+    o: &ServeOptions,
+    cfg: GlmConfig,
+    ck: Checkpoint,
+    free_now: u64,
+    scan_s: f64,
+    own: Option<ExpertOwnership>,
+    kda_split: Option<(usize, usize)>,
+    reserve: memory::ReserveMode,
+    price: bool,
+) -> Result<RankPlan, ModelError> {
+    plan_from_splits_with(o, cfg, ck, free_now, scan_s, own, kda_split, None, reserve, price)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_from_splits_with(
+    o: &ServeOptions,
+    cfg: GlmConfig,
+    ck: Checkpoint,
+    free_now: u64,
+    scan_s: f64,
+    own: Option<ExpertOwnership>,
+    kda_split: Option<(usize, usize)>,
+    lm_held: Option<(usize, usize)>,
+    reserve: memory::ReserveMode,
+    price: bool,
+) -> Result<RankPlan, ModelError> {
     let cfg = match kda_split {
         Some((rank, ranks)) => cfg.with_kda_rank(rank, ranks).map_err(ModelError::Config)?,
         None => cfg,
     };
+    let cfg = match lm_held {
+        Some((rank, ranks)) => cfg.with_lm_rank(rank, ranks).map_err(ModelError::Config)?,
+        None => cfg,
+    };
+    // the RoCE sites' shape (`REXL3_GLM_ROCE_SITES=sized`), recorded before anything prices or registers them; the per-row sizes the
+    // sized plan assumes are this pack's, refused by name otherwise
+    let sized = roce_sites_sized_from(std::env::var(ROCE_SITES_ENV).ok().as_deref()).map_err(ModelError::Config)?;
+    if sized && (cfg.hidden * 4 > PART_SWAP_ROW_BYTES || cfg.kda.heads * cfg.kda.head_dim > PREFILL_GATHER_ROW_BYTES) {
+        return Err(ModelError::Config(format!(
+            "{ROCE_SITES_ENV}=sized sizes the sites for a hidden of at most {} and KDA heads x width of at most {}: this pack has {} and {}",
+            PART_SWAP_ROW_BYTES / 4,
+            PREFILL_GATHER_ROW_BYTES,
+            cfg.hidden,
+            cfg.kda.heads * cfg.kda.head_dim
+        )));
+    }
+    set_site_shape(SiteShape { prefill_rows: alloc::prefill_chunk_for(o.prefill_chunk), slots: o.slots });
     let mtp = mtp_wanted(o, &cfg);
     let mem_opts = memory::engine_options(&memory_options(o, mtp));
-    let profile = memory::memory_profile(&cfg, &mem_opts).map_err(|e| ModelError::Config(e.to_string()))?;
+    let profile = memory::memory_profile_with(&cfg, &mem_opts, reserve).map_err(|e| ModelError::Config(e.to_string()))?;
     let inv = super::PackInventory::from_checkpoint(&ck).map_err(ModelError::Config)?;
     // the tower is bound only where it is loaded (rank 0 serving images); a follower and a `--no-vision` rank claim and skip it
     let all = ExpertOwnership::all(cfg.ffn.routed_experts);
@@ -462,14 +655,20 @@ pub fn plan_from_split(
     let (tower_bytes, vision_reserve) = tp_vision::planned_vision(o, &pack, &profile, mem_opts.vision)?;
     // the drafter's restricted head, built after the load on every rank that loads the NextN layer (`load_rank_with`)
     let draft_head_bytes = super::engine::draft_head_planned(mtp, &pack.weights.lm_head, cfg.vocab)?;
-    let free = free_now.saturating_sub(weight_bytes + tower_bytes + draft_head_bytes);
+    let graph_budget = super::model::GraphBudget::for_boot(price, o.prefix_pool, o.slots, draft_depth_of(o, mtp));
+    // `REXL3_GLM_PLAN_PRICE_UNMODELLED=1`: what the rank allocates after the plan beyond the profile's items, priced here (0 otherwise:
+    // every shipped profile's plan is unchanged, the RED-SNOW 524,288-token one at its 4 GiB margin included)
+    let priced =
+        if price { price_rank(o, &cfg, &pack, free_now, graph_budget)? } else { super::rank_extras::RankExtras::default() };
+    let free = free_now.saturating_sub(weight_bytes + tower_bytes + draft_head_bytes + priced.total());
     let kv_cap = o.kv_tokens.unwrap_or(o.max_model_len) as u64;
     // the prefix cache as one node plans it (`engine::build_engine`): a snapshot slot is THIS rank's state (its KDA heads under the split,
     // `cfg` is the rank's), the cache carved out before the KV pool is sized (an explicit size) or out of what the plan leaves (`Auto`)
     let snapshot_bytes = super::prefix::snapshot_bytes(&cfg, mtp).map_err(ModelError::Config)?;
     // `--prefix-cache pool`: snapshot slots and no pages of their own on every rank (the entries keep the pool's idle pages)
     let plan = if o.prefix_pool {
-        plan_memory_pool_cached(&profile, free, o.floor_bytes, o.slots, kv_cap, vision_reserve, snapshot_bytes, 0, o.max_model_len as u64)
+        // `REXL3_GLM_PLAN_PRICE_UNMODELLED=1`: the minimum snapshot slots, none bought from the spare
+        plan_memory_pool_cached(&profile, free, o.floor_bytes, o.slots, kv_cap, vision_reserve, snapshot_bytes, 0, o.max_model_len as u64, !price)
     } else {
         plan_memory_cached_windowed(
             &profile,
@@ -510,7 +709,67 @@ pub fn plan_from_split(
         draft_head_bytes,
         scan_s,
         mtp,
+        graph_budget,
+        priced,
     })
+}
+
+/// The extras of a rank (`rank_extras`) under the opt-in price (`memory::PRICE_UNMODELLED_ENV`): the RoCE region of this rank's site plan when the transport may come up,
+/// the head split's buffers and the P2 parts at the rank's chunk (a rank of a sharded group only), the graph caches at their limits and
+/// the driver's bookkeeping of what the plan may allocate.
+pub fn price_rank(
+    o: &ServeOptions,
+    cfg: &GlmConfig,
+    pack: &GlmPack,
+    free_now: u64,
+    graph_budget: Option<super::model::GraphBudget>,
+) -> Result<super::rank_extras::RankExtras, ModelError> {
+    use super::rank_extras::{driver_bytes, graph_bytes, RankExtras};
+    use crate::families::nemotron_h_omni::tp_roce::{self, Transport};
+    let group = o.tp.as_ref().filter(|t| t.is_group() && sharded());
+    let (mut roce_region, mut split) = (0, Default::default());
+    if let Some(t) = group {
+        if tp_roce::transport(DEFAULT_TRANSPORT).map_err(ModelError::Config)? != Transport::Nccl {
+            let rc = gb_cuda::roce::RoceConfig::from_env().map_err(ModelError::Config)?;
+            roce_region = gb_cuda::roce::region_bytes(&rc, &roce_site_plan_here().caps());
+        }
+        let bits = super::model::tp::split_from_env().map_err(ModelError::Config)?;
+        let p2 = super::contract::current() == super::contract::PrefillContract::P2;
+        let rows = alloc::prefill_chunk_for(o.prefill_chunk);
+        split = super::model::tp::split_planned_bytes(&pack.weights, cfg, bits, t.rank, rows, p2).map_err(ModelError::Config)?;
+    }
+    Ok(RankExtras {
+        roce_region,
+        split,
+        graphs: graph_bytes(graph_budget),
+        driver: driver_bytes(free_now.saturating_sub(o.floor_bytes)),
+    })
+}
+
+/// After a rank's load, under the opt-in price: the `tp_rank_allocated` line (what was priced against what the rank holds).
+fn log_allocated(o: &ServeOptions, p: &RankPlan, rank: &GlmRank) {
+    if p.priced.total() == 0 {
+        return;
+    }
+    let roce = GROUP_COMM
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|c| c.roce_tp().map(|t| t.roce().region_bytes() as u64));
+    let r = o.tp.as_ref().map_or(0, |t| t.rank);
+    eprintln!("{}", super::rank_extras::allocated_line(r, &p.priced, roce, rank.m.split_allocated_bytes()));
+}
+
+/// The deepest draft a rank's windows verify: the DFlash2 draft's (`--draft`, rank 0 runs it), the NextN layer's, or none.
+pub fn draft_depth_of(o: &ServeOptions, mtp: bool) -> usize {
+    let dflash = o.draft_dir.is_some() && o.drafting && o.spec.drafts();
+    if dflash {
+        super::dflash::MAX_DEPTH
+    } else if mtp {
+        alloc::MTP_MAX_DEPTH
+    } else {
+        0
+    }
 }
 
 /// Loads a rank: the text trunk and this rank's share of the routed experts (`pack`, mapped with `own`), the model with `mo` and
@@ -554,6 +813,8 @@ pub fn load_rank_with(
             if comm.is_some() { "has" } else { "has no" }
         )));
     }
+    // a rank that holds only its vocabulary half of the lm_head (`lm-held`) builds the drafter's restricted head from the pack's bytes
+    let head_src = cfg.lm_strips.map(|_| (pack.weights.lm_head.clone(), pack.plan.files.clone()));
     let booted = boot_mapped_with(dir, pack, Some(mo.layers), mtp.is_some(), &LoadOptions::from_env(floor), scan_s)?;
     eprintln!("rexl3 event=tp_rank_regions family=glm gib={:.3}", gib(booted.device.regions.bytes()));
     // the single node's load line, so a recipe's boot markers read one log format on every topology (`engine::build_engine`)
@@ -614,7 +875,10 @@ pub fn load_rank_with(
     if let Some(Some((strips, share))) = mtp {
         let ranges = super::model::vocab_ranges(strips, cfg.vocab);
         let t = std::time::Instant::now();
-        let bytes = m.mtp_restrict_vocab(&ranges)?;
+        let bytes = match &head_src {
+            Some((lm, files)) => m.mtp_restrict_vocab_from_pack(&ranges, dir, files, lm)?,
+            None => m.mtp_restrict_vocab(&ranges)?,
+        };
         m.set_mtp_vocab(if share > 0.0 { super::model::VocabMode::Adaptive(share) } else { super::model::VocabMode::Restricted });
         let kept: usize = ranges.iter().map(|&(lo, hi)| hi - lo).sum();
         eprintln!(
@@ -643,7 +907,13 @@ fn gate_of(o: &ServeOptions, p: &RankPlan, tp: &TpOptions) -> Result<BootGate<Gl
 /// the label both TP families compare (`nemotron_h_omni::tp_runtime::cache_request_label`), so every other process's Hello keeps its bytes.
 pub fn cache_request_label(o: &ServeOptions) -> String {
     if o.prefix_pool {
-        "pool".into()
+        // the opt-in plan (`memory::PRICE_UNMODELLED_ENV`) changes the pool's snapshot slots and the graph caches' limits: ranks must agree
+        // on it, so it is part of the label (`pool+priced`); without it the label is the one every pool-page rank sent before
+        if memory::price_unmodelled().unwrap_or(false) {
+            "pool+priced".into()
+        } else {
+            "pool".into()
+        }
     } else {
         crate::families::nemotron_h_omni::tp_runtime::cache_request_label(o.prefix_cache)
     }
@@ -784,7 +1054,14 @@ pub fn build_leader(
                 // before the snapshot pool (`EnableSnapshots`, after the boot) and before any forward (the schedule taps)
                 rank.m.enable_dflash(d.draft, d.weight_bytes)?;
             }
-            tower = tp_vision::load_leader_tower(o, &p.pack)?;
+            if let Some(b) = p.graph_budget {
+                rank.m.set_graph_budget(b);
+            }
+            log_allocated(o, &p, &rank);
+            // with REXL3_GLM_TOWER_LEND the tower borrows part of its scratch from this rank's prefill scratch (`lend.rs`)
+            let lease =
+                if tp_vision::planned_lend(o, &p.pack)?.lent.is_empty() { None } else { rank.m.lend_prefill_scratch()? };
+            tower = tp_vision::load_leader_tower(o, &p.pack, lease)?;
             Ok(rank)
         },
     )?;
@@ -897,7 +1174,7 @@ pub fn engine_over_budget<B: gb_engine::Backend>(
     } else {
         CostModel::from_table(STEP_MS.to_vec())
     };
-    Engine::new(backend, admission, EngineConfig { max_rows: WINDOW_ROWS, max_drafts: 7, cost, drafting }, make)
+    Engine::new(backend, admission, EngineConfig { max_rows: WINDOW_ROWS, max_drafts: MAX_DRAFTS, cost, drafting }, make)
 }
 
 /// A follower (rank 1): checks, connects, plans as rank 0 does, gates, loads with rank 0's options, says Ready, replays.
@@ -951,7 +1228,12 @@ pub fn follow(ctx: &BuildCtx<'_>) -> Result<(), ModelError> {
         |rv| make_comm(topo, rv),
         |leader_gate, comm| {
             let (mo, chunk) = tp::options_of(leader_gate);
-            load_rank_with(&dir, &p.cfg, p.pack.clone(), p.own.as_ref(), &mo, chunk, floor, p.scan_s, comm, mtp)
+            let mut rank = load_rank_with(&dir, &p.cfg, p.pack.clone(), p.own.as_ref(), &mo, chunk, floor, p.scan_s, comm, mtp)?;
+            if let Some(b) = p.graph_budget {
+                rank.m.set_graph_budget(b);
+            }
+            log_allocated(o, &p, &rank);
+            Ok(rank)
         },
     )?;
     eprintln!("rexl3 event=tp_follower_ready family=glm boot_s={:.1}", t0.elapsed().as_secs_f64());
@@ -1047,6 +1329,124 @@ mod tests {
         assert_eq!(names, ["nccl", "roce", "auto", "auto"]);
     }
 
+    /// The site a message of `bytes` of `user` takes under `plan` (`RoceTp::route_for` with the default policy: `max_bytes` the largest
+    /// site of the plan, then `RoceComm::site_for_among`, the user's smallest site that holds it), as its cap; `None`: NCCL.
+    fn site_of(
+        plan: &crate::families::nemotron_h_omni::tp_roce::SitePlan,
+        user: crate::families::nemotron_h_omni::tp_roce::SiteUser,
+        bytes: usize,
+    ) -> Option<usize> {
+        let max = plan.caps().into_iter().max()?;
+        if bytes == 0 || bytes > max {
+            return None;
+        }
+        plan.lists[user as usize].iter().copied().filter(|&c| c >= bytes).min()
+    }
+
+    /// `REXL3_GLM_ROCE_SITES=sized` at the RED-SNOW 1M shape (P2, the KDA split, 2,048-row chunks, one slot): every message the rank can
+    /// send takes the site it takes under the full plan (the default, every shipped profile), the sum limit is the same, and the region
+    /// is 400 MiB smaller.
+    #[test]
+    fn sized_sites_give_every_message_of_a_redsnow_rank_the_site_it_takes_today() {
+        use super::super::contract::PrefillContract;
+        use crate::families::nemotron_h_omni::tp_roce::SiteUser;
+        let shape = SiteShape { prefill_rows: 2048, slots: 1 };
+        let full = roce_site_plan(PrefillContract::P2, true);
+        let sized = sized_site_plan(PrefillContract::P2, true, shape);
+        assert_eq!(sized.sum_max_with(|_| None), full.sum_max_with(|_| None), "the sum limit: 8 MiB in both");
+        assert_eq!(sized.sum_max_with(|_| None), Ok(8 << 20));
+        // every size up to each user's bound, byte-exact around every class boundary and on a 4 KiB grid between
+        let rows_w = window_rows_for(shape.slots);
+        assert_eq!(rows_w, 8, "one slot: 1 + 7 drafts (the copy drafter's 7; the NextN chain's 4 are within it)");
+        let bounds = [
+            (SiteUser::Step, rows_w * STEP_ROW_BYTES),
+            (SiteUser::PartSwap, shape.prefill_rows * PART_SWAP_ROW_BYTES),
+            (SiteUser::PrefillGather, shape.prefill_rows * PREFILL_GATHER_ROW_BYTES),
+        ];
+        let mut checked = 0usize;
+        for (user, bound) in bounds {
+            let mut sizes: Vec<usize> = (1..=bound).step_by(4096).collect();
+            for c in full.caps() {
+                sizes.extend([c.saturating_sub(1), c, c + 1].into_iter().filter(|&b| b >= 1 && b <= bound));
+            }
+            sizes.push(bound);
+            for b in sizes {
+                assert_eq!(site_of(&sized, user, b), site_of(&full, user, b), "{} message of {b} bytes", user.name());
+                assert!(site_of(&sized, user, b).is_some(), "{} message of {b} bytes stays on RoCE", user.name());
+                checked += 1;
+            }
+        }
+        assert!(checked > 12_000, "{checked}");
+        // the messages by name: the window's sums (128 KiB a row; 192 KiB with the shared-expert split's partials), the lm_head's
+        // logit halves (77,440 fp16 a row), the S2 o_proj partials (64 KiB a row) for 1..=8 rows; the boot's probes (16 B, 8 MiB); the
+        // part swap and the gather of every prompt chunk from 16 rows to 2,048 (the P2 KDA chunk's multiples) and the 63-row tail
+        let mut step: Vec<usize> = vec![16, STEP_PROBE_BYTES];
+        for rows in 1..=rows_w {
+            step.extend([rows * (128 << 10), rows * STEP_ROW_BYTES, rows * 77_440 * 2, rows * (64 << 10)]);
+        }
+        for b in step {
+            assert_eq!(site_of(&sized, SiteUser::Step, b), site_of(&full, SiteUser::Step, b), "step message of {b} bytes");
+        }
+        assert_eq!(site_of(&sized, SiteUser::Step, STEP_PROBE_BYTES), Some(8 << 20), "the probe keeps the 8 MiB site");
+        assert_eq!(site_of(&sized, SiteUser::Step, rows_w * STEP_ROW_BYTES), Some(2 << 20), "an 8-row copy-draft window: 2 MiB");
+        for rows in (16..=2048).step_by(16).chain([63, 1]) {
+            for (user, row) in [(SiteUser::PartSwap, PART_SWAP_ROW_BYTES), (SiteUser::PrefillGather, PREFILL_GATHER_ROW_BYTES)] {
+                assert_eq!(site_of(&sized, user, rows * row), site_of(&full, user, rows * row), "{} of {rows} rows", user.name());
+            }
+        }
+        // what goes: the step's 4 MiB, the part swap's 64 MiB and the gather's 32 MiB sites, 4 x 100 MiB pinned a rank
+        let pinned = |p: &crate::families::nemotron_h_omni::tp_roce::SitePlan| 4 * p.caps().iter().sum::<usize>();
+        assert_eq!(pinned(&full) - pinned(&sized), 400 << 20);
+        assert_eq!(full.region_lower_bound() - sized.region_lower_bound(), 400 << 20);
+        assert_eq!(
+            sized.fact(),
+            "step:131072/262144/524288/1048576/2097152/8388608;part_swap:8388608/33554432;prefill_gather:4194304/16777216;summax=8388608"
+        );
+    }
+
+    /// The sized plan's cap set is a function of the prefill chunk and the slot count alone, each list a prefix of the full one (plus
+    /// the probe's 8 MiB step site); at the largest chunk and enough slots it IS the full plan, fact for fact.
+    #[test]
+    fn the_sized_cap_set_follows_the_chunk_and_the_slots() {
+        use super::super::contract::PrefillContract;
+        use crate::families::nemotron_h_omni::tp_roce::SiteUser;
+        let (m, k) = (1usize << 20, 1usize << 10);
+        let lists =
+            |rows: usize, slots: usize| sized_site_plan(PrefillContract::P2, true, SiteShape { prefill_rows: rows, slots }).lists;
+        let dec = [128 * k, 256 * k, 512 * k, m];
+        let step = |extra: &[usize]| [&dec[..], extra].concat();
+        assert_eq!(lists(2048, 1), [step(&[2 * m, 8 * m]), vec![8 * m, 32 * m], vec![4 * m, 16 * m]]);
+        assert_eq!(lists(512, 1), [step(&[2 * m, 8 * m]), vec![8 * m], vec![4 * m]]);
+        assert_eq!(lists(4096, 1), [step(&[2 * m, 8 * m]), ROCE_SITES_PART_SWAP.to_vec(), ROCE_SITES_PREFILL_GATHER.to_vec()]);
+        assert_eq!(lists(2048, 2)[SiteUser::Step as usize], step(&[2 * m, 4 * m, 8 * m]), "16 rows x 192 KiB = 3 MiB");
+        assert_eq!(lists(16, 1)[SiteUser::PartSwap as usize], vec![8 * m], "the smallest class always stays");
+        // the chunk sizes the prefill lists, the slots the step's
+        assert_eq!(lists(2048, 1)[SiteUser::Step as usize], lists(512, 1)[SiteUser::Step as usize]);
+        assert_eq!(lists(2048, 1)[SiteUser::PartSwap as usize], lists(2048, 8)[SiteUser::PartSwap as usize]);
+        for (rows, slots) in [(4096, 8), (4096, 64)] {
+            let s = sized_site_plan(PrefillContract::P2, true, SiteShape { prefill_rows: rows, slots });
+            assert_eq!(s, roce_site_plan(PrefillContract::P2, true), "{rows} rows, {slots} slots: the full plan");
+        }
+        // P1 and no KDA split: no prefill users, as in the full plan
+        let p1 = sized_site_plan(PrefillContract::P1, true, SiteShape { prefill_rows: 2048, slots: 1 });
+        assert!(p1.lists[SiteUser::PartSwap as usize].is_empty() && p1.lists[SiteUser::PrefillGather as usize].is_empty());
+        let nokda = sized_site_plan(PrefillContract::P2, false, SiteShape { prefill_rows: 2048, slots: 1 });
+        assert!(nokda.lists[SiteUser::PrefillGather as usize].is_empty());
+        assert_eq!(window_rows_for(1), 8);
+        assert_eq!(window_rows_for(100), WINDOW_ROWS);
+    }
+
+    /// `REXL3_GLM_ROCE_SITES`: unset, empty and `all` keep the full plan (every shipped profile's), `sized` sizes it, a typo is refused.
+    #[test]
+    fn the_roce_sites_setting_defaults_to_all_and_refuses_a_typo() {
+        assert_eq!(roce_sites_sized_from(None), Ok(false));
+        assert_eq!(roce_sites_sized_from(Some("")), Ok(false));
+        assert_eq!(roce_sites_sized_from(Some("all")), Ok(false));
+        assert_eq!(roce_sites_sized_from(Some(" sized ")), Ok(true));
+        let e = roce_sites_sized_from(Some("size")).unwrap_err();
+        assert!(e.contains("REXL3_GLM_ROCE_SITES") && e.contains("sized"), "{e}");
+    }
+
     /// The Hello refuses a pair of ranks on different transport settings by name, one pair at a time; equal settings pass.
     #[test]
     fn ranks_on_different_transport_settings_are_refused_by_name() {
@@ -1086,6 +1486,66 @@ mod tests {
             peer_timeout: d,
         });
         o
+    }
+
+    /// `lm-held` on a real pack's headers (CPU only, `REXL3_GLM_DIR`: the 2.25 bpw pack, or another, e.g. RED-SNOW 4.91): at a 1M, one-slot, NextN rank plan with the KDA split, each rank that holds only its vocabulary half plans weights smaller by
+    /// exactly the other half of the head (its trellis and `svh`), everything else of the plan is the same or roomier (the draft head, the
+    /// tower, the KV pages admitted), and the plan without it is `plan_from_split`'s (the shipped one) unchanged.
+    #[test]
+    #[ignore]
+    fn an_lm_held_rank_plans_exactly_its_vocabulary_half() {
+        let Ok(dir) = std::env::var("REXL3_GLM_DIR") else {
+            eprintln!("REXL3_GLM_DIR is not set: not run");
+            return;
+        };
+        let cfg = GlmConfig::from_dir(Path::new(&dir)).unwrap();
+        let scan = |o: &ServeOptions| gb_exl3::checkpoint::scan(&o.model_dir, false).unwrap();
+        for rank in [0usize, 1] {
+            let mut o = opts();
+            o.model_dir = dir.clone().into();
+            o.tp.as_mut().unwrap().rank = rank;
+            (o.slots, o.slots_auto, o.max_model_len, o.kv_tokens) = (1, false, 1 << 20, Some(1 << 20));
+            o.prefill_chunk = 2048;
+            o.prefix_cache = PrefixCacheOption::Off;
+            (o.drafting, o.spec, o.vision) = (true, gb_spec::SpecMode::Auto, None);
+            let own = || ExpertOwnership::range(alloc::moe_dims(&cfg).experts, rank, 2).unwrap();
+            // a free figure that grants both packs at 1M (the comparison, not a host)
+            let free = 128u64 << 30;
+            let kda = Some((rank, 2));
+            let off = plan_from_split(&o, cfg.clone(), scan(&o), free, 0.0, Some(own()), kda).unwrap();
+            let same = plan_from_splits(&o, cfg.clone(), scan(&o), free, 0.0, Some(own()), kda, None).unwrap();
+            let on = plan_from_splits(&o, cfg.clone(), scan(&o), free, 0.0, Some(own()), kda, Some((rank, 2))).unwrap();
+            assert_eq!(
+                (same.weight_bytes, same.free_after_weights, same.mo.kv_blocks, same.spare_bytes, same.draft_head_bytes),
+                (off.weight_bytes, off.free_after_weights, off.mo.kv_blocks, off.spare_bytes, off.draft_head_bytes),
+                "rank {rank}: without lm-held the plan is plan_from_split's"
+            );
+            assert!(off.cfg.lm_strips.is_none());
+            let half = cfg.vocab / 256;
+            assert_eq!(on.cfg.lm_strips, Some((rank * half, (rank + 1) * half)));
+            let lm = &off.pack.weights.lm_head;
+            let other = lm.trellis.bytes / 2 + lm.svh.bytes / 2;
+            assert_eq!(
+                off.weight_bytes - on.weight_bytes,
+                other,
+                "rank {rank}: the weights drop by exactly the other half of the head"
+            );
+            assert_eq!(on.pack.weights.lm_head.trellis.bytes + on.pack.weights.lm_head.svh.bytes, other);
+            assert_eq!(on.free_after_weights - off.free_after_weights, other, "rank {rank}: the room grows by it");
+            assert_eq!((on.draft_head_bytes, on.tower_bytes), (off.draft_head_bytes, off.tower_bytes), "rank {rank}");
+            assert!(on.mo.kv_blocks >= off.mo.kv_blocks && on.spare_bytes >= off.spare_bytes, "rank {rank}: never less room");
+            eprintln!(
+                "{dir} rank {rank}: lm_head {} bits; weights {:.3} -> {:.3} GiB (-{:.4} GiB = {other} B); KV pages {} -> {}; spare {:.2} -> {:.2} GiB",
+                lm.bits.as_f64(),
+                gib(off.weight_bytes),
+                gib(on.weight_bytes),
+                gib(other),
+                off.mo.kv_blocks,
+                on.mo.kv_blocks,
+                gib(off.spare_bytes),
+                gib(on.spare_bytes)
+            );
+        }
     }
 
     /// The follower's real boot path against rank 0's real accept: a rank 1 that cannot plan (here: no pack) says so on the connection,
@@ -1261,6 +1721,13 @@ mod tests {
             );
             assert!(p.cache.enabled());
             assert_eq!(p.cache.page_blocks, 0);
+            if memory::price_unmodelled().unwrap() {
+                assert_eq!(
+                    p.cache.snapshot_slots as u64,
+                    gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS,
+                    "the minimum entries, none bought"
+                );
+            }
             assert_eq!(p.mo.kv_blocks, 1_048_576 / 256 + 1, "the window once and the slot's page of rounding");
             assert!(p.kv_admitted.1 >= 1_048_576);
             // two slots are refused by name
@@ -1270,6 +1737,113 @@ mod tests {
             let ck = gb_exl3::checkpoint::scan(&o2.model_dir, false).unwrap();
             let e = plan_from_split(&o2, cfg, ck, 120 << 30, 0.0, Some(own), Some((0, 2))).err().unwrap().to_string();
             assert!(e.contains("--prefix-cache pool"), "{e}");
+        }
+    }
+
+    /// `REXL3_GLM_PLAN_PRICE_UNMODELLED` off (every shipped profile): nothing is priced, no graph budget, the pool buys its snapshot slots
+    /// from the spare as before, and the plan is the generic planners' plan from the same room, field for field: the RED-SNOW 4.91 two-node
+    /// profile at 524,288 tokens with its 4 GiB margin (vision on at rank 0, cap 4,096) and the 1M shape at a 1 GiB margin. On: the rank's
+    /// extras (`rank_extras`) are priced and exactly they come out of the room; the pool keeps 2 snapshot slots. Both ranks, the RED-SNOW
+    /// argv's shape (one slot, the pool-page cache, a 2,048-row chunk, the KDA rank split, the NextN layer); prints every plan's figures. On
+    /// the real pack's headers with a kernels build (the plans and workspaces are the kernels' host functions): `REXL3_GLM_DIR` and/or
+    /// `REXL3_REDSNOW_DIR`.
+    #[test]
+    #[ignore]
+    fn the_price_switch_off_plans_as_before_and_on_prices_the_rank_extras() {
+        if !gb_cuda::rt::kernels_built() {
+            eprintln!("not run: this build has no CUDA kernels");
+            return;
+        }
+        let _ = gb_cuda::rt::init_context();
+        const GIB_: u64 = 1 << 30;
+        for var in ["REXL3_GLM_DIR", "REXL3_REDSNOW_DIR"] {
+            let Ok(dir) = std::env::var(var) else {
+                eprintln!("{var} is not set: not run");
+                continue;
+            };
+            for (window, margin, vision) in [(524_288usize, 4 * GIB_, true), (1_048_576, GIB_, false)] {
+                for rank in 0..2usize {
+                    let mut o = ServeOptions::new(dir.clone().into());
+                    o.slots = 1;
+                    o.slots_auto = false;
+                    o.max_model_len = window;
+                    o.kv_tokens = Some(window);
+                    o.prefill_chunk = 2048;
+                    o.prefix_cache = PrefixCacheOption::On;
+                    o.prefix_pool = true;
+                    o.max_image_tokens = 4096;
+                    o.vision = (vision && rank == 0).then(Default::default);
+                    o.floor_bytes = 2 << 30;
+                    o.tp = Some(TpOptions::new(2, rank, "127.0.0.1:1"));
+                    let reserve = memory::ReserveMode::ModelledPlus(margin);
+                    let plan = |price| {
+                        let cfg = GlmConfig::from_dir(&o.model_dir).unwrap();
+                        let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).unwrap();
+                        let own = ExpertOwnership::range(288, rank, 2).unwrap();
+                        plan_from_split_with(&o, cfg, ck, 115 << 30, 0.0, Some(own), Some((rank, 2)), reserve, price).unwrap()
+                    };
+                    let tag = format!("{var} window {window} margin {} GiB rank {rank}", margin >> 30);
+                    // off: no price, no budget, and the generic planners' own plan from the same room
+                    let off = plan(false);
+                    assert_eq!(off.priced, super::super::rank_extras::RankExtras::default(), "{tag}: the default prices nothing");
+                    assert_eq!(off.graph_budget, None, "{tag}");
+                    assert_eq!(cache_request_label(&o), "pool", "{tag}: the Hello's label is unchanged");
+                    let cfg = GlmConfig::from_dir(&o.model_dir).unwrap().with_kda_rank(rank, 2).unwrap();
+                    let mtp = mtp_wanted(&o, &cfg);
+                    let mem_opts = memory::engine_options(&memory_options(&o, mtp));
+                    let profile = memory::memory_profile_with(&cfg, &mem_opts, reserve).unwrap();
+                    let free = (115u64 << 30) - (off.weight_bytes + off.tower_bytes + off.draft_head_bytes);
+                    let snap = super::super::prefix::snapshot_bytes(&cfg, mtp).unwrap();
+                    let want = plan_memory_pool_cached(
+                        &profile,
+                        free,
+                        o.floor_bytes,
+                        1,
+                        window as u64,
+                        off.vision_reserve,
+                        snap,
+                        0,
+                        window as u64,
+                        true,
+                    )
+                    .unwrap();
+                    assert_eq!(off.free_after_weights, free, "{tag}");
+                    assert_eq!(
+                        (off.mo.kv_blocks, off.kv_admitted, off.spare_bytes, off.cache),
+                        (want.kv_blocks + want.cache.page_blocks, (want.kv_blocks, want.kv_tokens), want.spare_bytes, want.cache),
+                        "{tag}: the plan with the switch off is the old plan"
+                    );
+                    // on: the extras, exactly out of the room; the pool keeps the minimum snapshot slots
+                    let on = plan(true);
+                    let x = on.priced;
+                    eprintln!("{tag}: {}", x.line(rank));
+                    assert!(x.split.p2_parts > 0 && x.split.partials > 0 && x.split.halves > 0, "{tag}: {x:?}");
+                    assert!(x.split.kda_copies > 0 && x.graphs > 0 && x.driver > 0, "{tag}: {x:?}");
+                    assert_eq!(
+                        off.free_after_weights - on.free_after_weights,
+                        x.total(),
+                        "{tag}: exactly the extras come out of the room"
+                    );
+                    assert_eq!(on.graph_budget, Some(super::super::model::GraphBudget::one_slot(alloc::MTP_MAX_DEPTH)), "{tag}");
+                    assert_eq!(x.graphs, super::super::rank_extras::graph_bytes(on.graph_budget), "{tag}");
+                    assert_eq!(on.cache.snapshot_slots as u64, gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS, "{tag}");
+                    eprintln!(
+                        "{tag}: OFF free_after {:.3} GiB kv_pages {} admitted {} spare {:.3} GiB entries {} tower {:.3} vision_reserve {:.3} | ON free_after {:.3} GiB kv_pages {} admitted {} spare {:.3} GiB entries {}",
+                        gib(off.free_after_weights),
+                        off.mo.kv_blocks,
+                        off.kv_admitted.1,
+                        gib(off.spare_bytes),
+                        off.cache.snapshot_slots,
+                        gib(off.tower_bytes),
+                        gib(off.vision_reserve),
+                        gib(on.free_after_weights),
+                        on.mo.kv_blocks,
+                        on.kv_admitted.1,
+                        gib(on.spare_bytes),
+                        on.cache.snapshot_slots
+                    );
+                }
+            }
         }
     }
 
@@ -1364,6 +1938,79 @@ mod tests {
                 } else {
                     assert_eq!((p.tower_bytes, p.vision_reserve), (0, 0), "a follower plans no vision");
                     assert!(!tp_vision::holds_tower(&o, &p.pack));
+                }
+            }
+        }
+    }
+
+    /// V3 (`REXL3_GLM_TOWER_LEND`, `lend.rs`): rank 0's plan with the tower's scratch lent is the plan without it less exactly the lent
+    /// bytes (the tower's line; the weights, the reserve and the follower's plan unchanged), and with the setting off the tower's line is
+    /// the weights plus the whole scratch, as before. At the shipped GLM-5.3-Flash two-node argv (1 slot, 1M, `--prefill-chunk 4096`,
+    /// `--max-image-tokens 8000`) and the RED-SNOW argv (1 slot, 1M, chunk 2048, 4096 image tokens). CPU only, on the real pack's headers:
+    /// `REXL3_GLM_DIR` and/or `REXL3_REDSNOW_DIR`; free figure `REXL3_TP_VISION_FREE_GIB` (default 115).
+    #[test]
+    #[ignore]
+    fn with_the_tower_lent_rank_zeros_plan_is_the_plan_less_the_lent_scratch() {
+        use super::super::{lend, vision};
+        let dirs: Vec<String> = ["REXL3_GLM_DIR", "REXL3_REDSNOW_DIR"].iter().filter_map(|k| std::env::var(k).ok()).collect();
+        if dirs.is_empty() {
+            eprintln!("REXL3_GLM_DIR / REXL3_REDSNOW_DIR are not set: not run");
+            return;
+        }
+        let free_gib: u64 = std::env::var("REXL3_TP_VISION_FREE_GIB").ok().and_then(|v| v.parse().ok()).unwrap_or(115);
+        for dir in dirs {
+            let cfg = GlmConfig::from_dir(Path::new(&dir)).unwrap();
+            for (argv, chunk, cap) in [("shipped glm-5.3-flash-tp2", 4096usize, 8000usize), ("RED-SNOW 1M", 2048, 4096)] {
+                for rank in [0usize, 1] {
+                    let mut o = opts();
+                    o.model_dir = dir.clone().into();
+                    o.tp.as_mut().unwrap().rank = rank;
+                    (o.slots, o.slots_auto, o.max_model_len, o.kv_tokens, o.max_image_tokens) =
+                        (1, false, 1 << 20, Some(1 << 20), cap);
+                    o.prefill_chunk = chunk;
+                    o.prefix_cache = PrefixCacheOption::Off;
+                    o.vision = (rank == 0).then(Default::default);
+                    let own = ExpertOwnership::range(alloc::moe_dims(&cfg).experts, rank, 2).unwrap();
+                    let plan = |on: bool| {
+                        let ck = gb_exl3::checkpoint::scan(&o.model_dir, false).unwrap();
+                        lend::with_lend(on, || plan_from_split(&o, cfg.clone(), ck, free_gib << 30, 0.0, Some(own.clone()), None))
+                            .unwrap()
+                    };
+                    let (off, on) = (plan(false), plan(true));
+                    let line = |p: &RankPlan| {
+                        format!(
+                            "weights {} tower {} reserve {} free_after {} kv_pages {} kv_tokens {}",
+                            p.weight_bytes,
+                            p.tower_bytes,
+                            p.vision_reserve,
+                            p.free_after_weights,
+                            p.kv_admitted.0,
+                            p.kv_admitted.1
+                        )
+                    };
+                    eprintln!("{dir} {argv} rank {rank}:\n  lend off: {}\n  lend on:  {}", line(&off), line(&on));
+                    if rank == 1 {
+                        assert_eq!(line(&off), line(&on), "a follower's plan does not move");
+                        continue;
+                    }
+                    let vc = cfg.vision.as_ref().unwrap();
+                    let tokens = vision::image_token_cap(&cfg, cap);
+                    let whole = vision::weight_region_bytes(vc) + vision::scratch_bytes(tokens * 4, vc.tower);
+                    assert_eq!(
+                        off.tower_bytes, whole,
+                        "lend off: the tower's line is the weights and the whole scratch (as before)"
+                    );
+                    let lent = lend::with_lend(true, || tp_vision::planned_lend(&o, &off.pack)).unwrap().lent_bytes();
+                    assert!(lent > 0);
+                    assert_eq!(
+                        off.tower_bytes - on.tower_bytes,
+                        lent,
+                        "lend on: the tower's line is less exactly the lent bytes"
+                    );
+                    assert_eq!(on.free_after_weights - off.free_after_weights, lent);
+                    assert_eq!((on.weight_bytes, on.vision_reserve), (off.weight_bytes, off.vision_reserve));
+                    assert!(on.kv_admitted.1 >= off.kv_admitted.1);
+                    eprintln!("  lent {:.3} GiB ({lent} bytes) of the tower's {:.3} GiB", gib(lent), gib(whole));
                 }
             }
         }

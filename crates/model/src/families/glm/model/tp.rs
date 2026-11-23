@@ -406,6 +406,13 @@ pub const SPLIT_KDA: u8 = 1;
 pub const SPLIT_LM: u8 = 2;
 pub const SPLIT_MLA: u8 = 4;
 pub const SPLIT_SHARED: u8 = 8;
+/// `lm-held` (opt-in, never in [`DEFAULT_SPLIT`]): `lm`, and the rank HOLDS only its vocabulary half of the lm_head (`GlmConfig::lm_strips`:
+/// the mapper places only those strips, the memory plan is that much smaller). The half runs with the whole head's plan
+/// (`PlannedExl3::of_loaded_cut`), so its logits are the whole head's columns bit for bit. Every reader of the head then takes its half:
+/// the trunk's head (`split_lm_head`), the NextN drafter's full-vocabulary head calls (the same split, on both ranks in the same calls),
+/// and the drafter's restricted head is built from the pack's bytes (`GlmModel::mtp_restrict_vocab_from_pack`, the same bytes as the copy
+/// of a whole head). The all-row debug logits and the DFlash2 draft, which read the whole head, are refused by name.
+pub const SPLIT_LM_HELD: u8 = 16;
 /// What two ranks split when [`TP_SPLIT_ENV`] is not set (w10): the KDA heads, the vocabulary halves, the MLA heads and the shared expert.
 /// `REXL3_GLM_TP_SPLIT=none` is the opt-out.
 pub const DEFAULT_SPLIT: u8 = SPLIT_KDA | SPLIT_LM | SPLIT_MLA | SPLIT_SHARED;
@@ -421,9 +428,10 @@ pub fn split_from_vars(get: impl Fn(&str) -> Option<String>) -> Result<u8, Strin
             "none" => 0,
             "kda" => SPLIT_KDA,
             "lm" => SPLIT_LM,
+            "lm-held" => SPLIT_LM | SPLIT_LM_HELD,
             "mla" => SPLIT_MLA,
             "sh" => SPLIT_SHARED,
-            other => return Err(format!("{TP_SPLIT_ENV}: {other:?} is not one of kda, lm, mla, sh, none")),
+            other => return Err(format!("{TP_SPLIT_ENV}: {other:?} is not one of kda, lm, lm-held, mla, sh, none")),
         };
     }
     Ok(bits)
@@ -446,7 +454,8 @@ pub fn split_from_env() -> Result<u8, String> {
 
 /// The split set as text (`kda,lm`, `none`): logs and the Hello's refusal.
 pub fn split_names(bits: u8) -> String {
-    let v: Vec<&str> = [(SPLIT_KDA, "kda"), (SPLIT_LM, "lm"), (SPLIT_MLA, "mla"), (SPLIT_SHARED, "sh")]
+    let lm = if bits & SPLIT_LM_HELD != 0 { "lm-held" } else { "lm" };
+    let v: Vec<&str> = [(SPLIT_KDA, "kda"), (SPLIT_LM, lm), (SPLIT_MLA, "mla"), (SPLIT_SHARED, "sh")]
         .iter()
         .filter(|(b, _)| bits & b != 0)
         .map(|(_, n)| *n)
@@ -463,6 +472,116 @@ pub fn split_names(bits: u8) -> String {
 pub(super) struct KdaRank {
     pub qkv: PlannedExl3,
     pub w: kda::LayerWeights,
+}
+
+/// Bytes of the device buffers a rank's head split ([`GlmModel::enable_head_split`]) and its P2 exchange add beside the memory profile's
+/// items: priced before the load ([`split_planned_bytes`], `rank_extras`) and read from the rank after it ([`GlmModel::split_allocated_bytes`]),
+/// so the plan and the allocations can be compared item by item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SplitBytes {
+    /// The KDA layers' per-head weight copies (`kda::LayerWeights::heads_of`).
+    pub kda_copies: u64,
+    /// The fp32 K-split partials of a split `o_proj` (`z`).
+    pub partials: u64,
+    /// This rank's half and the peer's of a gathered activation (`own`, `peer`).
+    pub halves: u64,
+    /// The shared-expert split's scratch and workspace (`sh`).
+    pub shared: u64,
+    /// The P2 exchange's parts (`p2::P2Exchange`).
+    pub p2_parts: u64,
+}
+
+impl SplitBytes {
+    pub fn total(&self) -> u64 {
+        self.kda_copies + self.partials + self.halves + self.shared + self.p2_parts
+    }
+}
+
+/// The P2 exchange's bytes at `rows` prompt rows a chunk (`p2::parts_bytes`).
+pub fn p2_parts_bytes(cfg: &crate::families::glm::GlmConfig, rows: usize) -> u64 {
+    p2::parts_bytes(cfg, rows)
+}
+
+/// What [`GlmModel::enable_head_split`] of `bits` allocates on rank `rank` of two for a model of `w` (the pack's weights, mapped for the
+/// rank) at `rows` scratch rows (the prefill chunk), and the P2 exchange when `p2`: the same arithmetic over the pack's shapes, before
+/// anything is loaded (the kernels' plans and workspace sizes are host functions). `kda_copies` are `kda::LayerWeights::heads_of`'s.
+pub fn split_planned_bytes(
+    w: &crate::families::glm::weights::GlmWeights,
+    cfg: &crate::families::glm::GlmConfig,
+    bits: u8,
+    rank: usize,
+    rows: usize,
+    p2: bool,
+) -> Result<SplitBytes, String> {
+    use crate::families::glm::weights::{FfnWeights, MixerWeights};
+    let p2_parts = if p2 { p2::parts_bytes(cfg, rows) } else { 0 };
+    if bits == 0 {
+        return Ok(SplitBytes { p2_parts, ..SplitBytes::default() });
+    }
+    let sk_of = |k: usize, n: usize| {
+        gb_cuda::exl3_linear::decode_plan(k, n).map(|p| p.0).map_err(|e| format!("the plan of a {k} x {n} layer: {e}"))
+    };
+    let heads = cfg.kda.heads;
+    let (h0, h1) = (rank * heads / 2, (rank + 1) * heads / 2);
+    let (mut z, mut half, mut kda_copies) = (0usize, 0usize, 0u64);
+    if bits & SPLIT_KDA != 0 {
+        for l in &w.layers {
+            if let MixerWeights::Kda(k) = &l.mixer {
+                z = z.max(sk_of(k.o_proj.k, k.o_proj.n)? * alloc::MAX_ROWS * k.o_proj.n * 4);
+                kda_copies += kda::LayerWeights::heads_of_copied_bytes(h0, h1) as u64;
+            }
+        }
+        half = half.max(rows * (h1 - h0) * kda::HEAD_DIM * 2);
+    }
+    if bits & SPLIT_MLA != 0 {
+        for l in &w.layers {
+            if let MixerWeights::Mla(m) = &l.mixer {
+                z = z.max(sk_of(m.o_proj.k, m.o_proj.n)? * alloc::MAX_ROWS * m.o_proj.n * 4);
+            }
+        }
+    }
+    if bits & SPLIT_LM != 0 {
+        half = half.max(alloc::MAX_ROWS * w.lm_head.n / 2 * 2);
+    }
+    let mut shared = 0u64;
+    if bits & SPLIT_SHARED != 0 {
+        let first = w.layers.iter().find_map(|l| match &l.ffn {
+            FfnWeights::Moe(m) => m.shared.as_ref(),
+            FfnWeights::Dense(_) => None,
+        });
+        if let Some(sh) = first {
+            let (hidden, inter, rows) = (sh.gate_proj.k, sh.gate_proj.n, alloc::WINDOW_ROWS);
+            let sk = sk_of(sh.down_proj.k, sh.down_proj.n)?;
+            let (s0, s1) = (rank * sk / 2, (rank + 1) * sk / 2);
+            let strips = inter / 2 / 128;
+            let strip_ws = |k: usize, n: usize| -> Result<usize, String> {
+                let sk = sk_of(k, n).unwrap_or(1);
+                Ok(gb_cuda::exl3_split::ex_workspace_bytes(rows, k, strips * 128, sk, false))
+            };
+            let ws = strip_ws(hidden, inter)?
+                .max(strip_ws(sh.up_proj.k, sh.up_proj.n)?)
+                .max(gb_cuda::exl3_split::ex_workspace_bytes(rows, inter / 2, sh.down_proj.n, s1 - s0, true))
+                .max(16);
+            shared = (gb_cuda::moe::SharedScratch::bytes_for(hidden, inter, rows) + ws) as u64;
+        }
+    }
+    Ok(SplitBytes { kda_copies, partials: z.max(256) as u64, halves: 2 * half.max(256) as u64, shared, p2_parts })
+}
+
+impl GlmModel {
+    /// What this rank's head split and P2 exchange hold (`None` before `enable_tp`): [`split_planned_bytes`]'s items, read from the buffers.
+    pub fn split_allocated_bytes(&self) -> Option<SplitBytes> {
+        let t = self.tp.as_ref()?;
+        let p2_parts = t.p2_exchange_bytes() as u64;
+        let Some(sp) = t.split.as_ref() else { return Some(SplitBytes { p2_parts, ..SplitBytes::default() }) };
+        Some(SplitBytes {
+            kda_copies: sp.kda.iter().map(|k| k.w.bytes()).sum(),
+            partials: sp.z.bytes() as u64,
+            halves: (sp.own.bytes() + sp.peer.bytes()) as u64,
+            shared: sp.sh.as_ref().map_or(0, |s| (s.scratch.bytes() + s.ws.bytes()) as u64),
+            p2_parts,
+        })
+    }
 }
 
 /// A rank's half of the replicated weights and the buffers of the exchanges they add.
@@ -482,6 +601,10 @@ pub(super) struct HeadSplit {
     peer: DevBuf,
     /// The shared-expert split (`sh`), when set.
     sh: Option<ShSplit>,
+    /// `lm-held`: the rank's vocabulary half of the lm_head as loaded (the model's `lm_head` IS that half), run with the whole head's plan.
+    lm: Option<PlannedExl3>,
+    /// The whole head's columns (the vocabulary, padded to whole strips).
+    vocab: usize,
 }
 
 /// A rank's half of every MoE layer's shared expert in decode windows (lane E, GLM Phase 2 E2.6: `sh`). Each trunk MoE layer's shared
@@ -591,7 +714,8 @@ impl GlmTp {
     }
 
     /// The lm_head's vocabulary halves: this rank's strips of `lm` into its half of `logits` `[n, vocab]` fp16, the peer's half swapped in
-    /// (both ranks end with every logit). The columns are the full head's bit for bit (`Exl3Weights::forward_strip`, the parent's plan).
+    /// (both ranks end with every logit). The columns are the full head's bit for bit (`Exl3Weights::forward_strip`, the parent's plan; under
+    /// `lm-held` `lm` is the rank's half itself, run with the whole head's plan: `PlannedExl3::of_loaded_cut`).
     pub(super) fn split_lm_head(
         &mut self,
         lm: &Exl3Weights,
@@ -601,18 +725,26 @@ impl GlmTp {
         ws: &mut DevBuf,
         st: &Stream,
     ) -> Result<(), ModelError> {
-        let r = self.split.as_ref().ok_or_else(|| ModelError::Config("no head split".into()))?.rank;
-        let half = lm.n / 128 / 2;
+        let sp = self.split.as_ref().ok_or_else(|| ModelError::Config("no head split".into()))?;
+        let r = sp.rank;
+        let half = sp.vocab / 128 / 2;
         let w = half * 128;
+        let run = |out: &mut DevBuf, ws: &mut DevBuf| -> Result<(), ModelError> {
+            match &sp.lm {
+                Some(held) => held.forward(x, out, n, Dtype::F16, Dtype::F16, ws, st)?,
+                None => lm.forward_strip(r * half, (r + 1) * half, x, out, n, Dtype::F16, Dtype::F16, ws, st)?,
+            }
+            Ok(())
+        };
         if n == 1 {
             let mut mine = logits.subview(r * w * 2, w * 2);
-            lm.forward_strip(r * half, (r + 1) * half, x, &mut mine, 1, Dtype::F16, Dtype::F16, ws, st)?;
+            run(&mut mine, ws)?;
             let mine = logits.subview(r * w * 2, w * 2);
             self.swap(&mine, 0, logits, (1 - r) * w * 2, w * 2, st)?;
             return Ok(());
         }
-        let mut own = self.split.as_ref().unwrap().own.subview(0, n * w * 2);
-        lm.forward_strip(r * half, (r + 1) * half, x, &mut own, n, Dtype::F16, Dtype::F16, ws, st)?;
+        let mut own = sp.own.subview(0, n * w * 2);
+        run(&mut own, ws)?;
         self.gather_cols_f16(&own, logits, n, w, st)
     }
 
@@ -712,6 +844,18 @@ impl GlmModel {
                     split_names(bits)
                 ));
             }
+        }
+        // a model built for a rank's vocabulary half (`GlmConfig::lm_strips`) runs only with `lm-held`, and `lm-held` only on such a model
+        if self.cfg.lm_strips.is_some() != (bits & SPLIT_LM_HELD != 0) {
+            return cfg_err(format!(
+                "this rank {} but {TP_SPLIT_ENV} {} ({}): the rank planner and the split must agree",
+                match self.cfg.lm_strips {
+                    Some((a, b)) => format!("loaded only the lm_head strips {a}..{b}"),
+                    None => "loaded the whole lm_head".into(),
+                },
+                if bits & SPLIT_LM_HELD != 0 { "holds a vocabulary half" } else { "does not" },
+                split_names(bits)
+            ));
         }
         if bits == 0 {
             return Ok(());
@@ -817,12 +961,32 @@ impl GlmModel {
                 z_bytes = z_bytes.max(sk * alloc::MAX_ROWS * m.o.n * 4);
             }
         }
+        let vocab = self.cfg.vocab;
+        let mut lm_held = None;
         if bits & SPLIT_LM != 0 {
             let lm = &self.dev.lm_head;
-            if lm.n % 256 != 0 {
-                return cfg_err(format!("the lm_head's {} columns do not halve into 128-column strips", lm.n));
+            if vocab % 256 != 0 {
+                return cfg_err(format!("the lm_head's {vocab} columns do not halve into 128-column strips"));
             }
-            half_bytes = half_bytes.max(alloc::MAX_ROWS * lm.n / 2 * 2);
+            let half = vocab / 256;
+            match self.cfg.lm_strips {
+                None if lm.n != vocab => {
+                    return cfg_err(format!("the lm_head holds {} of its {vocab} columns without lm-held", lm.n));
+                }
+                None => {}
+                Some(s) => {
+                    if s != (r * half, (r + 1) * half) || lm.n != half * 128 || lm.k != self.cfg.hidden {
+                        return cfg_err(format!(
+                            "this rank holds the lm_head strips {s:?} ({} columns) but rank {r}'s vocabulary half is strips {}..{}",
+                            lm.n,
+                            r * half,
+                            (r + 1) * half
+                        ));
+                    }
+                    lm_held = Some(PlannedExl3::of_loaded_cut(lm, vocab)?);
+                }
+            }
+            half_bytes = half_bytes.max(alloc::MAX_ROWS * vocab / 2 * 2);
         }
         let mut sh = None;
         if bits & SPLIT_SHARED != 0 {
@@ -875,14 +1039,26 @@ impl GlmModel {
         let own = DevBuf::zeroed_view(half_bytes.max(256))?;
         let peer = DevBuf::zeroed_view(half_bytes.max(256))?;
         let t = self.tp.as_mut().unwrap();
-        t.split = Some(HeadSplit { bits, rank: r, kda_heads: (h0, h1), mla_heads: (m0, m1), kda: kda_ranks, z, own, peer, sh });
+        t.split = Some(HeadSplit {
+            bits,
+            rank: r,
+            kda_heads: (h0, h1),
+            mla_heads: (m0, m1),
+            kda: kda_ranks,
+            z,
+            own,
+            peer,
+            sh,
+            lm: lm_held,
+            vocab,
+        });
         // the swap's point-to-point transport connects on its first use: once, eagerly, before any window is captured. Only where windows
         // are captured (a capturable communicator, NCCL): the peer runs the same call at the same point of its boot (the Hello has already
         // refused ranks that disagree on the split); the in-process loopback group waits for its peer inside every call and never captures.
         // Two sizes: a small one and one above every site of a transport that routes swaps by size (LANE-T's RoCE: up to 1 MiB on
         // its sites, NCCL above), so each path a window's swap can take is connected.
         if t.comm.capturable() {
-            for bytes in [16usize, 8 << 20] {
+            for bytes in [16usize, crate::families::glm::tp_boot::STEP_PROBE_BYTES] {
                 let probe = DevBuf::zeroed(bytes)?;
                 let mut back = DevBuf::zeroed(bytes)?;
                 t.comm.swap_bytes(&probe, 0, bytes, &mut back, 0, bytes, &self.stream)?;
@@ -918,6 +1094,14 @@ mod tests {
         assert_eq!(split_names(SPLIT_KDA | SPLIT_LM | SPLIT_MLA | SPLIT_SHARED), "kda,lm,mla,sh");
         assert!(of("kda,mlx").unwrap_err().contains(TP_SPLIT_ENV));
         assert_eq!(split_from_vars(|_| None), Ok(DEFAULT_SPLIT));
+        // `lm-held` (opt-in, never the default): the lm split, and the rank holds only its half
+        assert_eq!(of("lm-held"), Ok(SPLIT_LM | SPLIT_LM_HELD));
+        assert_eq!(of("kda,lm-held,mla,sh"), Ok(DEFAULT_SPLIT | SPLIT_LM_HELD));
+        assert_eq!(of("lm,lm-held"), Ok(SPLIT_LM | SPLIT_LM_HELD));
+        assert_eq!(split_names(DEFAULT_SPLIT | SPLIT_LM_HELD), "kda,lm-held,mla,sh");
+        assert_eq!(of(&split_names(DEFAULT_SPLIT | SPLIT_LM_HELD)), Ok(DEFAULT_SPLIT | SPLIT_LM_HELD));
+        assert_eq!(DEFAULT_SPLIT & SPLIT_LM_HELD, 0);
+        assert!(of("lm-half").unwrap_err().contains("lm-held"));
     }
 
     /// w10: unset is `kda,lm,mla,sh`; `none` (and a set-but-empty value) is exactly the builds before it; a list is read as before and

@@ -66,7 +66,8 @@ fn model(f: &Fixture) -> FlashNextModel {
         d.check.geometry,
         d.total_bytes as f64 / (1u64 << 30) as f64
     );
-    m.enable_dflash(d.draft, d.weight_bytes).unwrap();
+    assert_eq!(d.sub_head_bytes >> 20, 183, "the plan includes the restricted sub-head's real workspace");
+    m.enable_dflash(d.draft, d.weight_bytes, d.sub_head_bytes).unwrap();
     m
 }
 

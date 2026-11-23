@@ -8,6 +8,7 @@ pub mod config;
 pub mod device;
 pub mod dflash;
 pub mod engine;
+pub mod graph_cache;
 pub mod inventory;
 pub mod memory;
 pub mod model;

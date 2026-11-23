@@ -41,6 +41,26 @@ pub fn reserve_mode_from(get: impl Fn(&str) -> Option<String>) -> Result<Reserve
     }
 }
 
+/// `REXL3_GLM_PLAN_PRICE_UNMODELLED`: `1` makes the plan charge what it otherwise leaves to the margin and stops it spending memory it has not
+/// proven spare: the pool-page prefix cache keeps its minimum snapshot slots (`plan::plan_memory_pool_cached`). Unset (or `0`, the default
+/// and every shipped GLM profile, the RED-SNOW 524,288-token one included): every plan exactly as before. Opt-in, separate from
+/// [`RESERVE_MARGIN_ENV`], so a profile whose margin was measured without it keeps its plan: memory only, never a bit.
+pub const PRICE_UNMODELLED_ENV: &str = "REXL3_GLM_PLAN_PRICE_UNMODELLED";
+
+/// [`PRICE_UNMODELLED_ENV`] from a lookup: unset, empty or `0` is off, `1` is on, anything else is refused by name.
+pub fn price_unmodelled_from(get: impl Fn(&str) -> Option<String>) -> Result<bool, String> {
+    match get(PRICE_UNMODELLED_ENV).as_deref().map(str::trim) {
+        None | Some("") | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(v) => Err(format!("{PRICE_UNMODELLED_ENV}={v:?}: expected 1 (on) or 0 (off, the default)")),
+    }
+}
+
+/// [`price_unmodelled_from`] of this process's environment.
+pub fn price_unmodelled() -> Result<bool, String> {
+    price_unmodelled_from(|k| std::env::var(k).ok())
+}
+
 /// The memory model of a GLM pack, ready to be evaluated at any serving settings.
 pub struct GlmMemorySource(pub GlmConfig);
 
@@ -368,6 +388,18 @@ mod tests {
         let p = memory_profile(&real(), &opts()).unwrap();
         assert_eq!(p.engine_reserve_bytes(), 5 * GIB);
         assert!(p.scratch_bytes() + p.window_record_bytes() < 5 * GIB / 2, "the modelled buffers are about 1 GiB");
+    }
+
+    #[test]
+    fn the_price_switch_is_off_unless_one_and_refuses_anything_else_by_name() {
+        let of = |v: Option<&str>| price_unmodelled_from(|k| (k == PRICE_UNMODELLED_ENV).then(|| v.map(String::from)).flatten());
+        assert_eq!(of(None), Ok(false));
+        assert_eq!(of(Some("")), Ok(false));
+        assert_eq!(of(Some("0")), Ok(false));
+        assert_eq!(of(Some(" 1 ")), Ok(true));
+        for bad in ["2", "on", "yes", "true", "-1"] {
+            assert!(of(Some(bad)).unwrap_err().contains(PRICE_UNMODELLED_ENV), "{bad:?}");
+        }
     }
 
     #[test]

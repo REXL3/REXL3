@@ -1,14 +1,18 @@
 //! The `gb_engine::Backend` of the Bailing family: prefill chunks, decode/verify windows, the lazy KDA commit, the
-//! native `L72` MTP drafter and the prefix cache (snapshot at a cut, restore from a hit).
+//! native `L72` MTP drafter and the prefix cache (snapshot at a cut, restore from a hit). The teacher-forced prompt readout
+//! (`prompt_logprobs`, `Backend::score_rows_supported`) runs one prefill chunk a slice and reduces every row of it on the device
+//! (`gb_cuda::logprob::rows_f16`: the head writes fp16); last-row scoring (`/v1/decisions`) is not served.
 
 use super::model::BailingModel;
 use crate::forward::Candidates;
 use crate::rows::RowBatch;
+use gb_engine::score::{RowRecords, ScoreStep};
 use gb_engine::{
     Backend, BackendError, CacheBudget, Captured, CutStep, ImageSpan, PrefillStep, PrefixCaps, PrefixHandle, RowOutput,
     RowRequest,
 };
 use gb_sampling::Sampling;
+use std::collections::BTreeMap;
 
 fn nan_row(n: usize) -> RowOutput {
     RowOutput { ids: (0..n as u32).collect(), values: vec![f32::NAN; n] }
@@ -72,11 +76,30 @@ pub struct BailingBackend {
     with_mtp: bool,
     /// The prefix cache this backend reserved (its namespace and budget), when one is enabled.
     prefix: Option<PrefixCaps>,
+    /// The `prompt_logprobs` readouts in flight, by slot (`Backend::score_begin`): the records of the rows scored so far.
+    records: BTreeMap<usize, RowRecords>,
+    /// Rows of one readout slice (`None`: the model's `prefill_rows`, the chunk a plain prefill runs). A slice is one prefill
+    /// chunk, on the grid of this many rows from the prompt's start. A value is taken as `--prefill-chunk` is
+    /// (`alloc::prefill_chunk_for`: 128 to 4096 rows on the 16-row grid), so a readout only runs chunk sizes the server can
+    /// run: 16-row chunk grids are not a served configuration and leave other bits now and then (see the real-pack test).
+    pub readout_chunk: Option<usize>,
+}
+
+/// The token each row of prompt rows `from..to` is asked about: row `i` predicts `prompt[i + 1]`; the prompt's last row has none
+/// (-1).
+pub fn next_tokens(prompt: &[u32], from: usize, to: usize) -> Vec<i32> {
+    (from..to).map(|i| prompt.get(i + 1).map_or(-1, |&t| t as i32)).collect()
+}
+
+/// Where a readout slice that starts at `done` ends: the next multiple of `chunk` rows from the prompt's start, or the prompt's end.
+pub fn readout_slice_end(done: usize, total: usize, chunk: usize) -> usize {
+    let chunk = chunk.max(1);
+    (done + chunk - done % chunk).min(total)
 }
 
 impl BailingBackend {
     pub fn new(model: BailingModel, with_mtp: bool) -> Self {
-        Self { model, error: None, fatal: None, with_mtp, prefix: None }
+        Self { model, error: None, fatal: None, with_mtp, prefix: None, records: BTreeMap::new(), readout_chunk: None }
     }
 
     /// Enable the prefix cache: allocates `budget.snapshot_slots` snapshot slots. `namespace` binds every key to what
@@ -107,6 +130,32 @@ impl BailingBackend {
 
     fn drop_slot(&mut self, slot: usize) {
         self.model.end_slot(slot);
+    }
+
+    /// One slice of a `prompt_logprobs` readout: one prefill chunk of the prompt (the trunk's prefill kernels, as a plain prefill
+    /// runs them; the KDA recurrence starts its 16-row grid at the chunk's first row, which is on the grid of the prompt's start
+    /// because every slice ends on a multiple of the chunk), then the records of the chunk's rows, read while its final-normed
+    /// rows are still on the device. No snapshot is taken or restored (the readout is submitted without the prefix cache); the
+    /// last slice also returns the last row's logits.
+    fn score_slice_inner(&mut self, slot: usize, prompt: &[u32], done: usize) -> Result<ScoreStep, crate::error::ModelError> {
+        let n = prompt.len();
+        if done >= n {
+            return Err(crate::error::ModelError::Request("empty or completed score slice".into()));
+        }
+        if done == 0 {
+            self.model.begin_slot(slot)?;
+        }
+        let chunk =
+            self.readout_chunk.map_or(self.model.prefill_rows, super::alloc::prefill_chunk_for).min(self.model.prefill_rows);
+        let end = readout_slice_end(done, n, chunk);
+        self.model.prefill_chunk(slot, done, &prompt[done..end], None)?;
+        let rec = self
+            .records
+            .get_mut(&slot)
+            .ok_or_else(|| crate::error::ModelError::Request("no readout was begun in this slot".into()))?;
+        self.model.chunk_row_records(&next_tokens(prompt, done, end), rec)?;
+        let row = if end == n { Some(self.model.chunk_row_logits(end - done - 1)?) } else { None };
+        Ok(ScoreStep { done: end, row, captured: Vec::new() })
     }
 
     /// Prefill `prompt` from `done` through `n`, taking a snapshot of the slot at each of `cuts` (ascending, absolute)
@@ -247,6 +296,37 @@ impl Backend for BailingBackend {
         self.fatal.clone().or_else(|| self.error.take())
     }
 
+    /// The teacher-forced readout only: last-row scoring (`score_supported`) is not served by this family.
+    fn score_rows_supported(&self) -> bool {
+        true
+    }
+    fn score_begin(&mut self, slot: usize, all_rows: bool) {
+        self.records.remove(&slot);
+        if all_rows {
+            self.records.insert(slot, RowRecords::new(gb_engine::score::RECORD_TOP.min(self.model.cfg.vocab)));
+        }
+    }
+    fn take_score_records(&mut self, slot: usize) -> Option<RowRecords> {
+        self.records.remove(&slot)
+    }
+    fn score_slice(&mut self, slot: usize, prompt: &[u32], done: usize, _cuts: &[usize]) -> Result<ScoreStep, BackendError> {
+        if let Some(e) = self.fatal.clone() {
+            return Err(e);
+        }
+        if !self.records.contains_key(&slot) {
+            return Err(gb_engine::score::unsupported_backend());
+        }
+        self.score_slice_inner(slot, prompt, done).map_err(|e| {
+            if e.is_fatal() {
+                self.record(&format!("prompt readout of slot {slot}"), &e, false);
+            }
+            // a recoverable error fails this request alone, through the returned value (not `take_error`)
+            self.records.remove(&slot);
+            self.drop_slot(slot);
+            self.fatal.clone().unwrap_or_else(|| BackendError::retryable(format!("prompt readout of slot {slot}: {e}")))
+        })
+    }
+
     fn prefill(&mut self, slot: usize, start: u64, tokens: &[u32], candidates: usize) -> RowOutput {
         self.prefill_piece(slot, start, tokens, start as usize + tokens.len(), candidates)
     }
@@ -339,6 +419,7 @@ impl Backend for BailingBackend {
     }
 
     fn release(&mut self, slot: usize) {
+        self.records.remove(&slot); // a readout that was cancelled or failed leaves its records behind
         self.drop_slot(slot);
     }
 
@@ -431,5 +512,30 @@ mod tests {
         // a segment that started off the grid keeps its own grid
         assert!(on_cut_grid(100 + 32, 100) && !on_cut_grid(128, 100));
         assert!(!on_cut_grid(10, 20));
+    }
+
+    /// A readout asks every row about the prompt token after it, across slice boundaries too, and the last row about none; its
+    /// slices end on the grid of the chunk from the prompt's start (so each starts on the KDA chunk grid when the chunk is a
+    /// multiple of 16), whatever slice resumes them.
+    #[test]
+    fn a_readout_asks_each_row_about_the_next_token_on_the_chunk_grid() {
+        let prompt: Vec<u32> = (0..130).map(|i| i * 3 + 1).collect();
+        let mut done = 0;
+        let mut asked = Vec::new();
+        let mut ends = Vec::new();
+        while done < prompt.len() {
+            let end = readout_slice_end(done, prompt.len(), 48);
+            asked.extend(next_tokens(&prompt, done, end));
+            ends.push(end);
+            done = end;
+        }
+        assert_eq!(ends, vec![48, 96, 130]);
+        assert!(ends[..ends.len() - 1].iter().all(|&e| on_cut_grid(e, 0)), "every slice starts on the KDA grid");
+        let want: Vec<i32> = (1..130).map(|i| prompt[i] as i32).chain([-1]).collect();
+        assert_eq!(asked, want);
+        // a resumed slice ends at the next absolute boundary; the whole prompt in one slice when it fits
+        assert_eq!(readout_slice_end(50, 130, 48), 96);
+        assert_eq!(readout_slice_end(0, 130, 4096), 130);
+        assert_eq!(next_tokens(&[5], 0, 1), vec![-1], "a one-token prompt's only row has no next token");
     }
 }

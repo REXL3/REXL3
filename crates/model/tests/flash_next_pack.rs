@@ -72,3 +72,42 @@ fn the_flash_next_pack_matches_the_committed_inventory_and_its_config() {
         ngram_table(&cfg, &real)
     );
 }
+
+/// The boot scans the pack once and builds the weight map and the pack from that scan (`WeightMap::from_checkpoint`,
+/// `Pack::from_checkpoint`): both must equal what scanning again gives (`WeightMap::from_dir`, `Pack::open`).
+#[test]
+fn one_scan_gives_the_weight_map_and_the_pack_a_fresh_scan_gives() {
+    use gb_model::families::qwen_flash_next::weights::WeightMap;
+    let Some(dir) = pack_dir() else { return eprintln!("not run: REXL3_FLASH_NEXT_DIR is not set") };
+    let cfg = FlashNextConfig::from_dir(&dir).unwrap();
+    let ck = gb_exl3::checkpoint::scan(&dir, true).unwrap();
+    assert_eq!(WeightMap::from_checkpoint(&dir, &ck, &cfg).unwrap(), WeightMap::from_dir(&dir, &cfg).unwrap());
+    let once = Pack::from_checkpoint(ck).unwrap();
+    let again = Pack::open(&dir).unwrap();
+    assert_eq!((&once.ck.groups, &once.ck.plain, &once.ck.markers), (&again.ck.groups, &again.ck.plain, &again.ck.markers));
+}
+
+/// A scan with a refused EXL3 group is refused by `Pack::from_checkpoint` with the message `Pack::open` gives for it.
+#[test]
+fn a_pack_from_a_scan_is_refused_as_pack_open_refuses_it() {
+    let dir = std::env::temp_dir().join(format!("rexl3-fn-scan-once-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // one group whose trellis is the wrong dtype: the scan refuses the group (`ck.bad`)
+    let head = serde_json::json!({
+        "m.trellis": {"dtype": "F16", "shape": [1, 1, 32], "data_offsets": [0, 64]},
+        "m.suh": {"dtype": "F16", "shape": [16], "data_offsets": [64, 96]},
+        "m.svh": {"dtype": "F16", "shape": [16], "data_offsets": [96, 128]},
+    })
+    .to_string();
+    let mut bytes = (head.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(head.as_bytes());
+    bytes.resize(bytes.len() + 128, 0);
+    std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+    let ck = gb_exl3::checkpoint::scan(&dir, true).unwrap();
+    assert!(!ck.bad.is_empty());
+    let from_scan = Pack::from_checkpoint(ck).err().expect("a refused group is refused").to_string();
+    let opened = Pack::open(&dir).err().expect("a refused group is refused").to_string();
+    assert_eq!(from_scan, opened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

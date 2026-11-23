@@ -138,7 +138,7 @@ pub const AUTO_MIN_IN_SET: f32 = 0.98;
 impl DraftVocab {
     pub fn parse(s: &str) -> Result<Self, ModelError> {
         match s.trim() {
-            "full" => Ok(Self::Full),
+            "full" | "off" | "0" => Ok(Self::Full),
             "" | "auto" => Ok(Self::Auto),
             "tf" => Ok(Self::Tf),
             list => {
@@ -177,7 +177,9 @@ impl DraftVocab {
 }
 
 fn bad_vocab(s: &str) -> ModelError {
-    ModelError::Config(format!("REXL3_DRAFT_VOCAB={s:?}: expected `full`, `tf`, `auto` or ranges like `0-98304,248032-248320`"))
+    ModelError::Config(format!(
+        "REXL3_DRAFT_VOCAB={s:?}: expected `full` (or `off` / `0`), `tf`, `auto` or ranges like `0-98304,248032-248320`"
+    ))
 }
 
 /// `REXL3_SPEC_BUDGET`: `legacy`, `curve`, `plan`, `margin` or `scored` (see [`BudgetPolicy`]); unset keeps `default`.
@@ -384,6 +386,8 @@ mod tests {
         // unset is the adaptive set; `full` is the way back to every column
         assert_eq!(DraftVocab::parse("").unwrap(), DraftVocab::Auto);
         assert_eq!(DraftVocab::parse("full").unwrap(), DraftVocab::Full);
+        assert_eq!(DraftVocab::parse("off").unwrap(), DraftVocab::Full);
+        assert_eq!(DraftVocab::parse("0").unwrap(), DraftVocab::Full);
         assert!(DraftVocab::Full.ranges().is_none());
         assert_eq!(DraftVocab::parse("tf").unwrap().ranges().unwrap(), vec![(0, 98304), (248032, 248320)]);
         // auto is TensorFold's set used adaptively: the same ranges and the same measured head

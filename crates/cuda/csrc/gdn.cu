@@ -116,6 +116,11 @@ __global__ void __launch_bounds__(128) pre_kernel(
         first_missing = anc[1] < 0 ? 1 : anc[2] < 0 ? 2 : anc[3] < 0 ? 3 : 4;
     }
 
+    // The four taps of each channel are contiguous. Load them together rather than issuing four strided bf16 loads
+    // inside the tap loop; w[c] retains the original j = 0..3 accumulation order for channel c.
+    float w[4][4];
+#pragma unroll
+    for (int c = 0; c < 4; ++c) load4(conv_w + (size_t)(ch0 + c) * 4, w[c]);
     float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -130,10 +135,7 @@ __global__ void __launch_bounds__(128) pre_kernel(
             else load4(conv_pool + (pool + 3 + idx) * CONV + ch0, x);
         }
 #pragma unroll
-        for (int c = 0; c < 4; ++c) {
-            const float w = __bfloat162float(conv_w[(size_t)(ch0 + c) * 4 + j]);
-            acc[c] = acc[c] + x[c] * w;
-        }
+        for (int c = 0; c < 4; ++c) acc[c] = acc[c] + x[c] * w[c][j];
     }
     float c[4];
 #pragma unroll
@@ -246,8 +248,10 @@ __device__ __forceinline__ void store_state(float* base, const float (&s)[R][4],
         *reinterpret_cast<float4*>(base + (size_t)(value0 + r) * DK + lane * 4) = make_float4(s[r][0], s[r][1], s[r][2], s[r][3]);
 }
 
-constexpr int R_STEP = 8;      // value rows per warp
-constexpr int W_STEP = 4;      // warps per block -> 32 value rows per block
+// Value rows are independent: each one reduces over the same 128 keys, but no reduction crosses rows. Keeping only
+// two rows per warp doubles the number of resident warps on short decode windows without changing a row's arithmetic.
+constexpr int R_STEP = 2;      // commit rows per warp; window dispatch selects 2 or 8 from the device SM count
+constexpr int W_STEP = 4;      // warps per block
 
 // The previous window's commit, still owed for the sequences of this launch: for sequence i, the first keep[i] rows of its
 // previous window (rows row0[i].. of the k/v/g/beta record) have not yet been replayed into S. keep == nullptr: nothing is owed.
@@ -274,6 +278,7 @@ __device__ __forceinline__ int owed_row(const Owed& ow, int seq, int j) {
 // committed state back, and goes on with this window from it. That is one read and one write of S per round instead of the
 // window's read plus the commit's read and write. Each thread stores exactly the floats it loaded and no two blocks share a
 // (slot, head, value row), so the in-place store cannot race.
+template <int R_STEP>
 __global__ void __launch_bounds__(32 * W_STEP) window_kernel(
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
         const float* __restrict__ g, const float* __restrict__ beta, float* __restrict__ S,
@@ -465,13 +470,15 @@ __global__ void __launch_bounds__(256) conv_commit_kernel(
 template <int ROWS, int TPR, int STEPS>
 __global__ void __launch_bounds__(TPR * ROWS) chain_kernel(
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
-        const float* __restrict__ g, const float* __restrict__ beta, float* S, const int* __restrict__ seq_start,
-        const int* __restrict__ slot, __nv_bfloat16* __restrict__ o) {
+        const float* __restrict__ g, const float* __restrict__ beta, float* __restrict__ S,
+        const int* __restrict__ seq_start, const int* __restrict__ slot, __nv_bfloat16* __restrict__ o) {
     constexpr int NT = TPR * ROWS;   // threads per block
     constexpr int J = 32 / TPR;      // float4 chunks of a key row each thread owns (chunk index TPR*j + part)
     __shared__ float4 ks[STEPS][DK / 4], qs[STEPS][DK / 4];
     __shared__ float gs[STEPS], bs[STEPS];
     __shared__ __nv_bfloat16 vs[STEPS][ROWS];
+    static_assert(sizeof(ks) + sizeof(qs) + sizeof(gs) + sizeof(bs) + sizeof(vs) <= 48 * 1024,
+                  "prefill staging must stay within the static shared-memory limit");
     const int head = blockIdx.x, seq = blockIdx.z;
     const int begin = seq_start[seq], W = seq_start[seq + 1] - begin;
     if (W <= 0) return;
@@ -546,8 +553,8 @@ __global__ void __launch_bounds__(TPR * ROWS) chain_kernel(
         *reinterpret_cast<float4*>(sp + 4 * (TPR * j + part)) = make_float4(s[4 * j], s[4 * j + 1], s[4 * j + 2], s[4 * j + 3]);
 }
 
-constexpr int PF_ROWS = 64;   // value rows per block
-constexpr int PF_TPR = 4;     // threads per value row
+constexpr int PF_ROWS = 16;   // value rows per block for small batches (384 CTAs at HV=48, one sequence)
+constexpr int PF_TPR = 4;     // threads per value row; fixes the per-row key reduction order
 constexpr int PF_STEPS = 16;  // steps staged in shared memory per round
 
 constexpr size_t align256(size_t x) { return (x + 255) & ~(size_t)255; }
@@ -574,6 +581,16 @@ int launch_pre(const __nv_bfloat16* qkv, const __nv_bfloat16* a, const __nv_bflo
     return GB_CHECK_LAUNCH();
 }
 
+int gdn_sm_count() {
+    static int cached_sms[16] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return 0;
+    if (dev < 0 || dev >= 16) return 0;
+    if (cached_sms[dev] == 0)
+        cudaDeviceGetAttribute(&cached_sms[dev], cudaDevAttrMultiProcessorCount, dev);
+    return cached_sms[dev];
+}
+
 }  // namespace
 
 GB_EXPORT int GB_GDN_EXPORT(gb_gdn_pre)(const void* qkv, const void* a, const void* b, const void* conv_w, const float* a_log,
@@ -588,9 +605,15 @@ GB_EXPORT int GB_GDN_EXPORT(gb_gdn_window)(const void* q, const void* k, const v
                             const float* S, const int* seq_start, const int* slot, int n_seq, void* o, void* stream) {
     if (n_seq <= 0) return 0;
     const Owed none{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0};
-    window_kernel<<<dim3(DK / (R_STEP * W_STEP), HV, n_seq), 32 * W_STEP, 0, gb_stream(stream)>>>(
-        (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, const_cast<float*>(S),
-        seq_start, slot, (__nv_bfloat16*)o, none);
+    cudaStream_t st = gb_stream(stream);
+    if (gdn_sm_count() >= 100)
+        window_kernel<2><<<dim3(DK / (2 * W_STEP), HV, n_seq), 32 * W_STEP, 0, st>>>(
+            (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, const_cast<float*>(S),
+            seq_start, slot, (__nv_bfloat16*)o, none);
+    else
+        window_kernel<8><<<dim3(DK / (8 * W_STEP), HV, n_seq), 32 * W_STEP, 0, st>>>(
+            (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, const_cast<float*>(S),
+            seq_start, slot, (__nv_bfloat16*)o, none);
     return GB_CHECK_LAUNCH();
 }
 
@@ -602,9 +625,15 @@ GB_EXPORT int GB_GDN_EXPORT(gb_gdn_window_owed)(const void* q, const void* k, co
                                  const int* owed_keep, void* stream) {
     if (n_seq <= 0) return 0;
     const Owed ow{(const __nv_bfloat16*)owed_k, (const __nv_bfloat16*)owed_v, owed_g, owed_beta, owed_row0, owed_keep, nullptr, 0};
-    window_kernel<<<dim3(DK / (R_STEP * W_STEP), HV, n_seq), 32 * W_STEP, 0, gb_stream(stream)>>>(
-        (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, S, seq_start, slot,
-        (__nv_bfloat16*)o, ow);
+    cudaStream_t st = gb_stream(stream);
+    if (gdn_sm_count() >= 100)
+        window_kernel<2><<<dim3(DK / (2 * W_STEP), HV, n_seq), 32 * W_STEP, 0, st>>>(
+            (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, S, seq_start, slot,
+            (__nv_bfloat16*)o, ow);
+    else
+        window_kernel<8><<<dim3(DK / (8 * W_STEP), HV, n_seq), 32 * W_STEP, 0, st>>>(
+            (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v, g, beta, S, seq_start, slot,
+            (__nv_bfloat16*)o, ow);
     return GB_CHECK_LAUNCH();
 }
 
@@ -717,8 +746,15 @@ GB_EXPORT int GB_GDN_EXPORT(gb_gdn_prefill)(const void* qkv, const void* a, cons
                         (const __nv_bfloat16*)conv_w, a_log, dt_bias, (const __nv_bfloat16*)conv_pool, seq_start, slot,
                         n_seq, rows, q, k, v, g, beta, st);
     if (rc) return rc;
-    chain_kernel<PF_ROWS, PF_TPR, PF_STEPS><<<dim3(HV, DK / PF_ROWS, n_seq), PF_TPR * PF_ROWS, 0, st>>>(q, k, v, g, beta, S, seq_start, slot,
-                                                                            (__nv_bfloat16*)o);
+    // Small batches need finer value-row tiles to fill L40S. Larger batches already saturate the GPU with
+    // 64-row tiles and avoid redundantly staging q/k in the finer tiles.
+    if (n_seq < 4) {
+        chain_kernel<PF_ROWS, PF_TPR, PF_STEPS><<<dim3(HV, DK / PF_ROWS, n_seq), PF_TPR * PF_ROWS, 0, st>>>(
+            q, k, v, g, beta, S, seq_start, slot, (__nv_bfloat16*)o);
+    } else {
+        chain_kernel<64, PF_TPR, PF_STEPS><<<dim3(HV, DK / 64, n_seq), PF_TPR * 64, 0, st>>>(
+            q, k, v, g, beta, S, seq_start, slot, (__nv_bfloat16*)o);
+    }
     rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
     conv_commit_kernel<<<dim3(CONV / 256, n_seq), 256, 0, st>>>((const __nv_bfloat16*)qkv, (__nv_bfloat16*)conv_pool,

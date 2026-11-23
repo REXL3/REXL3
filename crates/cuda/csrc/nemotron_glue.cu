@@ -435,6 +435,44 @@ __global__ void __launch_bounds__(TK_THREADS) topk_stage2_kernel(const float* __
     }
 }
 
+// Prompt readout: fixed-order log-sum-exp and one chosen logit per f32 row. One block per row, no cross-row state.
+constexpr int LP_THREADS = 1024;
+
+__device__ __forceinline__ float lp_max(float a, float b) { return (isnan(a) || isnan(b)) ? NAN : fmaxf(a, b); }
+
+__global__ void __launch_bounds__(LP_THREADS) logprob_norm_f32_kernel(const float* __restrict__ logits,
+                                                                       const int* __restrict__ chosen,
+                                                                       float* __restrict__ out, int vocab) {
+    __shared__ float part[LP_THREADS];
+    const int row = blockIdx.x, t = threadIdx.x;
+    const float* x = logits + (size_t)row * vocab;
+    float m = -INFINITY;
+    for (int i = t; i < vocab; i += LP_THREADS) m = lp_max(m, x[i]);
+    part[t] = m;
+    __syncthreads();
+    for (int w = LP_THREADS / 2; w > 0; w >>= 1) {
+        if (t < w) part[t] = lp_max(part[t], part[t + w]);
+        __syncthreads();
+    }
+    m = part[0];
+    __syncthreads();
+    const bool finite = !isnan(m) && !isinf(m);
+    float sum = 0.0f;
+    if (finite)
+        for (int i = t; i < vocab; i += LP_THREADS) sum += expf(x[i] - m);
+    part[t] = sum;
+    __syncthreads();
+    for (int w = LP_THREADS / 2; w > 0; w >>= 1) {
+        if (t < w) part[t] += part[t + w];
+        __syncthreads();
+    }
+    if (t == 0) {
+        const int c = chosen[row];
+        out[2 * (size_t)row] = finite ? m + logf(part[0]) : m;
+        out[2 * (size_t)row + 1] = (c >= 0 && c < vocab) ? x[c] : -INFINITY;
+    }
+}
+
 bool aligned(const void* p, size_t a) { return ((uintptr_t)p & (a - 1)) == 0; }
 
 }  // namespace
@@ -519,6 +557,17 @@ GB_EXPORT int gb_nemo_glue_topk(const void* logits, int rows, int vocab, int cou
     if (rc != 0) return rc;
     topk_stage2_kernel<<<rows, TK_THREADS, 0, gb_stream(stream)>>>((const float*)logits, vocab, count, blocks * TK_WARPS,
                                                                     (const u64*)ws, (int*)ids, (float*)vals);
+    return GB_CHECK_LAUNCH();
+}
+
+// logits f32 [rows, vocab], chosen i32 [rows], out f32 [rows, 2] = (log-sum-exp, chosen logit).
+GB_EXPORT int gb_nemo_glue_logprob_norm_f32(const void* logits, int rows, int vocab, const void* chosen, void* out,
+                                            void* stream) {
+    if (rows < 0 || vocab < 1) return (int)cudaErrorInvalidValue;
+    if (rows == 0) return 0;
+    if (!aligned(logits, 4) || !aligned(chosen, 4) || !aligned(out, 4)) return (int)cudaErrorInvalidValue;
+    logprob_norm_f32_kernel<<<rows, LP_THREADS, 0, gb_stream(stream)>>>((const float*)logits, (const int*)chosen, (float*)out,
+                                                                        vocab);
     return GB_CHECK_LAUNCH();
 }
 

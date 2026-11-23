@@ -10,9 +10,10 @@
 // K2 turns them into low / inj in every block and applies up. fp32 throughout, weights fp16 as stored.
 //
 // Decode fast path (k1b/k2c): the same arithmetic, bit for bit, with launch shapes tuned for the 1..8-row window:
-// - k1b uses 8-warp blocks (the same per-job math and reduction order);
-// - k2c gives each block 16 warps (512 threads) covering 16 columns, so the k2 grid halves (320 -> 160 blocks) with
-//   the reference's per-column body untouched;
+// - k1b uses 8-warp blocks (the same per-job math and reduction order); QFN CTAs cache their two norm rows in shared
+//   memory and retain 128-bit x/down/norm loads;
+// - k2c gives each generic block 16 warps (512 threads) covering 16 columns; the QFN specialization uses at most 284
+//   persistent 8-warp CTAs (two per SM on a 142-SM L40S), with the reference's per-column body untouched;
 // - hc_post is regridded over the whole [t, s, d] volume (elementwise, so any grid gives the same bits).
 // The fast path is unconditional: the gate needs the bit-exact fast kernels always on. The reference launches are
 // still reachable through gb_hcx_pre_ref / gb_hcx_pre_z_ref (used by the bit-exact GPU tests in tests/hcx_perf.rs).
@@ -248,12 +249,13 @@ __global__ void __launch_bounds__(256) k1b_kernel(const float* __restrict__ x, c
 // reduction order as k1b — the same per-thread FMA chain per (t, d) and the same warp-shuffle butterfly — so every
 // output bit equals k1b/ref k1. `nt` is a compile-time constant (the dispatch guarantees NT == runtime nt), so
 // there are no `if (t < nt)` guards in the inner loops and acc is exactly NT floats. The 10-step d-loop is fully
-// unrolled and software-pipelined: the next iteration's raw fp16 weight/norm chunks are issued before the current
-// iteration's math, keeping two 128-byte cache lines in flight per warp.
+// unrolled and software-pipelined: the next iteration's raw fp16 down/norm chunks are issued before the current
+// iteration's math (down from global memory, norm from the CTA's shared copy), preserving the original add sequence.
+// Original global-norm path for low-SM-count parts; unlike the cached variant it has no CTA-wide staging barrier.
 template <int NT, int NINJ>
-__global__ void __launch_bounds__(256) k1b_qfn_kernel(const float* __restrict__ x, const half* __restrict__ nw,
-                                                      const half* __restrict__ down, const half* __restrict__ inj,
-                                                      float* __restrict__ P, float* __restrict__ ss, int t0) {
+__global__ void __launch_bounds__(256) k1b_qfn_legacy_kernel(const float* __restrict__ x, const half* __restrict__ nw,
+                                                             const half* __restrict__ down, const half* __restrict__ inj,
+                                                             float* __restrict__ P, float* __restrict__ ss, int t0) {
     constexpr int H = QFN_H, HC = QFN_HC, RANK = QFN_RANK;
     constexpr int R = RANK + NINJ;
     constexpr int RHC = R * HC;
@@ -275,6 +277,97 @@ __global__ void __launch_bounds__(256) k1b_qfn_kernel(const float* __restrict__ 
             const int d = 8 * lane + 256 * k;
             const uint4 wu_n = __ldg(reinterpret_cast<const uint4*>(w + d + 256));
             const uint4 nu_n = __ldg(reinterpret_cast<const uint4*>(n + d + 256));
+            float wv[8], nv[8];
+            h8_u4(wu, wv);
+            h8_u4(nu, nv);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) wv[i] *= 1.f + nv[i];
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
+                const float* xr = xb + (size_t)t * HC_H + d;
+                const float4 a = __ldg(reinterpret_cast<const float4*>(xr));
+                const float4 b = __ldg(reinterpret_cast<const float4*>(xr + 4));
+                acc[t] += wv[0] * a.x + wv[1] * a.y + wv[2] * a.z + wv[3] * a.w + wv[4] * b.x +
+                          wv[5] * b.y + wv[6] * b.z + wv[7] * b.w;
+            }
+            wu = wu_n;
+            nu = nu_n;
+        }
+        {
+            const int d = 8 * lane + 2304;
+            float wv[8], nv[8];
+            h8_u4(wu, wv);
+            h8_u4(nu, nv);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) wv[i] *= 1.f + nv[i];
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
+                const float* xr = xb + (size_t)t * HC_H + d;
+                const float4 a = __ldg(reinterpret_cast<const float4*>(xr));
+                const float4 b = __ldg(reinterpret_cast<const float4*>(xr + 4));
+                acc[t] += wv[0] * a.x + wv[1] * a.y + wv[2] * a.z + wv[3] * a.w + wv[4] * b.x +
+                          wv[5] * b.y + wv[6] * b.z + wv[7] * b.w;
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < NT; ++t) {
+            const float v = warp_sum(acc[t]);
+            if (lane == 0) P[((size_t)t * R + r) * HC + s] = v;
+        }
+        return;
+    }
+    const int q = job - RHC;
+    if (q >= NT * HC) return;
+    const int t = q / HC, s = q % HC;
+    const float* xr = x + (size_t)(t0 + t) * HC_H + (size_t)s * H;
+    float a = 0.f;
+    for (int dd = 4 * lane; dd < H; dd += 128) {
+        const float4 v = __ldg(reinterpret_cast<const float4*>(xr + dd));
+        a += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+    }
+    a = warp_sum(a);
+    if (lane == 0) ss[t * HC + s] = a;
+}
+
+// Shared-norm path for high-SM-count discrete GPUs.
+template <int NT, int NINJ>
+__global__ void __launch_bounds__(256) k1b_qfn_cached_kernel(const float* __restrict__ x, const half* __restrict__ nw,
+                                                             const half* __restrict__ down, const half* __restrict__ inj,
+                                                             float* __restrict__ P, float* __restrict__ ss, int t0) {
+    constexpr int H = QFN_H, HC = QFN_HC, RANK = QFN_RANK;
+    constexpr int R = RANK + NINJ;
+    constexpr int RHC = R * HC;
+    constexpr size_t HC_H = (size_t)HC * H;
+    const int lane = threadIdx.x & 31;
+    const int first_job = blockIdx.x * 8;
+    const int job = first_job + (threadIdx.x >> 5);
+    // Eight consecutive jobs span at most two streams. Cache those two norm rows once per CTA instead of issuing the
+    // same 128-bit global loads in every down/inject warp. The fp16 bits and every subsequent arithmetic op are intact.
+    __shared__ __align__(16) half s_nw[2 * H];
+    const int s0 = min(first_job, RHC - 1) / R;
+    const int s1 = min(first_job + 7, RHC - 1) / R;
+    uint4* sn = reinterpret_cast<uint4*>(s_nw);
+    for (int i = threadIdx.x; i < H / 8; i += 256) {
+        sn[i] = __ldg(reinterpret_cast<const uint4*>(nw + (size_t)s0 * H + 8 * i));
+        sn[H / 8 + i] = s1 == s0 ? sn[i]
+                                  : __ldg(reinterpret_cast<const uint4*>(nw + (size_t)s1 * H + 8 * i));
+    }
+    __syncthreads();
+    if (job < RHC) {
+        const int s = job / R, r = job % R;
+        const half* w = (r < RANK ? down + (size_t)r * HC_H : inj + (size_t)(r - RANK) * HC_H) + (size_t)s * H;
+        const half* n = s_nw + (s - s0) * H;
+        const float* xb = x + (size_t)t0 * HC_H + (size_t)s * H;
+        float acc[NT];
+#pragma unroll
+        for (int t = 0; t < NT; ++t) acc[t] = 0.f;
+        uint4 wu = __ldg(reinterpret_cast<const uint4*>(w + 8 * lane));
+        uint4 nu = *reinterpret_cast<const uint4*>(n + 8 * lane);
+#pragma unroll
+        for (int k = 0; k < 9; ++k) {
+            const int d = 8 * lane + 256 * k;
+            const uint4 wu_n = __ldg(reinterpret_cast<const uint4*>(w + d + 256));
+            const uint4 nu_n = *reinterpret_cast<const uint4*>(n + d + 256);
             float wv[8], nv[8];
             h8_u4(wu, wv);
             h8_u4(nu, nv);
@@ -405,10 +498,13 @@ __global__ void __launch_bounds__(512) k2c_kernel(const float* __restrict__ x, c
     }
 }
 
-// k2c_qfn: the Qwen4Exp specialization of k2c (H=2560, hc=4, rank=320, ninj=0/4). Identical shared-memory stage
+// k2c_qfn: the Qwen4Exp specialization (H=2560, hc=4, rank=320, ninj=0/4). Identical shared-memory stage
 // and per-column arithmetic as k2c — same s_rms/rsqrtf, same low/inj silu sequence, same per-column FMA chains and
-// warp_sum butterfly, same bf16 rounding — so every output bit equals k2c/ref k2. `nt` is a compile-time constant
-// (dispatch guarantees NT == runtime nt): the per-row guards vanish and s_low is a static NT*RANK shared array.
+// warp_sum butterfly, same bf16 rounding — so every output bit equals k2c/ref k2. Low-SM-count parts use 160
+// sixteen-warp CTAs, retaining enough resident warps to hide LPDDR5x latency. Parts with at least 100 SMs use at
+// most 2*SM persistent eight-warp CTAs (two per SM on the 142-SM L40S), reusing the RMS/low stage on later tiles.
+// `nt` is a compile-time constant (dispatch guarantees NT == runtime nt): the per-row guards vanish and s_low is
+// a static NT*RANK shared array.
 // The first fp16 chunk of every `up` row and the nw scale for this column are issued BEFORE the first barrier:
 // they depend only on (blockIdx, warp, lane), so the 6.55 MB up DRAM stream starts while s_rms + low still run in
 // shared memory instead of waiting for both __syncthreads() barriers.
@@ -460,12 +556,13 @@ __device__ __forceinline__ void k2c_qfn_stream(uint4 u0, const half* uprow, cons
     }
 }
 
+// Full-occupancy path for low-SM-count parts, including 48-SM sm_121 GB10.
 template <int NT, int NINJ>
-__global__ void __launch_bounds__(512) k2c_qfn_kernel(const float* __restrict__ x, const half* __restrict__ nw,
-                                                      const half* __restrict__ up, const float* __restrict__ P,
-                                                      const float* __restrict__ ss, __nv_bfloat16* __restrict__ y,
-                                                      float* __restrict__ inj_out, int t0, float eps,
-                                                      float* __restrict__ dbg_z) {
+__global__ void __launch_bounds__(512) k2c_qfn_512_kernel(const float* __restrict__ x, const half* __restrict__ nw,
+                                                          const half* __restrict__ up, const float* __restrict__ P,
+                                                          const float* __restrict__ ss, __nv_bfloat16* __restrict__ y,
+                                                          float* __restrict__ inj_out, int t0, float eps,
+                                                          float* __restrict__ dbg_z) {
     constexpr int H = QFN_H, HC = QFN_HC, RANK = QFN_RANK;
     constexpr int R = RANK + NINJ;
     constexpr float INV_HC = 1.f / (float)HC;
@@ -475,8 +572,6 @@ __global__ void __launch_bounds__(512) k2c_qfn_kernel(const float* __restrict__ 
     const int d = blockIdx.x * 16 + warp;
     constexpr bool PF = NT < 8;  // 8-row windows keep 2 CTAs/SM (≤64 regs): load up chunks lazily instead.
     const half* upbase = up + (size_t)d * RANK;
-    // Pre-barrier prefetch: first fp16 chunk of each up row and the nw scale for this column (skipped for NT=8,
-    // where the longer s_low stage would otherwise push register usage over the 2-CTA-per-SM threshold).
     const uint4 u0a = PF ? __ldg(reinterpret_cast<const uint4*>(upbase + 8 * lane)) : make_uint4(0, 0, 0, 0);
     const uint4 u1a = PF ? __ldg(reinterpret_cast<const uint4*>(upbase + (size_t)H * RANK + 8 * lane))
                          : make_uint4(0, 0, 0, 0);
@@ -524,9 +619,101 @@ __global__ void __launch_bounds__(512) k2c_qfn_kernel(const float* __restrict__ 
     }
 }
 
+// Persistent path for high-SM-count discrete GPUs, including 142-SM sm_89 L40S.
+template <int NT, int NINJ>
+__global__ void __launch_bounds__(256, 2) k2c_qfn_persistent_kernel(const float* __restrict__ x, const half* __restrict__ nw,
+                                                                    const half* __restrict__ up, const float* __restrict__ P,
+                                                                    const float* __restrict__ ss, __nv_bfloat16* __restrict__ y,
+                                                                    float* __restrict__ inj_out, int t0, float eps,
+                                                                    float* __restrict__ dbg_z) {
+    constexpr int H = QFN_H, HC = QFN_HC, RANK = QFN_RANK;
+    constexpr int R = RANK + NINJ;
+    constexpr float INV_HC = 1.f / (float)HC;
+    __shared__ float s_rms[NT * HC];
+    __shared__ float s_low[NT * RANK];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int tiles = (H + 7) / 8;
+    const int d0 = blockIdx.x * 8 + warp;
+    constexpr bool PF = true;
+    const half* upbase0 = up + (size_t)d0 * RANK;
+    // Pre-barrier prefetch for the first tile; two CTAs/SM allow 128 registers per thread.
+    const uint4 p0 = PF ? __ldg(reinterpret_cast<const uint4*>(upbase0 + 8 * lane)) : make_uint4(0, 0, 0, 0);
+    const uint4 p1 = PF ? __ldg(reinterpret_cast<const uint4*>(upbase0 + (size_t)H * RANK + 8 * lane))
+                        : make_uint4(0, 0, 0, 0);
+    const uint4 p2 = PF ? __ldg(reinterpret_cast<const uint4*>(upbase0 + (size_t)(2 * H) * RANK + 8 * lane))
+                        : make_uint4(0, 0, 0, 0);
+    const uint4 p3 = PF ? __ldg(reinterpret_cast<const uint4*>(upbase0 + (size_t)(3 * H) * RANK + 8 * lane))
+                        : make_uint4(0, 0, 0, 0);
+    const float nva0 = qfn_nv(nw, 0, d0);
+    const float nva1 = qfn_nv(nw, 1, d0);
+    const float nva2 = qfn_nv(nw, 2, d0);
+    const float nva3 = qfn_nv(nw, 3, d0);
+    if (tid < NT * HC) s_rms[tid] = rsqrtf(ss[tid] / (float)H + eps);
+    __syncthreads();
+    for (int i = tid; i < NT * RANK; i += 256) {
+        const int t = i / RANK, r = i % RANK;
+        const float* p = P + ((size_t)t * R + r) * HC;
+        float a = 0.f;
+#pragma unroll
+        for (int s = 0; s < HC; ++s) a += s_rms[t * HC + s] * p[s];
+        a *= INV_HC;
+        s_low[i] = a / (1.f + __expf(-a));
+    }
+    if (blockIdx.x == 0 && inj_out != nullptr) {
+        for (int i = tid; i < NT * NINJ; i += 256) {
+            const int t = i / NINJ, qq = i % NINJ;
+            const float* p = P + ((size_t)t * R + RANK + qq) * HC;
+            float a = 0.f;
+#pragma unroll
+            for (int s = 0; s < HC; ++s) a += s_rms[t * HC + s] * p[s];
+            inj_out[(size_t)(t0 + t) * NINJ + qq] = 2.f / (1.f + __expf(-a * INV_HC));
+        }
+    }
+    __syncthreads();
+    const float* xrow0 = x + (size_t)t0 * (size_t)HC * H;
+    for (int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
+        const bool first = tile == blockIdx.x;
+        const int d = tile * 8 + warp;
+        const half* upbase = up + (size_t)d * RANK;
+        const uint4 u0a = PF ? (first ? p0 : __ldg(reinterpret_cast<const uint4*>(upbase + 8 * lane)))
+                             : make_uint4(0, 0, 0, 0);
+        const uint4 u1a = PF ? (first ? p1 : __ldg(reinterpret_cast<const uint4*>(upbase + (size_t)H * RANK + 8 * lane)))
+                             : make_uint4(0, 0, 0, 0);
+        const uint4 u2a = PF ? (first ? p2 : __ldg(reinterpret_cast<const uint4*>(upbase + (size_t)(2 * H) * RANK + 8 * lane)))
+                             : make_uint4(0, 0, 0, 0);
+        const uint4 u3a = PF ? (first ? p3 : __ldg(reinterpret_cast<const uint4*>(upbase + (size_t)(3 * H) * RANK + 8 * lane)))
+                             : make_uint4(0, 0, 0, 0);
+        const float nv0 = first ? nva0 : qfn_nv(nw, 0, d);
+        const float nv1 = first ? nva1 : qfn_nv(nw, 1, d);
+        const float nv2 = first ? nva2 : qfn_nv(nw, 2, d);
+        const float nv3 = first ? nva3 : qfn_nv(nw, 3, d);
+        float out[NT];
+#pragma unroll
+        for (int t = 0; t < NT; ++t) out[t] = 0.f;
+        k2c_qfn_stream<NT, PF>(u0a, upbase, nv0, s_low, xrow0, s_rms, lane, d, 0, out, dbg_z);
+        k2c_qfn_stream<NT, PF>(u1a, upbase + (size_t)H * RANK, nv1, s_low, xrow0 + (size_t)H, s_rms, lane, d, 1, out, dbg_z);
+        k2c_qfn_stream<NT, PF>(u2a, upbase + (size_t)(2 * H) * RANK, nv2, s_low, xrow0 + (size_t)(2 * H), s_rms, lane, d, 2, out, dbg_z);
+        k2c_qfn_stream<NT, PF>(u3a, upbase + (size_t)(3 * H) * RANK, nv3, s_low, xrow0 + (size_t)(3 * H), s_rms, lane, d, 3, out, dbg_z);
+        if (lane == 0) {
+#pragma unroll
+            for (int t = 0; t < NT; ++t) y[(size_t)(t0 + t) * H + d] = __float2bfloat16(out[t] * INV_HC);
+        }
+    }
+}
+
 }  // namespace hcx
 
 using namespace hcx;
+
+static int hcx_sm_count() {
+    static int cached_sms[16] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return 0;
+    if (dev < 0 || dev >= 16) return 0;
+    if (cached_sms[dev] == 0)
+        cudaDeviceGetAttribute(&cached_sms[dev], cudaDevAttrMultiProcessorCount, dev);
+    return cached_sms[dev];
+}
 
 // Scratch floats: P [8][rank + ninj][hc] + ss [8][hc].
 GB_EXPORT size_t gb_hcx_scratch_bytes(int hc, int rank, int ninj) {
@@ -542,26 +729,52 @@ GB_EXPORT size_t gb_hcx_scratch_bytes(int hc, int rank, int ninj) {
 #define HCX_K1B_QFN(NT)                                                                                    \
     do {                                                                                                   \
         const int grid = (R * hc + nt * hc + 7) / 8;                                                       \
-        if (ninj == 0)                                                                                     \
-            k1b_qfn_kernel<NT, 0><<<grid, 256, 0, st>>>((const float*)streams, (const half*)hc_norm_w,     \
-                                                        (const half*)down_w, (const half*)inject_w, P, ss, \
-                                                        t0);                                               \
-        else                                                                                               \
-            k1b_qfn_kernel<NT, 4><<<grid, 256, 0, st>>>((const float*)streams, (const half*)hc_norm_w,     \
-                                                        (const half*)down_w, (const half*)inject_w, P, ss, \
-                                                        t0);                                               \
+        if (hcx_sm_count() >= 100) {                                                                       \
+            if (ninj == 0)                                                                                 \
+                k1b_qfn_cached_kernel<NT, 0><<<grid, 256, 0, st>>>(                                        \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)down_w,                    \
+                    (const half*)inject_w, P, ss, t0);                                                     \
+            else                                                                                           \
+                k1b_qfn_cached_kernel<NT, 4><<<grid, 256, 0, st>>>(                                        \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)down_w,                    \
+                    (const half*)inject_w, P, ss, t0);                                                     \
+        } else {                                                                                           \
+            if (ninj == 0)                                                                                 \
+                k1b_qfn_legacy_kernel<NT, 0><<<grid, 256, 0, st>>>(                                        \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)down_w,                    \
+                    (const half*)inject_w, P, ss, t0);                                                     \
+            else                                                                                           \
+                k1b_qfn_legacy_kernel<NT, 4><<<grid, 256, 0, st>>>(                                        \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)down_w,                    \
+                    (const half*)inject_w, P, ss, t0);                                                     \
+        }                                                                                                  \
     } while (0)
 
 #define HCX_K2C_QFN(NT)                                                                                    \
     do {                                                                                                   \
-        if (ninj == 0)                                                                                     \
-            k2c_qfn_kernel<NT, 0><<<(H + 15) / 16, 512, 0, st>>>(                                         \
-                (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,                   \
-                (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                      \
-        else                                                                                               \
-            k2c_qfn_kernel<NT, 4><<<(H + 15) / 16, 512, 0, st>>>(                                         \
-                (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,                   \
-                (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                      \
+        const int sms = hcx_sm_count();                                                                    \
+        if (sms >= 100) {                                                                                  \
+            const int tiles = (H + 7) / 8;                                                                 \
+            int p_ctas = 2 * sms;                                                                          \
+            if (p_ctas > tiles) p_ctas = tiles;                                                            \
+            if (ninj == 0)                                                                                 \
+                k2c_qfn_persistent_kernel<NT, 0><<<p_ctas, 256, 0, st>>>(                                  \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,               \
+                    (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                  \
+            else                                                                                           \
+                k2c_qfn_persistent_kernel<NT, 4><<<p_ctas, 256, 0, st>>>(                                  \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,               \
+                    (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                  \
+        } else {                                                                                           \
+            if (ninj == 0)                                                                                 \
+                k2c_qfn_512_kernel<NT, 0><<<(H + 15) / 16, 512, 0, st>>>(                                  \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,               \
+                    (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                  \
+            else                                                                                           \
+                k2c_qfn_512_kernel<NT, 4><<<(H + 15) / 16, 512, 0, st>>>(                                  \
+                    (const float*)streams, (const half*)hc_norm_w, (const half*)up_w, P, ss,               \
+                    (__nv_bfloat16*)y_out, inject_w ? inj_out : nullptr, t0, eps, dbg_z);                  \
+        }                                                                                                  \
     } while (0)
 
 static int hcx_pre_impl(const void* streams, const void* hc_norm_w, const void* down_w, const void* up_w,

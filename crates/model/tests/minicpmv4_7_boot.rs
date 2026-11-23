@@ -71,14 +71,18 @@ fn file_bytes(dir: &Path, src: &Source) -> Vec<u8> {
     v
 }
 
-/// Ask the kernel to drop the pack's pages from the page cache (a cold boot reads the disk).
+/// Ask the kernel to drop the pack's pages from the page cache (a cold boot reads the disk; Linux only, a no-op
+/// elsewhere).
 fn evict(dir: &Path) {
-    use std::os::unix::io::AsRawFd;
     for e in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
         if e.path().extension().is_some_and(|x| x == "safetensors") {
-            let f = std::fs::File::open(e.path()).unwrap();
-            // SAFETY: a valid descriptor; the advice is a hint
-            unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let f = std::fs::File::open(e.path()).unwrap();
+                // SAFETY: a valid descriptor; the advice is a hint
+                unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+            }
         }
     }
 }

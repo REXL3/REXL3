@@ -162,6 +162,15 @@ pub fn row_ids(
 }
 
 /// Read-only mmap of packed table rows plus small hash parameters.
+/// The fewest positions a gather spreads over threads (a decode window's few rows stay on the caller's thread).
+const GATHER_PARALLEL_FROM: usize = 64;
+/// The most threads a gather uses (enough outstanding faults to keep the disk busy; the GB10 has 20 cores).
+const GATHER_THREADS: usize = 64;
+/// The threads of a read-ahead (fewer than a gather's: it shares the cores with the running chunk's host work).
+const READAHEAD_THREADS: usize = 8;
+/// Set while a read-ahead worker runs (one table a process).
+static READAHEAD_BUSY: AtomicBool = AtomicBool::new(false);
+
 pub struct NgramTable {
     map: Mapped,
     path: PathBuf,
@@ -280,9 +289,85 @@ impl NgramTable {
         if out.len() < n * self.heads * self.words {
             return Err("packed row buffer is too short".into());
         }
+        let per = self.heads * self.words;
+        let out = &mut out[..n * per];
+        // A long gather (a prompt chunk) reads its rows on several threads: a row the page cache does not hold is a page fault served by
+        // the disk, one at a time on one thread, so a cold table's chunk was latency-bound; the threads overlap the faults. Each thread
+        // fills its own positions' rows with the same bytes, so the result is the one-thread gather's.
+        let threads = if n >= GATHER_PARALLEL_FROM { GATHER_THREADS } else { 1 };
+        if threads == 1 {
+            return self.gather_rows(history, ctx, 0, out);
+        }
+        let span = n.div_ceil(threads);
+        std::thread::scope(|sc| {
+            let jobs: Vec<_> = out
+                .chunks_mut(span * per)
+                .enumerate()
+                .map(|(t, part)| sc.spawn(move || self.gather_rows(history, ctx, t * span, part)))
+                .collect();
+            jobs.into_iter().try_for_each(|j| j.join().map_err(|_| "an n-gram gather thread panicked".to_string())?)
+        })
+    }
+
+    /// Starts reading the table pages a later [`Self::gather`] of `history` (two context tokens, then the positions) will need,
+    /// on a background worker, and returns at once. The table is read through the page cache, so a chunk whose rows are not
+    /// resident stalls its gather on the disk; a prompt's next chunk is known while the GPU runs the current one, and its pages
+    /// can be faulted in during that time. Only pages are touched: no row is copied and nothing the gather returns changes. At
+    /// most one read-ahead runs at a time (a second call while one is in flight is dropped), and a short history is ignored.
+    pub fn readahead(self: &Arc<Self>, history: Vec<u32>) {
+        if history.len() < 2 + GATHER_PARALLEL_FROM || READAHEAD_BUSY.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let table = Arc::clone(self);
+        let spawned = std::thread::Builder::new().name("ngram-readahead".into()).spawn(move || {
+            let n = history.len() - 2;
+            let span = n.div_ceil(READAHEAD_THREADS);
+            std::thread::scope(|sc| {
+                for t in 0..READAHEAD_THREADS {
+                    let (table, history) = (&table, &history);
+                    let first = t * span;
+                    if first < n {
+                        sc.spawn(move || table.touch_rows(history, 2, first, span.min(n - first)));
+                    }
+                }
+            });
+            READAHEAD_BUSY.store(false, Ordering::Release);
+        });
+        if spawned.is_err() {
+            READAHEAD_BUSY.store(false, Ordering::Release);
+        }
+    }
+
+    /// Reads one byte of every page under the rows of positions `first..first + count` (after `ctx` context tokens).
+    fn touch_rows(&self, history: &[u32], ctx: usize, first: usize, count: usize) {
+        const PAGE: usize = 4096;
         let all = self.map.bytes();
-        for (p, dst) in out.chunks_exact_mut(self.heads * self.words).take(n).enumerate() {
-            let q = p + ctx;
+        let row_bytes = self.words * 2;
+        let mut ids = vec![0; self.heads];
+        let mut sink = 0u8;
+        for q in first + ctx..first + ctx + count {
+            if self.row_ids(history[q], history[q - 1], history[q - 2], &mut ids).is_err() {
+                return;
+            }
+            for &id in &ids {
+                let at = self.base + id as usize * row_bytes;
+                let Some(row) = all.get(at..at + row_bytes) else { return };
+                let mut o = 0;
+                while o < row_bytes {
+                    sink ^= row[o];
+                    o += PAGE;
+                }
+                sink ^= row[row_bytes - 1];
+            }
+        }
+        std::hint::black_box(sink);
+    }
+
+    /// The rows of positions `first..first + out.len() / (heads * words)` (after `ctx` context tokens of `history`) into `out`.
+    fn gather_rows(&self, history: &[u32], ctx: usize, first: usize, out: &mut [u16]) -> Result<(), String> {
+        let all = self.map.bytes();
+        for (p, dst) in out.chunks_exact_mut(self.heads * self.words).enumerate() {
+            let q = first + p + ctx;
             let mut ids = vec![0; self.heads];
             self.row_ids(history[q], history[q - 1], history[q - 2], &mut ids)?;
             for (j, &id) in ids.iter().enumerate() {

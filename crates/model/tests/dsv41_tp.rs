@@ -986,11 +986,15 @@ fn a_divergent_follower_is_a_lost_group_naming_the_call() {
         ll,
         t,
     );
-    // the divergent call returns the LEADER'S own answer (rank 0's answer is the answer) and latches the loss once
-    // the follower's ack is read; the settled group then refuses, naming the call that diverged
-    let ok = Dsv41Runtime::prefill_logits_last_row(&mut leader, 0, 0, &[1]).unwrap();
-    assert_eq!(ok.len(), 8, "the leader's own logits are returned");
-    let e = leader.settle(leader.last_seq()).unwrap_err().to_string();
+    // The follower's ack can race the leader's local result: divergence either fails this call directly or returns
+    // rank 0's answer and is reported by settle. Both paths must name the call that diverged.
+    let e = match Dsv41Runtime::prefill_logits_last_row(&mut leader, 0, 0, &[1]) {
+        Ok(ok) => {
+            assert_eq!(ok.len(), 8, "the leader's own logits are returned");
+            leader.settle(leader.last_seq()).unwrap_err().to_string()
+        }
+        Err(e) => e.to_string(),
+    };
     assert!(e.contains("score_last_row"), "names the call that diverged: {e}");
     let _ = follower.join();
 }

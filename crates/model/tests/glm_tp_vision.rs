@@ -241,19 +241,30 @@ fn features_bytes(f: &Arc<dyn std::any::Any + Send + Sync>) -> Vec<u8> {
 
 /// A layer prefix holding `own`'s experts (`None`: every expert).
 fn load(dir: &Path, layers: usize, own: Option<&ExpertOwnership>) -> GlmModel {
+    load_with(dir, layers, own, CHUNK, 64, 8192)
+}
+
+/// [`load`] for prefill chunks of `chunk` rows and prompts of up to 64K tokens.
+fn load_chunked(dir: &Path, layers: usize, own: Option<&ExpertOwnership>, chunk: usize) -> GlmModel {
+    load_with(dir, layers, own, chunk, 320, 65_536)
+}
+
+fn load_with(
+    dir: &Path,
+    layers: usize,
+    own: Option<&ExpertOwnership>,
+    chunk: usize,
+    kv_blocks: usize,
+    max_context: usize,
+) -> GlmModel {
     gb_cuda::rt::init_context().unwrap();
     let pack = match own {
         Some(o) => GlmFamily::map_pack_owned(dir, o).unwrap(),
         None => GlmFamily::map_pack(dir).unwrap(),
     };
     let b = boot_mapped(dir, pack, Some(layers), &LoadOptions::from_env(20 * GIB), 0.0).unwrap();
-    GlmModel::new_chunked(
-        b.pack.config.clone(),
-        b.device,
-        &ModelOptions { slots: SLOTS, kv_blocks: 64, max_context: 8192, layers },
-        CHUNK,
-    )
-    .unwrap()
+    GlmModel::new_chunked(b.pack.config.clone(), b.device, &ModelOptions { slots: SLOTS, kv_blocks, max_context, layers }, chunk)
+        .unwrap()
 }
 
 struct Prompt {
@@ -357,6 +368,27 @@ fn b_ok(be: &mut dyn Backend) -> bool {
 /// The script at both chunk grids on a group of the two ranks (`perturb`: per rank), with the follower on its own thread. Returns each
 /// rank's digests and the leader's failure (`None`: the group served everything).
 fn group_run(ranks: [GlmModel; 2], perturb: [bool; 2], image_token: u32, p: &Prompt) -> (Vec<u64>, Vec<u64>, Option<String>) {
+    group_run_with(ranks, perturb, image_token, &mut |be| {
+        for limit in [None, Some(128)] {
+            script(be, p, limit, &mut |_, _| {});
+            let e = be.take_error();
+            if e.is_some() || be.leader.failure().is_some() {
+                return Err(be.leader.failure().unwrap_or_else(|| format!("{e:?}")));
+            }
+        }
+        Ok(())
+    })
+}
+
+type GroupBackend = GlmTpBackend<Probe>;
+
+/// [`group_run`] with the leader's calls made by `run` (an error: the group failed, why).
+fn group_run_with(
+    ranks: [GlmModel; 2],
+    perturb: [bool; 2],
+    image_token: u32,
+    run: &mut dyn FnMut(&mut GroupBackend) -> Result<(), String>,
+) -> (Vec<u64>, Vec<u64>, Option<String>) {
     let [m0, m1] = ranks;
     let (l0, l1): (Log, Log) = (Arc::default(), Arc::default());
     let (a, b) = Link::<GlmCall>::pair(Duration::from_secs(600)).unwrap();
@@ -364,15 +396,7 @@ fn group_run(ranks: [GlmModel; 2], perturb: [bool; 2], image_token: u32, p: &Pro
     let h = std::thread::spawn(move || run_follower(f, b, FollowerConfig::new(timeouts())));
     let leader = TpLeader::lead(Probe { r: GlmRank::new(m0), log: l0.clone(), perturb: perturb[0] }, a, timeouts());
     let mut be = GlmTpBackend::new(leader, CHUNK, SLOTS).with_vision(TpVision::device(Some(image_token)));
-    let mut failure = None;
-    for limit in [None, Some(128)] {
-        script(&mut be, p, limit, &mut |_, _| {});
-        let e = be.take_error();
-        if e.is_some() || be.leader.failure().is_some() {
-            failure = Some(be.leader.failure().unwrap_or_else(|| format!("{e:?}")));
-            break;
-        }
-    }
+    let failure = run(&mut be).err();
     if failure.is_none() {
         be.quiesce().unwrap();
     }
@@ -543,14 +567,14 @@ fn rank_zeros_boot_loads_and_publishes_the_tower_and_a_follower_loads_none() {
     // a follower (with a vision slot it would never get from the server) and rank 0 with --no-vision: no tower
     let mut f = o.clone();
     f.tp.as_mut().unwrap().rank = 1;
-    assert!(!holds_tower(&f, &packs[1]) && load_leader_tower(&f, &packs[1]).unwrap().is_none());
+    assert!(!holds_tower(&f, &packs[1]) && load_leader_tower(&f, &packs[1], None).unwrap().is_none());
     let mut nv = o.clone();
     nv.vision = None;
-    assert!(!holds_tower(&nv, &packs[0]) && load_leader_tower(&nv, &packs[0]).unwrap().is_none());
+    assert!(!holds_tower(&nv, &packs[0]) && load_leader_tower(&nv, &packs[0], None).unwrap().is_none());
     // rank 0: the tower, published
     assert!(holds_tower(&o, &packs[0]));
     let before = mem_available();
-    let t = load_leader_tower(&o, &packs[0]).unwrap().expect("rank 0 loads the tower");
+    let t = load_leader_tower(&o, &packs[0], None).unwrap().expect("rank 0 loads the tower");
     eprintln!(
         "rank 0's tower: weights {:.3} GiB, scratch {:.3} GiB; MemAvailable fell {:.2} GiB",
         gib(t.weight_bytes()),
@@ -592,7 +616,7 @@ fn rank_zeros_published_tower_equals_the_single_node_tower_on_the_kit_images() {
     o.tp =
         Some(TpOptions { ranks: 2, rank: 0, peer: "127.0.0.1:1".into(), connect_timeout: d, ready_timeout: d, peer_timeout: d });
     let pack0 = GlmFamily::map_pack_owned(&dir, &ExpertOwnership::range(E, 0, 2).unwrap()).unwrap();
-    let t = load_leader_tower(&o, &pack0).unwrap().expect("rank 0 loads the tower");
+    let t = load_leader_tower(&o, &pack0, None).unwrap().expect("rank 0 loads the tower");
     let leader_patches = t.max_patches;
     publish_encoder(&o, t, GIB).unwrap();
     let svc = o.vision.as_ref().unwrap().get().expect("the encoder is published").clone();
@@ -626,6 +650,505 @@ fn rank_zeros_published_tower_equals_the_single_node_tower_on_the_kit_images() {
         assert_eq!(a, b, "{name}: rank 0's tower differs from the single node's");
     }
     eprintln!("R-G-vision (a): {} images byte-identical; MemAvailable min {:.1} GiB", images.len(), gib(guard.finish()));
+}
+
+// ------------------------------------------------------------------------------------------- V3: the tower's scratch lent (`lend.rs`)
+
+const MIB: u64 = 1 << 20;
+
+fn text(n: usize, seed: u32) -> Vec<u32> {
+    (0..n as u32).map(|i| 1000 + (i.wrapping_mul(7919) ^ seed.wrapping_mul(104_729)) % 60_000).collect()
+}
+
+fn kit_image(pp: &dyn gb_vision::preprocessor::ImagePreprocessor, name: &str) -> gb_vision::Rgb {
+    pp.decode(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vision").join(name)).unwrap()).unwrap()
+}
+
+fn median_ms(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// V3 (`REXL3_GLM_TOWER_LEND`): with the tower's scratch lent from a model's prefill scratch (`GlmModel::lend_prefill_scratch`), every
+/// image's features equal the tower's own scratch's, byte for byte, at the RED-SNOW profile's `--max-image-tokens 4096` and `--prefill-chunk
+/// 2048` (all six lendable buffers lent: 512 MiB): the kit's images, one at the cap and one above it (scaled to the cap by the server's
+/// preprocessing), each encoded with every lent byte set to 0xFF first and again after a 2,048-row prompt chunk ran through the model on the
+/// same bytes. Then at a 512-row chunk, where only part of the scratch fits (the rest stays the tower's own). Prints the scratch the tower
+/// allocated, the MemAvailable each tower took and the encode times, own against lent. `REXL3_GLM_DIR` (the pack), one GPU.
+#[test]
+#[ignore]
+fn a_lent_towers_features_equal_its_own_byte_for_byte() {
+    use gb_model::families::glm::lend::{LEND_ALIGN, LENT_ITEMS};
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    const CAP: usize = 4096;
+    let pack = GlmFamily::map_pack(&dir).unwrap();
+    let pp = glm_preprocessor(&dir, CAP);
+    let images = [
+        ("synthetic 448x448", synth(448, 448, 1)),
+        ("synthetic 336x224", synth(336, 224, 2)),
+        ("demo_scene.png", kit_image(&*pp, "demo_scene.png")),
+        ("grad_6000x4000_cap.png (above the cap)", kit_image(&*pp, "grad_6000x4000_cap.png")),
+        ("synthetic 1792x1792 (at the cap)", synth(1792, 1792, 3)),
+    ];
+    let pres: Vec<gb_vision::Preprocessed> = images.iter().map(|(_, im)| pp.preprocess(im).unwrap()).collect();
+    let tokens: Vec<usize> = pres.iter().map(|p| p.n_patches() / 4).collect();
+    assert_eq!(tokens.iter().max(), Some(&CAP), "an image at the cap: {tokens:?}");
+
+    // the tower's own scratch: the reference features and times
+    let a0 = mem_available();
+    let (mut own, own_bytes, none) = glm_encoder(&dir, &pack, CAP, None, false);
+    let own_fell = a0.saturating_sub(mem_available());
+    assert_eq!(none, 0);
+    let want: Vec<Vec<u8>> = pres.iter().map(|p| features_bytes(&own.encode(p).unwrap().features)).collect();
+    let time = |enc: &mut GlmEncoder, p: &gb_vision::Preprocessed| {
+        median_ms(
+            (0..3)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let _ = enc.encode(p).unwrap();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect(),
+        )
+    };
+    let own_ms: Vec<f64> = pres.iter().map(|p| time(&mut own, p)).collect();
+
+    // the model at the profile's chunk lends its prefill scratch; the tower borrows from it
+    let mut m = load_chunked(&dir, layers, None, 2048);
+    let lease = m.lend_prefill_scratch().unwrap().expect("a 2,048-row chunk has a prefill scratch");
+    eprintln!("lent regions at 2,048 rows (MiB): {:?}", lease.region_bytes().iter().map(|b| b / MIB).collect::<Vec<_>>());
+    let a1 = mem_available();
+    let (mut lent, lent_own, lent_bytes) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), false);
+    let lent_fell = a1.saturating_sub(mem_available());
+    eprintln!(
+        "tower at {CAP} tokens: own scratch {:.1} MiB (MemAvailable fell {:.3} GiB with its weights); lent tower: own scratch {:.1} MiB + lent \
+         {:.1} MiB (MemAvailable fell {:.3} GiB): {:.3} GiB less",
+        own_bytes as f64 / MIB as f64,
+        gib(own_fell),
+        lent_own as f64 / MIB as f64,
+        lent_bytes as f64 / MIB as f64,
+        gib(lent_fell),
+        gib(own_fell.saturating_sub(lent_fell))
+    );
+    assert_eq!(lent_bytes, 512 * MIB, "all six lendable buffers at the cap");
+    assert_eq!(own_bytes - lent_own, lent_bytes);
+    let st = gb_cuda::Stream::new().unwrap();
+    let prompt = text(2048, 7);
+    for (i, ((name, im), pre)) in images.iter().zip(&pres).enumerate() {
+        lease.fill(0xFF, &st).unwrap();
+        st.sync().unwrap();
+        let a = features_bytes(&lent.encode(pre).unwrap().features);
+        assert!(a == want[i], "{name}: the lent tower's features (lent bytes 0xFF before) differ from its own scratch's");
+        m.begin_slot(0).unwrap();
+        m.prefill_chunk(0, 0, &prompt, Some(COUNT)).unwrap();
+        m.end_slot(0);
+        let b = features_bytes(&lent.encode(pre).unwrap().features);
+        assert!(b == want[i], "{name}: the lent tower's features after a prompt chunk on the same bytes differ");
+        eprintln!(
+            "{name}: {}x{} -> grid {:?}, {} tokens, {} feature bytes: lent == own (0xFF before; after a 2,048-row chunk); encode {:.1} ms own, {:.1} ms lent",
+            im.width,
+            im.height,
+            pre.grid,
+            tokens[i],
+            a.len(),
+            own_ms[i],
+            time(&mut lent, pre)
+        );
+    }
+    let (taken, waited) = lease.counts();
+    eprintln!("lease: taken {taken:?} (model, tower), waited on the device {waited:?}");
+    assert!(lease.is_free() && taken[0] > 0 && taken[1] > 0);
+    drop(lent);
+    drop(m);
+
+    // a 512-row chunk: only part of the scratch fits the prefill scratch; the rest stays the tower's own
+    let mut m = load_chunked(&dir, layers, None, 512);
+    let lease = m.lend_prefill_scratch().unwrap().unwrap();
+    let (mut part, part_own, part_lent) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), false);
+    assert!(part_lent > 0 && part_lent < 512 * MIB, "a partial placement at 512 rows: {part_lent}");
+    for (i, pre) in pres.iter().enumerate() {
+        lease.fill(0xFF, &st).unwrap();
+        st.sync().unwrap();
+        assert!(features_bytes(&part.encode(pre).unwrap().features) == want[i], "{}: partial placement", images[i].0);
+    }
+    eprintln!(
+        "512-row chunk: {:.1} MiB of the scratch lent (regions {:?} MiB), {:.1} MiB the tower's own: every image's features == own (some of \
+         the {} lendable items fit; offsets on {} MiB boundaries)",
+        part_lent as f64 / MIB as f64,
+        lease.region_bytes().iter().map(|b| b / MIB).collect::<Vec<_>>(),
+        part_own as f64 / MIB as f64,
+        LENT_ITEMS.len(),
+        LEND_ALIGN / MIB
+    );
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// Turn one: `t1` in slot 0, answered, four greedy steps, released. Turn two, in the same slot from scratch (no cache): turn one's prompt,
+/// the four tokens it decoded, text, image `c` (a later image of the conversation, at a position past turn one's chunks) and text, answered,
+/// four greedy steps. `answer` sees every answering call, as [`script`]'s.
+fn turns<B: Backend>(
+    be: &mut B,
+    t1: &Prompt,
+    image_token: u32,
+    c: &gb_model::serve::EncodedImage,
+    answer: &mut dyn FnMut(&mut B, &[RowOutput]),
+) {
+    be.set_prefill_row_limit(None);
+    let mut run = |be: &mut B, p: &Prompt| -> Vec<u32> {
+        let mut done = 0;
+        let first = loop {
+            let s = be.prefill_slice(0, &p.tokens, &p.images, done, COUNT);
+            done = s.done;
+            if let Some(r) = s.row {
+                break r;
+            }
+        };
+        answer(be, std::slice::from_ref(&first));
+        let (mut pos, mut last, mut out) = (p.tokens.len(), first.ids[0], vec![first.ids[0]]);
+        for _ in 0..4 {
+            let o = be.step(&[RowRequest { slot: 0, tokens: vec![last], first_position: pos as u64 }], COUNT);
+            answer(be, &o[0]);
+            be.commit(0, 1);
+            pos += 1;
+            last = o[0][0].ids[0];
+            out.push(last);
+        }
+        be.release(0);
+        out
+    };
+    let decoded = run(be, t1);
+    let mut tokens = t1.tokens.clone();
+    tokens.extend(&decoded[..4]);
+    tokens.extend(text(300, 11));
+    let start = tokens.len();
+    tokens.extend(std::iter::repeat_n(image_token, c.tokens));
+    tokens.extend(text(15, 12));
+    let mut images = t1.images.clone();
+    images.push(ImageSpan { start, tokens: c.tokens, merged: c.merged, features: c.features.clone(), key: 9 });
+    run(be, &Prompt { tokens, images });
+}
+
+/// V3 on the group: rank 0's tower borrows its scratch from rank 0's model, and while the group runs the image script (both chunk grids)
+/// and a two-turn conversation (an image in the second turn, after a long first turn), another thread encodes images on that tower without
+/// pause (what image requests waiting for the slot do beside the engine thread's forwards). Every answering call (candidates and every
+/// fp16 logit) of both ranks equals the one model's with the tower's OWN scratch, every concurrent encode gives the own scratch's bytes,
+/// and both parties took the lease and waited for each other on the device.
+#[test]
+#[ignore]
+fn an_image_prompt_with_a_lent_tower_on_two_ranks_equals_one_model_byte_for_byte() {
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    let owns = [ExpertOwnership::range(E, 0, 2).unwrap(), ExpertOwnership::range(E, 1, 2).unwrap()];
+    let pack0 = GlmFamily::map_pack_owned(&dir, &owns[0]).unwrap();
+    let image_token = pack0.config.vision.as_ref().unwrap().image_token_id;
+    // the reference: the tower's own scratch
+    let (mut enc, pp) = encoder(&dir, &pack0);
+    let imgs = [synth(448, 448, 1), synth(336, 224, 2), synth(560, 392, 4)];
+    let pres: Vec<gb_vision::Preprocessed> = imgs.iter().map(|im| pp.preprocess(im).unwrap()).collect();
+    let own: Vec<gb_model::serve::EncodedImage> = pres.iter().map(|p| enc.encode(p).unwrap()).collect();
+    drop(enc);
+    let p = image_prompt(image_token, &own[0], &own[1]);
+    let t1 = Prompt { tokens: p.tokens.clone(), images: p.images.clone() };
+    let one = load(&dir, layers, None);
+    let mut be = GlmBackend::new(one).with_chunk(CHUNK);
+    be.m.set_graphs(false);
+    let mut reference = single(&mut be, &p);
+    turns(&mut be, &t1, image_token, &own[2], &mut |b: &mut GlmBackend, rows: &[RowOutput]| {
+        let ids: Vec<i32> = rows.iter().flat_map(|r| r.ids.iter().map(|&x| x as i32)).collect();
+        let vals: Vec<f32> = rows.iter().flat_map(|r| r.values.iter().copied()).collect();
+        let logits = b.m.logits_host(0, rows.len()).unwrap();
+        reference.push(digest(&ids, &vals, &logits));
+    });
+    assert!(b_ok(&mut be));
+    drop(be);
+    eprintln!("one model (the tower's own scratch): {} answering calls", reference.len());
+
+    // the group: rank 0's model lends, the tower borrows; the prompt's images are the lent tower's own encodes
+    let mut r = ranks(&dir, layers, &owns);
+    let lease = r[0].lend_prefill_scratch().unwrap().expect("rank 0 has a prefill scratch");
+    let (mut lent, _, lent_bytes) = glm_encoder(&dir, &pack0, 1024, Some(lease.clone()), false);
+    eprintln!("rank 0's tower: {:.1} MiB of its scratch lent", lent_bytes as f64 / MIB as f64);
+    assert!(lent_bytes > 0);
+    let mine: Vec<gb_model::serve::EncodedImage> = pres.iter().map(|p| lent.encode(p).unwrap()).collect();
+    for (a, b) in mine.iter().zip(&own) {
+        assert!(features_bytes(&a.features) == features_bytes(&b.features), "a lent encode differs from the own scratch's");
+    }
+    let lp = image_prompt(image_token, &mine[0], &mine[1]);
+    let lt1 = Prompt { tokens: lp.tokens.clone(), images: lp.images.clone() };
+    let jobs = pres.iter().cloned().zip(own.iter().map(|e| features_bytes(&e.features))).collect();
+    let hammer = Hammer::start(lent, jobs);
+    let t = std::time::Instant::now();
+    let (d0, d1, failure) = group_run_with(r, [false, false], image_token, &mut |be| {
+        for limit in [None, Some(128)] {
+            script(be, &lp, limit, &mut |_, _| {});
+        }
+        turns(be, &lt1, image_token, &mine[2], &mut |_, _| {});
+        match (be.take_error(), be.leader.failure()) {
+            (None, None) => Ok(()),
+            (e, f) => Err(f.unwrap_or_else(|| format!("{e:?}"))),
+        }
+    });
+    let (encodes, bad, _enc) = hammer.finish();
+    assert!(failure.is_none(), "the group failed: {failure:?}");
+    let (taken, waited) = lease.counts();
+    eprintln!(
+        "two ranks with a lent tower, {:.1?}: {} answering calls; {encodes} concurrent encodes ({bad} differ); lease taken {taken:?}, waited on \
+         the device {waited:?} (model, tower)",
+        t.elapsed(),
+        d0.len()
+    );
+    assert_eq!(bad, 0, "a concurrent encode on the lent scratch differs from the own scratch's");
+    assert!(encodes > 0 && taken[0] > 0 && taken[1] > 0 && lease.is_free());
+    assert_eq!(d0, d1, "the two ranks' answers differ");
+    assert_eq!(d0, reference, "the group's answers with a lent tower differ from the one model's");
+    eprintln!(
+        "BYTE-IDENTICAL with a lent tower and encodes running: {} answering calls (script at 512 and 128 rows, two turns)",
+        d0.len()
+    );
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// The lease is what keeps them apart: a model at the profile's 2,048-row chunk lends its prefill scratch, and a 4,096-token prompt (two
+/// chunks) runs again and again while another thread encodes an image at the cap on the borrowing tower. With the lease, every prompt
+/// answers as it does alone and every encode gives the own scratch's bytes; with a tower that skips the lease (`unleased`, the bug) on the
+/// same bytes, some prompt or encode differs. Then a holder dropped without giving the lease back poisons it: the next encode fails by name.
+/// Prints the prompt's time with the lease alone, under contention, and without lending.
+#[test]
+#[ignore]
+fn the_lease_keeps_a_prompt_chunk_and_an_encode_apart_and_skipping_it_corrupts() {
+    use gb_model::families::glm::lend::Party;
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    const CAP: usize = 4096;
+    let pack = GlmFamily::map_pack(&dir).unwrap();
+    let pp = glm_preprocessor(&dir, CAP);
+    let pre = pp.preprocess(&synth(1792, 1792, 3)).unwrap();
+    let (mut own, _, _) = glm_encoder(&dir, &pack, CAP, None, false);
+    let want = features_bytes(&own.encode(&pre).unwrap().features);
+    drop(own);
+    let prompt = text(4096, 21);
+    let mut m = load_chunked(&dir, layers, None, 2048);
+    let run = |m: &mut GlmModel| -> (u64, f64) {
+        let t = std::time::Instant::now();
+        m.begin_slot(0).unwrap();
+        m.prefill_chunk(0, 0, &prompt[..2048], None).unwrap();
+        let c = m.prefill_chunk(0, 2048, &prompt[2048..], Some(COUNT)).unwrap().unwrap();
+        let d = digest(&c.ids, &c.vals, &m.logits_host(0, 1).unwrap());
+        m.end_slot(0);
+        (d, t.elapsed().as_secs_f64() * 1e3)
+    };
+    let alone: Vec<(u64, f64)> = (0..3).map(|_| run(&mut m)).collect();
+    let reference = alone[0].0;
+    assert!(alone.iter().all(|x| x.0 == reference), "the prompt is not deterministic");
+    let lease = m.lend_prefill_scratch().unwrap().unwrap();
+    let leased_alone: Vec<(u64, f64)> = (0..3).map(|_| run(&mut m)).collect();
+    assert!(leased_alone.iter().all(|x| x.0 == reference));
+
+    // with the lease: the prompt and the encodes side by side
+    let (lent, _, lent_bytes) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), false);
+    assert_eq!(lent_bytes, 512 * MIB);
+    let hammer = Hammer::start(lent, vec![(pre.clone(), want.clone())]);
+    let contended: Vec<(u64, f64)> = (0..6).map(|_| run(&mut m)).collect();
+    let (encodes, bad, lent) = hammer.finish();
+    let (taken, waited) = lease.counts();
+    eprintln!(
+        "with the lease: {} prompts beside {encodes} encodes: {} prompts and {bad} encodes differ; lease taken {taken:?}, waited {waited:?}",
+        contended.len(),
+        contended.iter().filter(|x| x.0 != reference).count()
+    );
+    assert!(encodes > 0 && waited[0] > 0 && waited[1] > 0, "the two parties never met");
+    assert_eq!(bad, 0, "an encode under the lease differs");
+    assert!(contended.iter().all(|x| x.0 == reference), "a prompt under the lease differs");
+    drop(lent);
+    eprintln!(
+        "prompt (4,096 tokens, two 2,048-row chunks, {layers} layers) median ms: not lent {:.1}, lent alone {:.1}, lent beside encodes {:.1}",
+        median_ms(alone.iter().map(|x| x.1).collect()),
+        median_ms(leased_alone.iter().map(|x| x.1).collect()),
+        median_ms(contended.iter().map(|x| x.1).collect())
+    );
+
+    // the bug: a tower on the same bytes that skips the lease
+    let (bypass, _, _) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), true);
+    let hammer = Hammer::start(bypass, vec![(pre.clone(), want.clone())]);
+    let mut differ = 0;
+    let mut tries = 0;
+    while tries < 20 && differ == 0 {
+        differ += usize::from(run(&mut m).0 != reference);
+        tries += 1;
+    }
+    let (encodes, bad, bypass) = hammer.finish();
+    eprintln!("WITHOUT the lease: {tries} prompts beside {encodes} encodes: {differ} prompts and {bad} encodes differ");
+    assert!(differ + bad > 0, "skipping the lease corrupted nothing: this test cannot see a missing lease");
+    drop(bypass);
+
+    // a holder dropped without giving the lease back: the next encode is refused by name, not run on bytes of unknown state
+    let (mut lent, _, _) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), false);
+    let st = gb_cuda::Stream::new().unwrap();
+    drop(lease.acquire(Party::Model, &st).unwrap());
+    let e = lent.encode(&pre).err().expect("an encode on a poisoned lease").to_string();
+    assert!(e.contains("lease"), "{e}");
+    eprintln!("a holder dropped without releasing: the next encode fails: {e}");
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// Fairness: a 32,768-token prompt (sixteen 2,048-row chunks, the RED-SNOW profile's chunk) on a model lending its prefill scratch, and an
+/// encode at the cap asked for while the prompt's third chunk runs. The model takes the lease per chunk and the lease is first come, first
+/// served, so the encode is served at the next chunk boundary: it ends within one chunk's time plus its own encode time of being asked for,
+/// with chunks of the prompt still to run, not after the whole prompt. The prompt's answer and the features equal their runs alone. Prints
+/// the prompt's chunk times not lent, lent alone and lent with the encode (what the lease costs a chunk).
+#[test]
+#[ignore]
+fn an_encode_asked_for_during_a_long_prompt_is_served_at_the_next_chunk() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(60 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    const CAP: usize = 4096;
+    const ROWS: usize = 2048;
+    const CHUNKS: usize = 16;
+    let pack = GlmFamily::map_pack(&dir).unwrap();
+    let pre = glm_preprocessor(&dir, CAP).preprocess(&synth(1792, 1792, 3)).unwrap();
+    let prompt = text(ROWS * CHUNKS, 33);
+    let mut m = load_chunked(&dir, layers, None, ROWS);
+    // the prompt chunk by chunk: its answer's digest and each chunk's milliseconds; `done` counts the chunks queued
+    let run = |m: &mut GlmModel, done: &AtomicUsize| -> (u64, Vec<f64>) {
+        m.begin_slot(0).unwrap();
+        let mut ms = Vec::new();
+        let mut d = 0;
+        for k in 0..CHUNKS {
+            let t = std::time::Instant::now();
+            let want = (k + 1 == CHUNKS).then_some(COUNT);
+            if let Some(c) = m.prefill_chunk(0, k * ROWS, &prompt[k * ROWS..(k + 1) * ROWS], want).unwrap() {
+                d = digest(&c.ids, &c.vals, &m.logits_host(0, 1).unwrap());
+            }
+            m.sync().unwrap();
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+            done.store(k + 1, Ordering::SeqCst);
+        }
+        m.end_slot(0);
+        (d, ms)
+    };
+    let (reference, not_lent) = run(&mut m, &AtomicUsize::new(0));
+    let lease = m.lend_prefill_scratch().unwrap().unwrap();
+    let (d, lent_alone) = run(&mut m, &AtomicUsize::new(0));
+    assert_eq!(d, reference);
+    let (mut enc, _, lent) = glm_encoder(&dir, &pack, CAP, Some(lease.clone()), false);
+    assert_eq!(lent, 512 * MIB);
+    let want = features_bytes(&enc.encode(&pre).unwrap().features);
+    let alone_ms = median_ms(
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let _ = enc.encode(&pre).unwrap();
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect(),
+    );
+    let done = AtomicUsize::new(0);
+    let ((d, with_encode), (wait_ms, at, got)) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| run(&mut m, &done));
+        while done.load(Ordering::SeqCst) < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let t = std::time::Instant::now();
+        let f = features_bytes(&enc.encode(&pre).unwrap().features);
+        let wait_ms = t.elapsed().as_secs_f64() * 1e3;
+        let at = done.load(Ordering::SeqCst);
+        (h.join().unwrap(), (wait_ms, at, f))
+    });
+    let chunk_max = not_lent.iter().chain(&lent_alone).cloned().fold(0.0, f64::max);
+    eprintln!(
+        "{CHUNKS} chunks of {ROWS} rows, {layers} layers: chunk median ms not lent {:.1}, lent alone {:.1}, lent with the encode {:.1} (max {:.1}); \
+         the encode asked for after chunk 2: answered in {wait_ms:.1} ms (alone {alone_ms:.1} ms), with {at} of {CHUNKS} chunks queued",
+        median_ms(not_lent.clone()),
+        median_ms(lent_alone.clone()),
+        median_ms(with_encode.clone()),
+        chunk_max
+    );
+    assert_eq!(d, reference, "the prompt's answer with an encode served between its chunks differs");
+    assert!(got == want, "the encode served between the prompt's chunks differs");
+    assert!(
+        wait_ms <= chunk_max + 2.0 * alone_ms + 250.0,
+        "the encode waited {wait_ms:.1} ms: longer than one chunk and its own time"
+    );
+    assert!(at < CHUNKS, "the encode was served only after the whole prompt");
+    assert!(lease.is_free());
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}
+
+/// V3, rank 0's boot path with `REXL3_GLM_TOWER_LEND=1` (`tp_vision::load_leader_tower` then `publish_encoder`, what `tp_boot::build_leader`
+/// runs) at the RED-SNOW argv's `--max-image-tokens 4096` and `--prefill-chunk 2048`: the plan lends 512 MiB; the boot refuses by name a
+/// lend without a lender, and a lender the plan did not ask for (the setting off); with rank 0's model lending, the tower loads with the
+/// plan's placement and 512 MiB lent, and the published encoder's features equal the tower's own scratch's. `REXL3_GLM_DIR` (the pack).
+/// Sets the process's `REXL3_GLM_TOWER_LEND` while it runs: run this binary with `--test-threads=1`, as every test here.
+#[test]
+#[ignore]
+fn rank_zeros_boot_lends_the_tower_its_scratch_from_its_model_with_the_setting_on() {
+    use gb_model::families::glm::lend::TOWER_LEND_ENV;
+    use gb_model::families::glm::tp_vision::{load_leader_tower, planned_lend, publish_encoder};
+    use gb_model::serve::TpOptions;
+    let Some(dir) = pack_dir() else { return };
+    let layers: usize = std::env::var("REXL3_GLM_TP_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    require_available(40 * GIB);
+    let guard = Guard::start(20 * GIB);
+    gb_cuda::rt::init_context().unwrap();
+    let d = Duration::from_secs(1);
+    let rank0 = || {
+        Some(TpOptions { ranks: 2, rank: 0, peer: "127.0.0.1:1".into(), connect_timeout: d, ready_timeout: d, peer_timeout: d })
+    };
+    let opts = || {
+        let mut o = options(&dir);
+        (o.max_image_tokens, o.prefill_chunk, o.tp) = (4096, 2048, rank0());
+        o
+    };
+    let own0 = ExpertOwnership::range(E, 0, 2).unwrap();
+    let pack0 = GlmFamily::map_pack_owned(&dir, &own0).unwrap();
+    std::env::set_var(TOWER_LEND_ENV, "1");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let o = opts();
+        let planned = planned_lend(&o, &pack0).unwrap();
+        assert_eq!(planned.lent_bytes(), 512 * MIB, "{planned:?}");
+        let e = load_leader_tower(&o, &pack0, None).err().expect("a lend without a lender").to_string();
+        assert!(e.contains("no prefill scratch to lend"), "{e}");
+        let chunk = gb_model::families::glm::alloc::prefill_chunk_for(o.prefill_chunk);
+        let mut m = load_chunked(&dir, layers, Some(&own0), chunk);
+        let lease = m.lend_prefill_scratch().unwrap().expect("a 2,048-row chunk has a prefill scratch");
+        let t = load_leader_tower(&o, &pack0, Some(lease.clone())).unwrap().expect("rank 0 loads the tower");
+        assert_eq!(t.lent_scratch_bytes(), 512 * MIB);
+        assert_eq!(t.placement(), &planned, "the boot's placement is the plan's");
+        publish_encoder(&o, t, GIB).unwrap();
+        let svc = o.vision.as_ref().unwrap().get().expect("the encoder is published").clone();
+        let pp = glm_preprocessor(&dir, 4096);
+        let (mut own, _, _) = glm_encoder(&dir, &pack0, 4096, None, false);
+        for im in [synth(1792, 1792, 3), synth(448, 448, 1)] {
+            let pre = pp.preprocess(&im).unwrap();
+            let a = features_bytes(&svc.encode(&pre).unwrap().features);
+            assert!(
+                a == features_bytes(&own.encode(&pre).unwrap().features),
+                "the published lent encoder differs from the own scratch"
+            );
+        }
+        // the setting off: a lender the plan did not ask for is refused by name
+        std::env::set_var(TOWER_LEND_ENV, "0");
+        let e = load_leader_tower(&opts(), &pack0, Some(lease.clone())).err().expect("an unplanned lender").to_string();
+        assert!(e.contains("the plan did not lend"), "{e}");
+        eprintln!("rank 0's boot with the tower lent: 512 MiB lent at the plan's placement, published features == own; both refusals by name");
+    }));
+    std::env::remove_var(TOWER_LEND_ENV);
+    r.unwrap();
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
 }
 
 /// A layer prefix holding `own`'s experts (`None`: every expert) in prompt chunks of `chunk` rows, under P2, long enough for `context`.

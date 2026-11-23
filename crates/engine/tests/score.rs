@@ -342,3 +342,59 @@ fn an_all_rows_score_is_refused_by_a_backend_that_reads_out_only_the_last_row() 
     let (_, s) = scores.iter().find(|(i, _)| *i == id).unwrap();
     assert_eq!(s.logits_rows.len(), 16, "one row per prompt token");
 }
+/// The compact form of the readout: a backend that reduces each row itself answers with `RowRecords` instead of full rows.
+/// They are the host reduction of the same rows, do not depend on how the prefill was sliced, and belong to the slot: a
+/// last-row score submitted while the readout is in flight neither loses nor receives them.
+#[test]
+fn a_compact_readout_carries_one_record_per_row_and_stays_with_its_slot() {
+    use gb_engine::score::RowRecords;
+    let p: Vec<u32> = (0..23).map(|i| (i * 37 + 5) % 256).collect();
+    let run = |chunk: usize, with_other: bool| {
+        let mut e = engine(chunk);
+        e.backend = e.backend.with_compact_score_rows();
+        let id = e.score_submit(ScoreRequest { prompt: p.clone(), cache: false, all_rows: true }).unwrap();
+        let other =
+            with_other.then(|| e.score_submit(ScoreRequest { prompt: vec![9; 40], cache: false, all_rows: false }).unwrap());
+        while e.busy() {
+            e.step().unwrap();
+        }
+        let mut scores = e.take_scores();
+        if let Some(o) = other {
+            let (_, s) = scores.iter().find(|(i, _)| *i == o).unwrap();
+            assert!(s.records.is_none() && s.logits_rows.is_empty(), "a last-row score has no readout");
+        }
+        scores.remove(scores.iter().position(|(i, _)| *i == id).unwrap()).1
+    };
+    let whole = run(64, false);
+    assert!(whole.logits_rows.is_empty(), "the compact form replaces the full rows");
+    let rec = whole.records.clone().expect("records");
+    let rows: Vec<Vec<f32>> = (1..=p.len()).map(|n| mock_logits(&p[..n], 256)).collect();
+    assert_eq!(rec, RowRecords::from_rows(&rows, &p));
+    assert_eq!((rec.rows(), rec.k, rec.top_ids.len()), (p.len(), 20, p.len() * 20));
+    for i in 0..p.len() - 1 {
+        assert_eq!(rec.chosen[i], rows[i][p[i + 1] as usize], "row {i} carries the logit of token {}", i + 1);
+        let top = &rec.top_logits[i * 20..(i + 1) * 20];
+        assert!(top.windows(2).all(|w| w[0] >= w[1]) && top[0] == rows[i].iter().copied().fold(f32::MIN, f32::max));
+    }
+    assert_eq!(rec.chosen[p.len() - 1], f32::NEG_INFINITY, "the last row has no next token");
+    assert_eq!(run(5, false), whole, "slicing the prefill does not change the records");
+    assert_eq!(run(5, true), whole, "nor does a last-row score beside it");
+}
+/// The readout and last-row scoring are separate capabilities: a backend with the readout only serves `all_rows` and
+/// refuses a last-row score by name before reserving anything.
+#[test]
+fn a_readout_only_backend_serves_the_readout_and_refuses_a_last_row_score() {
+    let mut e = engine(8);
+    e.backend = e.backend.with_compact_score_rows().with_readout_only();
+    assert!(!e.score_supported() && e.score_rows_supported());
+    let before = e.admission().available();
+    let err = e.score_submit(ScoreRequest { prompt: vec![1; 16], cache: false, all_rows: false }).unwrap_err();
+    assert!(format!("{err:?}").contains("decisions scoring"), "{err:?}");
+    assert_eq!(e.admission().available(), before, "the refusal reserves nothing");
+    let id = e.score_submit(ScoreRequest { prompt: vec![1; 16], cache: false, all_rows: true }).unwrap();
+    while e.busy() {
+        e.step().unwrap();
+    }
+    let scores = e.take_scores();
+    assert_eq!(scores.iter().find(|(i, _)| *i == id).unwrap().1.records.as_ref().map(|r| r.rows()), Some(16));
+}

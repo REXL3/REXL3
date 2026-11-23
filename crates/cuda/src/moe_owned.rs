@@ -205,6 +205,28 @@ pub(crate) mod ffi {
             e: i32,
             stream: *mut c_void,
         ) -> i32;
+        pub fn gb_moe_pf_combine_f32(
+            y: *const c_void,
+            pick: *const c_void,
+            wts: *const c_void,
+            shared: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            topk: i32,
+            d: i32,
+            e: i32,
+            stream: *mut c_void,
+        ) -> i32;
+        pub fn gb_moe_pf_combine_local_f32(
+            y: *const c_void,
+            pick_local: *const c_void,
+            wts: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            topk: i32,
+            d: i32,
+            stream: *mut c_void,
+        ) -> i32;
     }
 }
 
@@ -369,8 +391,13 @@ impl OwnScratch {
         self.pick_local.bytes() + self.identity.bytes()
     }
 
-    /// The local picks of the last call (`-1` = absent here). Synchronise first.
-    pub fn pick_local(&self, rows: usize) -> Result<Vec<i32>, CudaError> {
+    /// The local picks of the last call (`-1` = absent here), for a device-side consumer.
+    pub fn pick_local(&self) -> &DevBuf {
+        &self.pick_local
+    }
+
+    /// Download the local picks of the last call (`-1` = absent here). Synchronise first.
+    pub fn download_pick_local(&self, rows: usize) -> Result<Vec<i32>, CudaError> {
         let v: Vec<i32> = self.pick_local.to_vec()?;
         Ok(v[..rows * self.dims.topk].to_vec())
     }
@@ -389,6 +416,23 @@ impl MoeExperts {
             return Err(INVALID);
         }
         let mut m = Self::from_groups(gate, up, down, MoeDims { experts: own.local(), ..dims })?;
+        m.adopt(dims, own)?;
+        Ok(m)
+    }
+
+    /// A rank bank from the Qwen loader's resident `Exl3Weights`, in ascending global-id order. This is the `from_exl3`
+    /// counterpart of [`MoeExperts::from_groups_owned`]: only local scales are stacked, and the bank carries its own global-to-local map.
+    pub fn from_exl3_owned(
+        gate: &[&crate::exl3_linear::Exl3Weights],
+        up: &[&crate::exl3_linear::Exl3Weights],
+        down: &[&crate::exl3_linear::Exl3Weights],
+        dims: MoeDims,
+        own: ExpertOwnership,
+    ) -> Result<Self, CudaError> {
+        if own.experts != dims.experts || own.local() == 0 || gate.len() != own.local() {
+            return Err(INVALID);
+        }
+        let mut m = Self::from_exl3(gate, up, down, MoeDims { experts: own.local(), ..dims })?;
         m.adopt(dims, own)?;
         Ok(m)
     }
@@ -596,6 +640,51 @@ impl MoeExperts {
         os: &mut OwnScratch,
         st: &Stream,
     ) -> Result<(), CudaError> {
+        self.run_prefill_pairs_impl(x, x_dtype, rows, s, os, st, true, &mut |_| Ok(()))
+    }
+
+    /// [`MoeExperts::run_prefill_pairs`] without writing `-0.0` into unowned pair rows. The caller must consume only
+    /// slots whose `os.pick_local()` entry is nonnegative (for example with [`combine_pairs_local_f32`]).
+    pub fn run_prefill_pairs_unfilled(
+        &self,
+        x: &DevBuf,
+        x_dtype: Dtype,
+        rows: usize,
+        s: &mut PrefillScratch,
+        os: &mut OwnScratch,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        self.run_prefill_pairs_impl(x, x_dtype, rows, s, os, st, false, &mut |_| Ok(()))
+    }
+
+    /// Profiling form of [`MoeExperts::run_prefill_pairs_unfilled`], calling `mark` after each stage launch.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_pairs_unfilled_marked(
+        &self,
+        x: &DevBuf,
+        x_dtype: Dtype,
+        rows: usize,
+        s: &mut PrefillScratch,
+        os: &mut OwnScratch,
+        st: &Stream,
+        mark: &mut dyn FnMut(&'static str) -> Result<(), CudaError>,
+    ) -> Result<(), CudaError> {
+        self.run_prefill_pairs_impl(x, x_dtype, rows, s, os, st, false, mark)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_prefill_pairs_impl(
+        &self,
+        x: &DevBuf,
+        x_dtype: Dtype,
+        rows: usize,
+        s: &mut PrefillScratch,
+        os: &mut OwnScratch,
+        st: &Stream,
+        fill_unowned: bool,
+        mark: &mut dyn FnMut(&'static str) -> Result<(), CudaError>,
+    ) -> Result<(), CudaError> {
         let d = self.dims;
         let p = rows * d.topk;
         if rows == 0
@@ -619,24 +708,16 @@ impl MoeExperts {
                 s.pick.ptr(),
                 self.local_of(os).ptr(),
                 os.pick_local.ptr(),
-                s.y_pairs.ptr(),
+                if fill_unowned { s.y_pairs.ptr() } else { core::ptr::null_mut() },
                 p as i32,
                 d.hidden as i32,
                 d.experts as i32,
                 st.raw(),
             ))?;
+            mark("remap")?;
             let pl = os.pick_local.ptr();
-            check(ffi::gb_moe_pf_plan(
-                pl,
-                s.spair.ptr(),
-                s.items.ptr(),
-                s.nitems.ptr(),
-                rows as i32,
-                d.topk as i32,
-                el as i32,
-                s.cap as i32,
-                st.raw(),
-            ))?;
+            s.run_plan(pl, rows, el as i32, st)?;
+            mark("plan")?;
             check(ffi::gb_moe_pf_rot_in(
                 x.ptr(),
                 x_dtype as i32,
@@ -653,6 +734,7 @@ impl MoeExperts {
                 el as i32,
                 st.raw(),
             ))?;
+            mark("rot_in")?;
             check(ffi::gb_moe_pf_gateup(
                 s.xs_g.ptr(),
                 s.xs_u.ptr(),
@@ -674,6 +756,7 @@ impl MoeExperts {
                 d.limit,
                 st.raw(),
             ))?;
+            mark("gateup")?;
             check(ffi::gb_moe_pf_down(
                 s.xd.ptr(),
                 self.down_ptrs.ptr(),
@@ -690,7 +773,8 @@ impl MoeExperts {
                 wk_d as i32,
                 s.cap as i32,
                 st.raw(),
-            ))
+            ))?;
+            mark("down")
         }
     }
 }
@@ -731,6 +815,80 @@ pub fn combine_pairs(
             dims.topk as i32,
             dims.hidden as i32,
             dims.experts as i32,
+            st.raw(),
+        ))
+    }
+}
+
+/// [`combine_pairs`] with the router's f32 weights (`wts` f32 `[rows * topk]`): the combine of `MoeExperts::run_prefill_f32_wts` (the
+/// Qwen grouped path), the same kernel over a (summed) pair buffer, so a rank leaves that path's `out` bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn combine_pairs_f32(
+    y: &DevBuf,
+    pick: &DevBuf,
+    wts: &DevBuf,
+    shared: Option<&DevBuf>,
+    out: &mut DevBuf,
+    rows: usize,
+    dims: &MoeDims,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    let p = rows * dims.topk;
+    if rows == 0
+        || y.bytes() < p * dims.hidden * 4
+        || pick.bytes() < p * 4
+        || wts.bytes() < p * 4
+        || out.bytes() < rows * dims.hidden * 4
+        || shared.is_some_and(|b| b.bytes() < rows * dims.hidden * 4)
+    {
+        return Err(INVALID);
+    }
+    unsafe {
+        check(ffi::gb_moe_pf_combine_f32(
+            y.ptr(),
+            pick.ptr(),
+            wts.ptr(),
+            shared.map_or(core::ptr::null(), |b| b.ptr() as *const _),
+            out.ptr(),
+            rows as i32,
+            dims.topk as i32,
+            dims.hidden as i32,
+            dims.experts as i32,
+            st.raw(),
+        ))
+    }
+}
+
+/// Combine only this rank's owned slots into a partial `[rows, hidden]` fp32 output. `pick_local` uses `-1` for
+/// unowned or invalid slots; their `y` rows may be unwritten and are never read. Sum the partial outputs across ranks
+/// to obtain the routed result without exchanging the `[rows * topk, hidden]` pair buffer.
+pub fn combine_pairs_local_f32(
+    y: &DevBuf,
+    pick_local: &DevBuf,
+    wts: &DevBuf,
+    out: &mut DevBuf,
+    rows: usize,
+    dims: &MoeDims,
+    st: &Stream,
+) -> Result<(), CudaError> {
+    let p = rows * dims.topk;
+    if rows == 0
+        || y.bytes() < p * dims.hidden * 4
+        || pick_local.bytes() < p * 4
+        || wts.bytes() < p * 4
+        || out.bytes() < rows * dims.hidden * 4
+    {
+        return Err(INVALID);
+    }
+    unsafe {
+        check(ffi::gb_moe_pf_combine_local_f32(
+            y.ptr(),
+            pick_local.ptr(),
+            wts.ptr(),
+            out.ptr(),
+            rows as i32,
+            dims.topk as i32,
+            dims.hidden as i32,
             st.raw(),
         ))
     }

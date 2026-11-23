@@ -53,6 +53,10 @@ pub struct MemoryPlan {
     /// comes out of the allocatable bytes before the KV pool is sized and is part of `planned_bytes`, so a boot the
     /// box cannot hold is refused, never quietly oversubscribed. The slots fill lazily as prompts run.
     pub wq_budget_bytes: u64,
+    /// Bytes of the speculative draft (its weights, its context rings and its scratch; `plan_memory_cached_with_draft`),
+    /// carved out of the allocatable bytes before the KV pool is sized, like `wq_budget_bytes`. Zero without a draft.
+    /// The boot's draft load is checked against it, so allocated == planned with the draft loaded.
+    pub draft_bytes: u64,
 }
 
 impl MemoryPlan {
@@ -85,6 +89,7 @@ impl MemoryPlan {
             + self.kv_blocks as u64 * self.block_bytes
             + self.cache.bytes()
             + self.wq_budget_bytes
+            + self.draft_bytes
     }
 }
 
@@ -249,11 +254,88 @@ pub fn plan_memory_cached(
         cache,
         snapshot_bytes,
         wq_budget_bytes,
+        0,
         CacheSizing::Legacy,
     )
 }
 
-/// [`plan_memory_cached`] for the families that size the prefix cache from the window (Qwen3.8, GLM and Flash-Next;
+/// [`plan_memory_cached`] with a speculative draft priced in before the KV pool is sized. `draft_base_bytes` is the
+/// draft's slot-independent bytes (its weights and its scratch); `draft_per_slot_bytes` is any draft state that is
+/// NOT already the profile's per-slot state (for families whose profile does not price the drafter's rings, the
+/// DFlash2 family's does: `drafter_state_bytes_per_slot` is the context rings, so `draft_per_slot_bytes` is 0
+/// there). The plan records the total (`draft_base_bytes + draft_per_slot_bytes * slots`) in
+/// [`MemoryPlan::draft_bytes`], so a boot that loads the draft allocates exactly what the plan carved out — the
+/// draft is never an unpriced surprise after the KV pool was granted.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_memory_cached_with_draft(
+    profile: &MemoryProfile,
+    free_bytes: u64,
+    floor_bytes: u64,
+    slots: usize,
+    kv_tokens_cap: u64,
+    vision_reserve_bytes: u64,
+    cache: CacheRequest,
+    snapshot_bytes: u64,
+    wq_budget_bytes: u64,
+    draft_base_bytes: u64,
+    draft_per_slot_bytes: u64,
+) -> Result<MemoryPlan, PlanError> {
+    let draft_bytes = draft_base_bytes
+        .checked_add(draft_per_slot_bytes.saturating_mul(slots as u64))
+        .ok_or(PlanError::Overflow("draft bytes"))?;
+    plan_memory_cached_with(
+        profile,
+        free_bytes,
+        floor_bytes,
+        slots,
+        kv_tokens_cap,
+        vision_reserve_bytes,
+        cache,
+        snapshot_bytes,
+        wq_budget_bytes,
+        draft_bytes,
+        CacheSizing::Legacy,
+    )
+}
+
+/// [`plan_memory_cached_windowed`] with a speculative draft priced in before the KV pool is sized (the DFlash2
+/// family's combined plan: draft weights + scratch, the windowed cache rule, the chunk-scaled activation reserve and
+/// the floor policy all in one plan). See [`plan_memory_cached_with_draft`] for `draft_base_bytes` and
+/// `draft_per_slot_bytes`; see [`plan_memory_cached_windowed`] for the cache rule.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_memory_cached_windowed_with_draft(
+    profile: &MemoryProfile,
+    free_bytes: u64,
+    floor_bytes: u64,
+    slots: usize,
+    kv_tokens_cap: u64,
+    vision_reserve_bytes: u64,
+    cache: CacheRequest,
+    snapshot_bytes: u64,
+    wq_budget_bytes: u64,
+    draft_base_bytes: u64,
+    draft_per_slot_bytes: u64,
+    window_tokens: u64,
+) -> Result<MemoryPlan, PlanError> {
+    let draft_bytes = draft_base_bytes
+        .checked_add(draft_per_slot_bytes.saturating_mul(slots as u64))
+        .ok_or(PlanError::Overflow("draft bytes"))?;
+    plan_memory_cached_with(
+        profile,
+        free_bytes,
+        floor_bytes,
+        slots,
+        kv_tokens_cap,
+        vision_reserve_bytes,
+        cache,
+        snapshot_bytes,
+        wq_budget_bytes,
+        draft_bytes,
+        CacheSizing::Window { window_tokens },
+    )
+}
+
+/// [`plan_memory_cached_windowed`] for the families that size the prefix cache from the window (Qwen3.8, GLM and Flash-Next;
 /// `docs/PREFIX_CACHE_SIZING.md` section 5): the cache gets the pages of one full `window_tokens` entry before anything else
 /// ([`gb_sched::prefix::CacheBudget::fit_pages_first`]) for BOTH an explicit size and `Auto`, and the plan reports the reach it ended with.
 ///
@@ -287,6 +369,7 @@ pub fn plan_memory_cached_windowed(
         cache,
         snapshot_bytes,
         wq_budget_bytes,
+        0,
         CacheSizing::Window { window_tokens },
     )
 }
@@ -294,8 +377,12 @@ pub fn plan_memory_cached_windowed(
 /// The plan of a POOL-PAGE prefix cache (`--prefix-cache pool`): the cache keeps its entries in the KV pool's idle pages and has no pages of its own
 /// (`cache.page_blocks == 0`), so the pool is exactly the plan without a cache and holds the admitted window once, not twice. Its snapshot slots
 /// come first: [`gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS`] out of the allocatable bytes before the pool is sized (a cache, however tight the box),
-/// then more from what the pool left, under the cache margin, up to the window rule's wanted count. One sequence slot only (refused by name
-/// otherwise): the engine's room step (`gb_engine::Engine` `pool_room`) evicts idle entries for the pages a live sequence may still claim.
+/// then, with `buy_from_spare`, more from what the pool left, under the cache margin, up to the window rule's wanted count. Without it the slots
+/// are exactly the minimum: at the one sequence slot the mode serves, the entries share the pool's pages with the live sequence, so a third
+/// entry adds a distinct prefix, not reach, and the spare it is bought from may be memory the boot allocates elsewhere (a plan that does not
+/// charge everything it allocates: the RED-SNOW two-node rank at 1,048,576 tokens bought 6 more, 0.41 GiB, out of a spare its unmodelled
+/// buffers used). The KV pool is the same either way. One sequence slot only (refused by name otherwise): the engine's room step
+/// (`gb_engine::Engine` `pool_room`) evicts idle entries for the pages a live sequence may still claim.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_memory_pool_cached(
     profile: &MemoryProfile,
@@ -307,6 +394,7 @@ pub fn plan_memory_pool_cached(
     snapshot_bytes: u64,
     wq_budget_bytes: u64,
     window_tokens: u64,
+    buy_from_spare: bool,
 ) -> Result<MemoryPlan, PlanError> {
     if slots != 1 {
         return Err(PlanError::PoolCacheNeedsOneSlot { slots });
@@ -329,9 +417,10 @@ pub fn plan_memory_pool_cached(
         CacheRequest::Off,
         0,
         wq_budget_bytes,
+        0,
         CacheSizing::Legacy,
     )?;
-    let wanted = WindowRule { window_tokens, live_slots: slots }.wanted_slots();
+    let wanted = if buy_from_spare { WindowRule { window_tokens, live_slots: slots }.wanted_slots() } else { base };
     let room = plan.spare_bytes.saturating_sub(cache_margin_bytes(plan.spare_bytes));
     let more = (room / snapshot_bytes).min(wanted.saturating_sub(base));
     plan.cache =
@@ -361,6 +450,7 @@ fn plan_memory_cached_with(
     cache: CacheRequest,
     snapshot_bytes: u64,
     wq_budget_bytes: u64,
+    draft_bytes: u64,
     sizing: CacheSizing,
 ) -> Result<MemoryPlan, PlanError> {
     if slots == 0 {
@@ -406,7 +496,8 @@ fn plan_memory_cached_with(
         .saturating_sub(vision_reserve_bytes)
         .saturating_sub(floor_bytes)
         .saturating_sub(fixed.map_or(0, |b| b.bytes()))
-        .saturating_sub(wq_budget_bytes);
+        .saturating_sub(wq_budget_bytes)
+        .saturating_sub(draft_bytes);
     let needed = slot_state.checked_add(block_bytes).ok_or(PlanError::Overflow("slot state plus one page"))?;
     if allocatable < needed {
         return Err(PlanError::NoRoom { allocatable, needed });
@@ -447,6 +538,7 @@ fn plan_memory_cached_with(
         cache,
         spare_bytes,
         wq_budget_bytes,
+        draft_bytes,
     })
 }
 
@@ -488,7 +580,7 @@ mod tests {
         let snap = 70 << 20;
         let free = 30 * GIB;
         let window = 262_144;
-        let pool = plan_memory_pool_cached(&p, free, 4 * GIB, 1, window, 0, snap, 0, window).unwrap();
+        let pool = plan_memory_pool_cached(&p, free, 4 * GIB, 1, window, 0, snap, 0, window, true).unwrap();
         assert_eq!(pool.cache.page_blocks, 0, "no second window of pages");
         assert!(pool.cache.enabled() && pool.cache.snapshot_slots as u64 >= gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS);
         // the pool is the plan without a cache, computed from what the minimum snapshot slots left
@@ -503,17 +595,35 @@ mod tests {
         assert!(own.cache.page_blocks >= window as usize / BLOCK_TOKENS, "{}", own.cache.page_blocks);
         assert!(own.planned_bytes(1) >= pool.planned_bytes(1) + (window / BLOCK_TOKENS as u64) * pool.block_bytes);
         // the snapshot slots grow with spare memory up to the rule's wanted count, never past it, and never take pages
-        let roomy = plan_memory_pool_cached(&p, 60 * GIB, 4 * GIB, 1, window, 0, snap, 0, window).unwrap();
+        let roomy = plan_memory_pool_cached(&p, 60 * GIB, 4 * GIB, 1, window, 0, snap, 0, window, true).unwrap();
         let wanted = WindowRule { window_tokens: window, live_slots: 1 }.wanted_slots();
         assert_eq!(roomy.cache.snapshot_slots as u64, wanted);
         assert_eq!(roomy.cache.page_blocks, 0);
         assert!(roomy.planned_bytes(1) + 4 * GIB <= 60 * GIB);
+        // not buying from the spare (`REXL3_GLM_PLAN_PRICE_UNMODELLED=1`): exactly the minimum slots on any box, the same KV pool, and the
+        // spare is the uncached plan's
+        for f in [free, 60 * GIB] {
+            let bought = plan_memory_pool_cached(&p, f, 4 * GIB, 1, window, 0, snap, 0, window, true).unwrap();
+            let base = plan_memory_pool_cached(&p, f, 4 * GIB, 1, window, 0, snap, 0, window, false).unwrap();
+            let off = plan_memory_cached(&p, f - 2 * snap, 4 * GIB, 1, window, 0, CacheRequest::Off, 0, 0).unwrap();
+            assert_eq!(base.cache.snapshot_slots as u64, gb_sched::prefix::MIN_CACHE_SNAPSHOT_SLOTS);
+            assert_eq!((base.kv_blocks, base.kv_tokens), (bought.kv_blocks, bought.kv_tokens), "the KV pool does not move");
+            assert_eq!(base.spare_bytes, off.spare_bytes);
+            assert_eq!(
+                base.spare_bytes - bought.spare_bytes,
+                (bought.cache.snapshot_slots - base.cache.snapshot_slots) as u64 * snap
+            );
+        }
+        assert_eq!(
+            plan_memory_pool_cached(&p, free, 4 * GIB, 2, window, 0, snap, 0, window, false).unwrap_err(),
+            PlanError::PoolCacheNeedsOneSlot { slots: 2 }
+        );
         // one slot only, refused by name
-        let e = plan_memory_pool_cached(&p, free, 4 * GIB, 2, window, 0, snap, 0, window).unwrap_err();
+        let e = plan_memory_pool_cached(&p, free, 4 * GIB, 2, window, 0, snap, 0, window, true).unwrap_err();
         assert_eq!(e, PlanError::PoolCacheNeedsOneSlot { slots: 2 });
         assert!(e.to_string().contains("--prefix-cache pool") && e.to_string().contains("--slots 1"), "{e}");
         // a box that cannot hold the reserves, the minimum snapshot slots and a page is refused, not given a cache of nothing
-        assert!(plan_memory_pool_cached(&p, 6 * GIB, 4 * GIB, 1, window, 0, snap, 0, window).is_err());
+        assert!(plan_memory_pool_cached(&p, 6 * GIB, 4 * GIB, 1, window, 0, snap, 0, window, true).is_err());
     }
 
     #[test]
@@ -604,6 +714,8 @@ mod tests {
         // the engine reserve (5 GiB blanket) and the vision reserve are recorded, and with the floor and the slot state they
         // leave exactly the pool the page count came from
         assert_eq!((p.engine_reserve_bytes, p.vision_reserve_bytes), (5 * GIB, vision));
+        assert_eq!(p.draft_bytes, 0, "no draft: nothing is carved out");
+        assert_eq!(p.wq_budget_bytes, 0);
         let allocatable = free - 5 * GIB - vision - floor;
         let slot_state = 8 * profile.state_bytes_per_slot();
         assert_eq!(p.kv_blocks as u64, (allocatable - slot_state) / p.block_bytes);
@@ -1149,7 +1261,7 @@ mod tests {
                                 "{at}: {} + {floor} > {free}",
                                 p.planned_bytes(slots)
                             );
-                            // the sum is the six terms and no other
+                            // the sum is the seven terms and no other
                             assert_eq!(
                                 p.planned_bytes(slots),
                                 p.engine_reserve_bytes
@@ -1157,7 +1269,8 @@ mod tests {
                                     + slots as u64 * p.state_bytes_per_slot
                                     + p.kv_blocks as u64 * p.block_bytes
                                     + p.cache.bytes()
-                                    + p.wq_budget_bytes,
+                                    + p.wq_budget_bytes
+                                    + p.draft_bytes,
                                 "{at}"
                             );
                             plans += 1;
@@ -1710,10 +1823,10 @@ mod nemotron_tests {
         // workspace 268,435,456, decode MoE scratch 106,724,528, large-row MoE prefill scratch 1,678,665,744, attention partials
         // 51,118,600, EXL3 workspace 33,554,432 (P1; under P2 67,108,864: the tensor-core linear's fp16 input of the 4,096-row slice,
         // `contract::workspace_bytes`), window records 160,563,200, and under P2 the tensor-core MoE block's scratch 792,403,984
-        // (`MmaScratch::bytes(4096)`): P1 5,534,967,496, P2 6,360,925,912 (+ 792,403,984 + 33,554,432)
+        // (`MmaScratch::bytes(4096)`), plus the fixed 64-row chosen-id tile (256 bytes): P1 5,534,967,752, P2 6,360,926,168
         let reserve = match crate::families::nemotron_h_omni::contract::current() {
-            crate::families::nemotron_h_omni::contract::PrefillContract::P1 => 5_534_967_496,
-            crate::families::nemotron_h_omni::contract::PrefillContract::P2 => 6_360_925_912,
+            crate::families::nemotron_h_omni::contract::PrefillContract::P1 => 5_534_967_752,
+            crate::families::nemotron_h_omni::contract::PrefillContract::P2 => 6_360_926_168,
         };
         assert_eq!(profile.scratch_bytes() + profile.window_record_bytes(), reserve, "the modelled reserve, by part as above");
         assert!(reserve > 5 * GIB, "above the blanket at 4,096 rows");
@@ -1828,7 +1941,7 @@ mod nemotron_tests {
                                 "{at}: {} + {floor} > {free}",
                                 p.planned_bytes(slots)
                             );
-                            // the sum is the six terms and no other
+                            // the sum is the seven terms and no other
                             assert_eq!(
                                 p.planned_bytes(slots),
                                 p.engine_reserve_bytes
@@ -1836,7 +1949,8 @@ mod nemotron_tests {
                                     + slots as u64 * p.state_bytes_per_slot
                                     + p.kv_blocks as u64 * p.block_bytes
                                     + p.cache.bytes()
-                                    + p.wq_budget_bytes,
+                                    + p.wq_budget_bytes
+                                    + p.draft_bytes,
                                 "{at}"
                             );
                             plans += 1;

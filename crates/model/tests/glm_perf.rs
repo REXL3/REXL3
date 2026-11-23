@@ -294,6 +294,48 @@ fn perf_digest() {
     }
 }
 
+/// A graph budget (`GlmModel::set_graph_budget`, the one-slot limits of the pool-page cache) changes which shapes replay and which are captured
+/// again, never a bit: the script under a budget far below its shapes (3 window graphs, 2 draft graphs: every pass evicts) gives the digests of
+/// graphs off. Prints the most one new window / draft graph took (the figure the rank planner charges a graph at; run with
+/// `REXL3_GLM_DRAFT_GRAPHS=1` to measure the draft graphs too: one node runs its draft calls eagerly by default).
+#[test]
+#[ignore]
+fn perf_digest_under_a_tight_graph_budget() {
+    use gb_model::families::glm::model::GraphBudget;
+    let Some(oracle) = oracle_dir() else { return };
+    let Some(mut m) = model() else { return };
+    graphs(&mut m, false);
+    let off = script(&mut m, &oracle, "graphs_off");
+    graphs(&mut m, true);
+    perf_graphs::clear(&mut m);
+    m.set_graph_budget(GraphBudget { windows: 3, drafts: 2 });
+    let before = m.graph_stats();
+    let avail0 = mem_available();
+    let on = script(&mut m, &oracle, "graphs_budget");
+    let st = m.graph_stats();
+    println!(
+        "GRAPH_BUDGET windows 3 drafts 2: captures {} replays {} evictions {} draft captures {} draft replays {}; max window graph {:.2} MiB, max draft graph {:.2} MiB; MemAvailable {:.2} -> {:.2} GiB",
+        st.captures - before.captures,
+        st.replays - before.replays,
+        st.evictions - before.evictions,
+        st.draft_captures - before.draft_captures,
+        st.draft_replays - before.draft_replays,
+        st.max_window_graph_bytes as f64 / 1048576.0,
+        st.max_draft_graph_bytes as f64 / 1048576.0,
+        gib(avail0),
+        gib(mem_available())
+    );
+    assert_eq!(st.capture_failures, 0, "a capture failed: {:?}", st.last_failure);
+    assert!(st.evictions > before.evictions, "the budget evicted nothing: the test does not exercise it");
+    assert!(st.replays > before.replays, "graphs are on but nothing was replayed");
+    assert!(st.max_window_graph_bytes > 0, "a budgeted cache measures its graphs");
+    for (a, b) in off.iter().zip(&on) {
+        let (a, b) = (a.splitn(3, ' ').nth(2).unwrap(), b.splitn(3, ' ').nth(2).unwrap());
+        assert_eq!(a, b, "graphs under a budget and graphs off differ");
+    }
+    m.set_graph_budget(GraphBudget::DEFAULT);
+}
+
 /// The graph path's invariants, each broken on purpose (`GraphMutant`): a replay that leaves the window's rows stale, one that leaves the page table
 /// stale, a window that takes the graph of another row count, must change the digest (the test fails if one does not); a capture with a host
 /// synchronisation inside must be refused and fall back to eager launches with the bits unchanged, without a fatal error.

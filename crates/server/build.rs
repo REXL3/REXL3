@@ -128,13 +128,67 @@ fn collect_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every tokenizer directory and compilation input, so edits and newly added nested sources re-run this script.
+pub fn tokenizer_inputs(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        out.push(dir.to_path_buf());
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|x| x.path())).collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                walk(&path, out);
+            } else if matches!(path.extension().and_then(|s| s.to_str()), Some("c" | "S" | "h" | "inc" | "hpp" | "cc")) {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
+/// The newest header/include visible to any tokenizer C or assembly object.
+pub fn tokenizer_aux_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    tokenizer_inputs(root)
+        .into_iter()
+        .filter(|p| p.is_file() && matches!(p.extension().and_then(|s| s.to_str()), Some("h" | "inc")))
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+}
+
+/// The compiler identity is separate from source mtimes: changing compiler, ISA, or feature flags rebuilds everything.
+pub fn tokenizer_build_stamp(compiler: &str, compiler_version: &str, isa: &str, feature_flags: &[String]) -> String {
+    format!("compiler={compiler}\ncompiler_version={compiler_version}\nisa={isa}\nfeature_flags={}\n", feature_flags.join(" "))
+}
+
+/// Reuse an object only when its own source and every tokenizer header/include are older and identity is unchanged.
+pub fn tokenizer_object_is_fresh(
+    source: &Path,
+    object: &Path,
+    aux_mtime: Option<std::time::SystemTime>,
+    identity_changed: bool,
+) -> bool {
+    !identity_changed
+        && match (
+            std::fs::metadata(object).and_then(|m| m.modified()).ok(),
+            std::fs::metadata(source).and_then(|m| m.modified()).ok(),
+        ) {
+            (Some(om), Some(sm)) => om >= sm && aux_mtime.is_none_or(|am| om >= am),
+            _ => false,
+        }
+}
+
 fn build_toks() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let toks_root = manifest_dir.join("csrc/toks");
     if !toks_root.join("include/toks.h").exists() {
         return;
     }
-    println!("cargo:rerun-if-changed={}", toks_root.join("include/toks.h").display());
+    for path in tokenizer_inputs(&toks_root) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let isa = match target_arch.as_str() {
@@ -165,6 +219,12 @@ fn build_toks() {
     let obj_dir = out_dir.join("toks_obj");
     std::fs::create_dir_all(&obj_dir).unwrap();
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let cc_version =
+        Command::new(&cc).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let stamp_path = out_dir.join("rexl3-toks-build.stamp");
+    let stamp = tokenizer_build_stamp(&cc, &cc_version, isa, &have_flags);
+    let identity_changed = std::fs::read_to_string(&stamp_path).ok().as_deref() != Some(stamp.as_str());
+    let aux_mtime = tokenizer_aux_mtime(&toks_root);
 
     let mut jobs: Vec<(PathBuf, PathBuf, Vec<String>)> = Vec::new();
     for src in &c_srcs {
@@ -223,21 +283,12 @@ fn build_toks() {
         jobs.push((src.clone(), obj, args));
     }
 
-    let need_compile: Vec<(PathBuf, PathBuf, Vec<String>)> = jobs
-        .iter()
-        .filter(|(src, obj, _)| {
-            let Ok(om) = std::fs::metadata(obj).and_then(|m| m.modified()) else {
-                return true;
-            };
-            let Ok(sm) = std::fs::metadata(src).and_then(|m| m.modified()) else {
-                return true;
-            };
-            sm > om
-        })
-        .cloned()
-        .collect();
+    let need_compile: Vec<(PathBuf, PathBuf, Vec<String>)> =
+        jobs.iter().filter(|(src, obj, _)| !tokenizer_object_is_fresh(src, obj, aux_mtime, identity_changed)).cloned().collect();
 
     if !need_compile.is_empty() {
+        // Invalidate before the first object: an interrupted compile must retry with the old stamp absent.
+        let _ = std::fs::remove_file(&stamp_path);
         let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(need_compile.len());
         let idx = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {
@@ -270,6 +321,9 @@ fn build_toks() {
         }
         let status = Command::new("ar").args(&ar_args).status().expect("failed to invoke ar for libtoks.a");
         assert!(status.success(), "ar rcs libtoks.a failed");
+    }
+    if !need_compile.is_empty() {
+        std::fs::write(&stamp_path, &stamp).expect("write tokenizer build stamp");
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());

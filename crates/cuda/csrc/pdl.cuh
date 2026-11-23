@@ -18,6 +18,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "cuda_caps.cuh"
+
 namespace gbp_pdl {
 
 enum : int { kExl3 = 1, kMhc = 2, kMoe = 4, kAll = 7 };
@@ -32,9 +34,20 @@ inline int mask() {
 }
 inline bool on(int family) { return (mask() & family) != 0; }
 
-__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
-__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+__device__ __forceinline__ void pdl_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void pdl_trigger() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+}
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
+
+// PDL instructions and the launch attribute require Hopper, in both the running device and the compiled device code.
+inline bool device_supports_pdl() { return gbx_cuda::device_supports_pdl(); }
 
 // A launch with (pdl) or without the programmatic-stream-serialization attribute.
 template <typename... KArgs, typename... Args>
@@ -48,7 +61,7 @@ int launch_pdl(bool pdl, void (*kernel)(KArgs...), dim3 grid, dim3 block, size_t
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr;
-    cfg.numAttrs = pdl ? 1 : 0;
+    cfg.numAttrs = pdl && device_supports_pdl() ? 1 : 0;
     const cudaError_t e = cudaLaunchKernelEx(&cfg, kernel, static_cast<KArgs>(args)...);
     return e != cudaSuccess ? (int)e : (int)cudaGetLastError();
 }

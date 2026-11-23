@@ -270,6 +270,49 @@ mod load_pipeline {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The zero fill of a large region lands before the pipelined copies into it. `allocate` fills each region on the legacy default
+    /// stream (an asynchronous `cudaMemset`) and the loader's workers copy on non-blocking streams, which do not wait for that stream:
+    /// unordered, the fill of a large region is still running when a small copy into its end has landed, and it wipes the copy. One
+    /// region of `REXL3_LING_FILL_GIB` GiB (default 4), one 1 MiB item at its end read from a warm file (so the copy is queued at
+    /// once), loaded through the pipeline five times; the item's bytes must be on the device every time.
+    #[test]
+    fn the_zero_fill_of_a_region_lands_before_the_pipelined_copies_into_it() {
+        if !gpu() {
+            return;
+        }
+        let gib: u64 = std::env::var("REXL3_LING_FILL_GIB").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let (region_bytes, item_bytes) = (gib << 30, 1u64 << 20);
+        let dir = tmp("fill_order");
+        let files = vec!["shard-1.safetensors".to_string()];
+        let lead = 4096usize;
+        let mut src = Rng(0xF111).bytes(lead + item_bytes as usize);
+        // no zero byte, so a byte the fill overwrote is told apart from a copied one
+        src.iter_mut().for_each(|b| *b |= 1);
+        std::fs::write(dir.join(&files[0]), &src).unwrap();
+        let plan = LoadPlan {
+            files,
+            regions: vec![region(0, RegionKind::Global, region_bytes)],
+            items: vec![item("tail", 0, lead as u64, item_bytes, Xform::None, 0, region_bytes - item_bytes)],
+            skipped: Default::default(),
+            markers: Vec::new(),
+        };
+        plan.validate().expect("the hand-made plan is consistent");
+        let want = &src[lead..];
+        for round in 0..5 {
+            let (r, _) =
+                load_plan_with(&dir, &plan, LoadMode::Pipeline, &options(16, 2, 8 << 10, DirectMode::Never), &mut |_, _| {})
+                    .unwrap();
+            let mut got = vec![0u8; item_bytes as usize];
+            r.get(0).expect("region").download_range((region_bytes - item_bytes) as usize, &mut got).unwrap();
+            let lost = got.iter().zip(want).filter(|(g, w)| g != w).count();
+            assert_eq!(
+                lost, 0,
+                "round {round}: {lost} of {item_bytes} bytes of the copy into the end of a {gib} GiB region were lost"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // ------------------------------------------------------------------------------------------------------------ the real pack
 
     mod real {

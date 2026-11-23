@@ -1,7 +1,7 @@
 # REXL3 native corresponding-source build
 
-- Engine source commit: `75031112ba1279b6da97d5604be5160648cc9f2c`
-- Git tree: `519678470f283dd5d39281d7d90df8bbc31999e8`
+- Engine source commit: `0c8bc43cf37318210544cd54da80b5b0bb6ccd76`
+- Git tree: `5776f1387f040f3c0762c42dc33214512e1194db`
 - Rust/Cargo toolchain: `1.89.0` (from `rust-toolchain.toml`).
 
 This is common REXL3 engine source, including the DSV4.1 implementation, under
@@ -124,7 +124,7 @@ rustup toolchain install 1.89.0 --profile minimal
 cargo +1.89.0 --version
 rustc +1.89.0 --version
 export REXL3_CUDA_ARCH=sm_121
-export REXL3_COMMIT=75031112ba1279b6da97d5604be5160648cc9f2c
+export REXL3_COMMIT=0c8bc43cf37318210544cd54da80b5b0bb6ccd76
 # A new target directory avoids cached CPU stubs and stale toolkit discovery.
 export CARGO_TARGET_DIR="$PWD/target-native"
 test ! -e "$CARGO_TARGET_DIR"
@@ -149,9 +149,9 @@ From a repository containing this exact commit and the matching exporter:
 
 ```sh
 python3 -B tools/build_corresponding_source.py --repo . \
-  --commit 75031112ba1279b6da97d5604be5160648cc9f2c --output corresponding-source.tar.gz
+  --commit 0c8bc43cf37318210544cd54da80b5b0bb6ccd76 --output corresponding-source.tar.gz
 python3 -B tools/build_corresponding_source.py --repo . \
-  --commit 75031112ba1279b6da97d5604be5160648cc9f2c --output corresponding-source.tar.gz --check
+  --commit 0c8bc43cf37318210544cd54da80b5b0bb6ccd76 --output corresponding-source.tar.gz --check
 ```
 
 The exporter reads Git objects, not the working tree. `--check` regenerates the

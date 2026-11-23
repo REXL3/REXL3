@@ -80,7 +80,7 @@ impl SnapPool {
     /// `forward::StateHashes::{s, conv}`, so a snapshot can be compared with a slot's state.
     pub fn gdn_hashes(&self, s: u32) -> Result<(u64, u64), ModelError> {
         let fnv = |h: u64, bytes: &[u8]| bytes.iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
-        let (sb, cb) = (gb_cuda::gdn::S_SLOT_ELEMS * 4, gb_cuda::gdn::CONV_SLOT_ELEMS * 2);
+        let (sb, cb) = (self.gdn.shape.s_slot_elems() * 4, self.gdn.shape.conv_slot_elems() * 2);
         let (mut hs, mut hc) = (0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64);
         let mut buf = vec![0u8; sb];
         for (si, ci) in self.gdn.s.iter().zip(self.gdn.conv.iter()) {

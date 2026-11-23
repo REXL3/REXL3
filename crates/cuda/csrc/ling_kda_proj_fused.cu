@@ -124,7 +124,7 @@ __device__ __forceinline__ void finish(float (&v)[4], int lane, const half* svh,
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         v[j] = v[j] * HAD_SCALE * __half2float(__ldg(svh + col + j));
-        if (bias) v[j] += __half2float(__ldg(bias + col + j));
+        if (bias) v[j] += __half2float(bias[col + j]);
     }
 }
 

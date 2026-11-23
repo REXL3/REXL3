@@ -919,14 +919,46 @@ fn small_linear_pair_bit_exact() {
         for rows in 1..=8 {
             check(&mut rng, &st, rows, 2560, n0, n1); // qfn specialization
         }
-        for rows in [9usize, 17, 64] {
-            check(&mut rng, &st, rows, 2560, n0, n1); // generic pair path
+        for rows in [9usize, 17, 63, 64, 513, 4096] {
+            check(&mut rng, &st, rows, 2560, n0, n1); // many-row pair path
         }
         for rows in [1usize, 8, 9, 64] {
-            check(&mut rng, &st, rows, 5120, n0, n1); // generic pair path, k != 2560
+            check(&mut rng, &st, rows, 5120, n0, n1); // many-row pair path, k != 2560
         }
     }
     st.sync().unwrap();
+}
+
+/// Full prefill-chunk timing for every MoE router/shared-gate pair and GDN a/b pair in one 84-layer pass.
+/// Run before and after changing the pair launcher to compare identical 48 + 36 launch sequences.
+#[test]
+#[ignore]
+fn bench_small_linear_pair_prefill() {
+    gpu!();
+    let st = Stream::new().unwrap();
+    let mut rng = Rng(13);
+    let (rows, k) = (4096usize, 2560usize);
+    for &(layers, n0, n1) in &[(48usize, 512usize, 1usize), (36, 48, 48)] {
+        let x = rand_bf16(&mut rng, rows * k);
+        let w0 = f16_bits(&rng.vec(n0 * k, -0.2, 0.2));
+        let w1 = f16_bits(&rng.vec(n1 * k, -0.2, 0.2));
+        let (dx, dw0, dw1) = (up(&x), up(&w0), up(&w1));
+        let (dy0, dy1) = (zeros(rows * n0 * 2), zeros(rows * n1 * 2));
+        let run = || unsafe {
+            for _ in 0..layers {
+                glue::small_linear_pair_f16w(cp(&dx), cp(&dw0), cp(&dw1), mp(&dy0), mp(&dy1), rows, k, n0, n1, &st).unwrap();
+            }
+        };
+        run();
+        st.sync().unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            run();
+        }
+        st.sync().unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1e3 / 3.0;
+        eprintln!("BENCH pair prefill layers {layers} rows {rows} k {k} n ({n0},{n1}): {ms:.3} ms");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ top-k

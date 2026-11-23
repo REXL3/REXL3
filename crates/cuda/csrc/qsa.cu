@@ -90,13 +90,13 @@ __device__ __forceinline__ float inv_freq(float theta, int i) {
 }
 
 // rope one 128-dim vector held one element per thread (d = threadIdx.x) through `sh`; result rounded to f16
-__device__ __forceinline__ float rope_elem(float x, int d, int pos, float theta, float* sh) {
+__device__ __forceinline__ float rope_elem(float x, int d, int pos, const float* inv, float* sh) {
     sh[d] = x;
     __syncthreads();
     float o = x;
     if (d < RD) {
         const int i = d % (RD / 2);
-        const float ang = (float)pos * inv_freq(theta, i);
+        const float ang = (float)pos * inv[i];
         const float c = cosf(ang), s = sinf(ang);
         o = d < RD / 2 ? x * c - sh[d + RD / 2] * s : x * c + sh[d - RD / 2] * s;
     }
@@ -113,66 +113,81 @@ __device__ __forceinline__ float block_sum128(float v, float* red) {
     return t;
 }
 
-// grid rows, block 160: warps 0..3 the query heads, warp 4 the raw key
+constexpr int ROWS_PER_CTA = 8;
+
+// grid ceil(rows / ROWS_PER_CTA), block 160: warps 0..3 the query heads, warp 4 the raw key. All rows in a CTA share
+// the 32 inverse frequencies, avoiding a slow FP64 polynomial for every query head on Ada.
 __global__ void __launch_bounds__(160) stage_k(const uint16_t* __restrict__ qk, const float* __restrict__ qw,
                                                const int* __restrict__ positions, __half* __restrict__ q,
-                                               __half* __restrict__ kraw, float eps, float theta) {
-    const int r = blockIdx.x, w = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const uint16_t* src = qk + (size_t)r * QK + w * DK;
-    if (w == NH) {
-        for (int d = lane; d < DK; d += 32) kraw[(size_t)r * DK + d] = __float2half_rn(bf(src[d]));
-        return;
+                                               __half* __restrict__ kraw, int rows, float eps, float theta) {
+    __shared__ float s_inv[RD / 2];
+    const int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (threadIdx.x < RD / 2) s_inv[lane] = inv_freq(theta, lane);
+    __syncthreads();
+    const int r0 = blockIdx.x * ROWS_PER_CTA, rn = min(ROWS_PER_CTA, rows - r0);
+    for (int ri = 0; ri < rn; ++ri) {
+        const int r = r0 + ri;
+        const uint16_t* src = qk + (size_t)r * QK + w * DK;
+        if (w == NH) {
+            for (int d = lane; d < DK; d += 32) kraw[(size_t)r * DK + d] = __float2half_rn(bf(src[d]));
+            continue;
+        }
+        float x[4];
+        float ss = 0.f;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            x[j] = bf(src[lane + 32 * j]);
+            ss = ss + x[j] * x[j];
+        }
+        ss = warp_sum(ss);
+        const float inv = 1.0f / sqrtf(ss / (float)DK + eps);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) x[j] = rh((x[j] * inv) * qw[lane + 32 * j]);
+        // rope pair (lane, lane + 32) sits in this lane as x[0], x[1]
+        const float ang = (float)positions[r] * s_inv[lane];
+        const float c = cosf(ang), s = sinf(ang);
+        const float a = x[0], b = x[1];
+        x[0] = rh(a * c - b * s);
+        x[1] = rh(b * c + a * s);
+        __half* dst = q + ((size_t)r * NH + w) * DK;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) dst[lane + 32 * j] = __float2half_rn(x[j]);
     }
-    float x[4];
-    float ss = 0.f;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        x[j] = bf(src[lane + 32 * j]);
-        ss = ss + x[j] * x[j];
-    }
-    ss = warp_sum(ss);
-    const float inv = 1.0f / sqrtf(ss / (float)DK + eps);
-#pragma unroll
-    for (int j = 0; j < 4; ++j) x[j] = rh((x[j] * inv) * qw[lane + 32 * j]);
-    // rope pair (lane, lane + 32) sits in this lane as x[0], x[1]
-    const float ang = (float)positions[r] * inv_freq(theta, lane);
-    const float c = cosf(ang), s = sinf(ang);
-    const float a = x[0], b = x[1];
-    x[0] = rh(a * c - b * s);
-    x[1] = rh(b * c + a * s);
-    __half* dst = q + ((size_t)r * NH + w) * DK;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) dst[lane + 32 * j] = __float2half_rn(x[j]);
 }
 
-// grid rows, block 128 (one thread per dim)
+// grid ceil(rows / ROWS_PER_CTA), block 128 (one thread per dim). Inverse frequencies are shared by all pooled rows.
 __global__ void __launch_bounds__(DK) pool_k(const __half* __restrict__ kraw, const __half* __restrict__ ring,
                                              const float* __restrict__ kw, const int* __restrict__ positions,
                                              const int* __restrict__ seq_start, const int* __restrict__ seq_slot,
                                              int n_seq, const int* __restrict__ table, int max_blocks,
-                                             __half* __restrict__ pool, int ring_len, float eps, float theta) {
-    __shared__ float red[4], sh[DK];
-    const int r = blockIdx.x, d = threadIdx.x;
-    const int p = positions[r];
-    if (p % CR != CR - 1) return;
-    const int sq = seq_of(seq_start, n_seq, r);
-    const int p0 = positions[seq_start[sq]], slot = seq_slot[sq];
-    float sum = 0.f;
+                                             __half* __restrict__ pool, int rows, int ring_len, float eps, float theta) {
+    __shared__ float red[4], sh[DK], s_inv[RD / 2];
+    const int d = threadIdx.x;
+    if (d < RD / 2) s_inv[d] = inv_freq(theta, d);
+    __syncthreads();
+    const int r0 = blockIdx.x * ROWS_PER_CTA, rn = min(ROWS_PER_CTA, rows - r0);
+    for (int ri = 0; ri < rn; ++ri) {
+        const int r = r0 + ri, p = positions[r];
+        if (p % CR != CR - 1) continue;
+        const int sq = seq_of(seq_start, n_seq, r);
+        const int p0 = positions[seq_start[sq]], slot = seq_slot[sq];
+        float sum = 0.f;
 #pragma unroll
-    for (int t = 0; t < CR; ++t) {
-        const int q = p - (CR - 1) + t;
-        const float v = q >= p0 ? __half2float(kraw[(size_t)(r - (p - q)) * DK + d])
-                                : __half2float(ring[((size_t)slot * ring_len + q % ring_len) * DK + d]);
-        sum = sum + v;
+        for (int t = 0; t < CR; ++t) {
+            const int q = p - (CR - 1) + t;
+            const float v = q >= p0 ? __half2float(kraw[(size_t)(r - (p - q)) * DK + d])
+                                    : __half2float(ring[((size_t)slot * ring_len + q % ring_len) * DK + d]);
+            sum = sum + v;
+        }
+        const float m = rh(sum * 0.25f);
+        const float ss = block_sum128(m * m, red);
+        const float inv = 1.0f / sqrtf(ss / (float)DK + eps);
+        const float y = rh((m * inv) * kw[d]);
+        const int j = p / CR;
+        const float o = rope_elem(y, d, j * CR, s_inv, sh);
+        const int page = table[(size_t)slot * max_blocks + j / PB];
+        pool[((size_t)page * PB + j % PB) * DK + d] = __float2half_rn(o);
     }
-    const float m = rh(sum * 0.25f);
-    const float ss = block_sum128(m * m, red);
-    const float inv = 1.0f / sqrtf(ss / (float)DK + eps);
-    const float y = rh((m * inv) * kw[d]);
-    const int j = p / CR;
-    const float o = rope_elem(y, d, j * CR, theta, sh);
-    const int page = table[(size_t)slot * max_blocks + j / PB];
-    pool[((size_t)page * PB + j % PB) * DK + d] = __float2half_rn(o);
 }
 
 __global__ void __launch_bounds__(DK) ring_k(const __half* __restrict__ kraw, __half* __restrict__ ring,
@@ -367,26 +382,27 @@ __global__ void __launch_bounds__(32 * GRP) attend_k(const __nv_bfloat16* __rest
             qv[2 * e + 1] = f.y * (0.0625f * LOG2E);
         }
     }
+    // All 12 warps consume the same K/V token rows. Eight loader warps stage each row with two coalesced 512-byte
+    // warp transactions instead of every consumer repeating the same scattered global gathers.
+    __shared__ uint4 s_k[TB][32], s_v[TB][32];
     float m = -INFINITY, l = 0.f, o[8];
 #pragma unroll
     for (int e = 0; e < 8; ++e) o[e] = 0.f;
     for (int i0 = a; i0 < b; i0 += TB) {
-        int tok[TB];
         float sc[TB];
-        uint4 ku[TB];
-        uint4 vu[TB];
-#pragma unroll
-        for (int k = 0; k < TB; ++k) {
-            const int i = i0 + k;
+        if (w < TB) {
+            const int i = i0 + w;
             const int ii = i < b ? i : a;
-            tok[k] = ii < CR * n ? CR * sl[ii / CR] + ii % CR : CR * nbq + (ii - CR * n);
-            const size_t off = (((size_t)tb[tok[k] / PAGE] * PAGE + tok[k] % PAGE) * NKV + kvh) * D;
-            ku[k] = reinterpret_cast<const uint4*>(kc + off)[lane];
-            vu[k] = reinterpret_cast<const uint4*>(vc + off)[lane];
+            const int tok = ii < CR * n ? CR * sl[ii / CR] + ii % CR : CR * nbq + (ii - CR * n);
+            const size_t off = (((size_t)tb[tok / PAGE] * PAGE + tok % PAGE) * NKV + kvh) * D;
+            s_k[w][lane] = reinterpret_cast<const uint4*>(kc + off)[lane];
+            s_v[w][lane] = reinterpret_cast<const uint4*>(vc + off)[lane];
         }
+        __syncthreads();
 #pragma unroll
         for (int k = 0; k < TB; ++k) {
-            const __nv_bfloat162* h2 = reinterpret_cast<const __nv_bfloat162*>(&ku[k]);
+            const uint4 ku = s_k[k][lane];
+            const __nv_bfloat162* h2 = reinterpret_cast<const __nv_bfloat162*>(&ku);
             float d = 0.f;
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
@@ -408,7 +424,8 @@ __global__ void __launch_bounds__(32 * GRP) attend_k(const __nv_bfloat16* __rest
             if (i0 + k >= b) continue;
             const float pk = exp2f(sc[k] - mx);
             l = l + pk;
-            const __nv_bfloat162* h2 = reinterpret_cast<const __nv_bfloat162*>(&vu[k]);
+            const uint4 vu = s_v[k][lane];
+            const __nv_bfloat162* h2 = reinterpret_cast<const __nv_bfloat162*>(&vu);
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
                 const float2 f = __bfloat1622float2(h2[e]);
@@ -417,6 +434,7 @@ __global__ void __launch_bounds__(32 * GRP) attend_k(const __nv_bfloat16* __rest
             }
         }
         m = mx;
+        __syncthreads();
     }
     const size_t pi = ((size_t)r * NQ + head) * parts + part;
     float* po = part_o + pi * D + lane * 8;
@@ -452,8 +470,9 @@ GB_EXPORT int gb_qsa_stage(const void* qk, const void* qw, const int* positions,
                            float theta, void* stream) {
     if (rows < 0) return (int)cudaErrorInvalidValue;
     if (rows == 0) return 0;
-    qsa::stage_k<<<rows, 160, 0, gb_stream(stream)>>>((const uint16_t*)qk, (const float*)qw, positions, (__half*)q,
-                                                      (__half*)kraw, eps, theta);
+    const int blocks = (rows + qsa::ROWS_PER_CTA - 1) / qsa::ROWS_PER_CTA;
+    qsa::stage_k<<<blocks, 160, 0, gb_stream(stream)>>>((const uint16_t*)qk, (const float*)qw, positions, (__half*)q,
+                                                        (__half*)kraw, rows, eps, theta);
     return GB_CHECK_LAUNCH();
 }
 
@@ -462,9 +481,10 @@ GB_EXPORT int gb_qsa_pool(const void* kraw, const void* ring, const void* kw, co
                           int ring_len, float eps, float theta, void* stream) {
     if (rows < 0 || n_seq <= 0 || ring_len < qsa::CR) return (int)cudaErrorInvalidValue;
     if (rows == 0) return 0;
-    qsa::pool_k<<<rows, qsa::DK, 0, gb_stream(stream)>>>((const __half*)kraw, (const __half*)ring, (const float*)kw,
-                                                         positions, seq_start, seq_slot, n_seq, table, max_blocks,
-                                                         (__half*)pool, ring_len, eps, theta);
+    const int blocks = (rows + qsa::ROWS_PER_CTA - 1) / qsa::ROWS_PER_CTA;
+    qsa::pool_k<<<blocks, qsa::DK, 0, gb_stream(stream)>>>((const __half*)kraw, (const __half*)ring, (const float*)kw,
+                                                           positions, seq_start, seq_slot, n_seq, table, max_blocks,
+                                                           (__half*)pool, rows, ring_len, eps, theta);
     return GB_CHECK_LAUNCH();
 }
 

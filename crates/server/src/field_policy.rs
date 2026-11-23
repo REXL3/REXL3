@@ -45,7 +45,6 @@ pub fn validate_fields(body: &Value) -> Result<(), ApiError> {
 pub fn validate_fields_with(body: &Value, reasoning: &[String]) -> Result<(), ApiError> {
     let obj = body.as_object().ok_or_else(|| bad("request", "request must be a JSON object"))?;
     for field in [
-        "parallel_tool_calls",
         "functions",
         "function_call",
         "echo",
@@ -98,7 +97,8 @@ pub fn validate_fields_with(body: &Value, reasoning: &[String]) -> Result<(), Ap
             e
         })?;
     }
-    for k in ["stream", "skip_special_tokens", "return_token_ids", "draft", "prefix_cache", "store"] {
+    // `parallel_tool_calls`: true (the default) returns every call the reply makes; false ends the reply at its first call
+    for k in ["stream", "skip_special_tokens", "return_token_ids", "draft", "prefix_cache", "store", "parallel_tool_calls"] {
         boolean(body, k, false)?;
     }
     for k in ["user", "service_tier"] {
@@ -130,6 +130,7 @@ pub fn validate_fields_with(body: &Value, reasoning: &[String]) -> Result<(), Ap
         "prefix_cache",
         "tools",
         "tool_choice",
+        "parallel_tool_calls",
         "chat_template_kwargs",
         "response_format",
         "logprobs",
@@ -162,7 +163,7 @@ pub fn validate_completions(body: &Value) -> Result<(), ApiError> {
 
 /// [`validate_completions`] refusing by name every top-level reasoning field in `reasoning` (there is no template to give it to).
 pub fn validate_completions_with(body: &Value, reasoning: &[String]) -> Result<(), ApiError> {
-    for field in ["messages", "tools", "tool_choice", "chat_template_kwargs"] {
+    for field in ["messages", "tools", "tool_choice", "parallel_tool_calls", "chat_template_kwargs"] {
         if non_null(body, field).is_some() {
             return Err(bad(field, format!("{field} is not supported by the plain completions endpoint")));
         }

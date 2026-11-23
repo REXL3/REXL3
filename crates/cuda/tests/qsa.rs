@@ -515,3 +515,64 @@ fn golden_qsa_hashes() {
     }
     std::fs::File::create(path).unwrap().write_all(out.as_bytes()).unwrap();
 }
+
+/// Isolated timings for the large-prefill and decode shapes used on an Ada 142-SM GPU. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn qsa_ada_142_sm_benchmark() {
+    use std::time::Instant;
+
+    fn bench(st: &Stream, label: &str, iters: usize, mut f: impl FnMut()) {
+        f();
+        st.sync().unwrap();
+        let start = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        st.sync().unwrap();
+        eprintln!("{label}: {:.3} ms", start.elapsed().as_secs_f64() * 1e3 / iters as f64);
+    }
+
+    let Some(st) = gpu() else { return };
+    let mut rig = Rig::new(&[45056], 7, 45056, &st);
+    for (rows, pos0, parts, iters) in [(4096, 2048, 1, 3), (4096, 40960, 1, 3), (8, 40960, 32, 20)] {
+        let row_ids: Vec<(usize, usize)> = (0..rows).map(|i| (0, pos0 + i)).collect();
+        let q = rig.queries(&row_ids, &st);
+        let qm = main_queries(rows, 99);
+        let nb_cap = (pos0 + rows) / CR;
+        let pos: Vec<i32> = (pos0..pos0 + rows).map(|p| p as i32).collect();
+        let slot = vec![0i32; rows];
+        let (pos, slot, qd) =
+            (DevBuf::from_slice(&pos).unwrap(), DevBuf::from_slice(&slot).unwrap(), DevBuf::from_slice(&q).unwrap());
+        let rr = qsa::Rows { slot: &slot, pos: &pos, rows };
+        let stage_qk: Vec<u16> = row_ids.iter().flat_map(|&(s, p)| rig.qk[s][p * QK..(p + 1) * QK].iter().copied()).collect();
+        let stage_qk = DevBuf::from_slice(&stage_qk).unwrap();
+        let (mut stage_q, mut kraw) = (DevBuf::zeroed(rows * N_HEADS * DK * 2).unwrap(), DevBuf::zeroed(rows * DK * 2).unwrap());
+        bench(&st, &format!("rows={rows} pos0={pos0} stage"), iters, || {
+            qsa::stage(&stage_qk, &rig.qw, &pos, &mut stage_q, &mut kraw, rows, EPS, THETA, &st).unwrap();
+        });
+        let (ss, sl) = (DevBuf::from_slice(&[0i32, rows as i32]).unwrap(), DevBuf::from_slice(&[0i32]).unwrap());
+        let seqs = qsa::Seqs { positions: &pos, seq_start: &ss, seq_slot: &sl, n_seq: 1, rows };
+        bench(&st, &format!("rows={rows} pos0={pos0} pool"), iters, || {
+            qsa::pool(&kraw, &rig.ring, &rig.kw, &seqs, &rig.table, &mut rig.pool, rig.pages, rig.slots, RING, EPS, THETA, &st)
+                .unwrap();
+        });
+        bench(&st, &format!("rows={rows} pos0={pos0} ring"), iters, || {
+            qsa::ring_store(&kraw, &mut rig.ring, &seqs, rig.slots, RING, &st).unwrap();
+        });
+        let mut sc = DevBuf::zeroed(rows * nb_cap * 4).unwrap();
+        bench(&st, &format!("rows={rows} pos0={pos0} scores"), iters, || {
+            qsa::scores(&qd, &rig.pool, rig.pages, &rig.table, &rr, &mut sc, nb_cap, &st).unwrap();
+        });
+        let (mut sel, mut sel_n) = (DevBuf::zeroed(rows * TOPK * 4).unwrap(), DevBuf::zeroed(rows * 4).unwrap());
+        bench(&st, &format!("rows={rows} pos0={pos0} topk"), iters, || {
+            qsa::topk(&sc, &rr, nb_cap, &mut sel, &mut sel_n, &st).unwrap();
+        });
+        let qmd = DevBuf::from_slice(&qm).unwrap();
+        let mut ws = DevBuf::zeroed(qsa::attend_workspace_bytes(rows, parts)).unwrap();
+        let mut out = DevBuf::zeroed(rows * N_Q_HEADS * HEAD_DIM * 2).unwrap();
+        bench(&st, &format!("rows={rows} pos0={pos0} attend+merge parts={parts}"), iters, || {
+            qsa::attend(&qmd, &rig.kv, &rig.table, &rr, &sel, &sel_n, parts, &mut ws, &mut out, &st).unwrap();
+        });
+    }
+}

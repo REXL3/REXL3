@@ -468,3 +468,48 @@ fn real_pack_groups_load_and_decode() {
         eprintln!("{prefix}: {} bits {} K={} N={} ok", g.bits.as_f64(), g.codebook.name(), g.k, g.n);
     }
 }
+
+/// A header written as raw JSON text (records the safetensors writer would never produce), with `data` zero bytes behind it.
+fn write_raw(dir: &Path, file: &str, header: &str, data: usize) {
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.resize(bytes.len() + data, 0);
+    std::fs::write(dir.join(file), bytes).unwrap();
+}
+
+/// Records the fast header path cannot take (an array, a missing field, a float or negative dimension, three offsets, a field given
+/// twice) are reported by the scan exactly as the general reader reports them, and the well-formed records beside them are kept.
+#[test]
+fn malformed_header_records_are_reported_by_the_general_reader() {
+    let d = tmp("typed_fallback");
+    let header = r#"{"__metadata__":{"format":"pt"},
+        "ok":{"dtype":"F16","shape":[2],"data_offsets":[0,4],"extra":[1,{"x":2}]},
+        "arr":["F16",[2],[0,4]],
+        "nodtype":{"shape":[2],"data_offsets":[0,4]},
+        "floatdim":{"dtype":"F16","shape":[2.0],"data_offsets":[0,4]},
+        "negdim":{"dtype":"F16","shape":[-2],"data_offsets":[0,4]},
+        "three":{"dtype":"F16","shape":[2],"data_offsets":[0,4,8]},
+        "twice":{"dtype":"F32","dtype":"F16","shape":[2],"data_offsets":[4,8]}}"#;
+    write_raw(&d, "m.safetensors", header, 8);
+    let ck = scan(&d, false).unwrap();
+    let mut plain: Vec<&str> = ck.plain.keys().map(String::as_str).collect();
+    plain.sort();
+    assert_eq!(plain, ["ok", "twice"], "the well-formed records (the last of a field given twice) are kept");
+    assert_eq!(ck.plain["twice"].dtype, "F16");
+    let mut issues = ck.issues.clone();
+    issues.sort();
+    assert_eq!(
+        issues,
+        [
+            "tensor arr: missing dtype",
+            "tensor floatdim: shape holds a non-integer",
+            "tensor negdim: shape holds a non-integer",
+            "tensor nodtype: missing dtype",
+            "tensor three: data_offsets has 3 values, expected 2",
+        ]
+    );
+    // an index that is not an object is an issue, not a map, and the folder's shards are then scanned without it
+    std::fs::write(d.join("model.safetensors.index.json"), r#"[{"weight_map":{"ok":"m.safetensors"}}]"#).unwrap();
+    let ck = scan(&d, false).unwrap();
+    assert!(ck.issues.iter().any(|i| i == "model.safetensors.index.json has no weight_map"), "{:?}", ck.issues);
+}

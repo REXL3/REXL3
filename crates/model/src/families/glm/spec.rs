@@ -409,9 +409,22 @@ pub const MTP_COST_TP_RESTRICTED: MtpCost = MtpCost {
     chain_per_stream: 0.43,
 };
 
-/// `REXL3_GLM_COST_LOG=<file>`: every verify window (`W rows ms`) and every draft call (`D streams rows depth ms`) the runtime
-/// observes is appended to the file (the measurement of the cost tables: `tools/glm_tp_cost_tables.sh`). Unset: nothing is written.
+/// `REXL3_GLM_COST_LOG=<file>`: every verify window (`W rows ms`) and every draft call (`D streams rows depth ms head`, [`draft_cost_line`])
+/// the runtime observes is appended to the file (the measurement of the cost tables: `tools/glm_tp_cost_tables.sh`). Unset: nothing is
+/// written.
 pub const COST_LOG_ENV: &str = "REXL3_GLM_COST_LOG";
+
+/// A draft call's cost-log line: `D streams rows depth ms head`, `head` the vocabulary the NextN drafter's head ran over: `r` the
+/// restricted set, `f` the full head (`VocabMode::Full`, or the adaptive mode's fallback), `-` unknown or not a NextN head (a DFlash2 call).
+/// `tools/glm_tp_cost_fit.py` reads it (and the five-field lines of the logs before the tag).
+pub fn draft_cost_line(streams: usize, rows: usize, depth: usize, ms: f64, restricted: Option<bool>) -> String {
+    let head = match restricted {
+        Some(true) => 'r',
+        Some(false) => 'f',
+        None => '-',
+    };
+    format!("D {streams} {rows} {depth} {ms:.4} {head}")
+}
 
 fn cost_log(line: std::fmt::Arguments<'_>) {
     use std::io::Write;
@@ -665,7 +678,7 @@ impl SpecRuntime {
             self.stats.mtp_ms += ms;
             self.stats.mtp_calls += 1;
             self.stats.mtp_rows += rows as u64;
-            cost_log(format_args!("D {streams} {rows} {depth} {ms:.4}"));
+            cost_log(format_args!("{}", draft_cost_line(streams, rows, depth, ms, m.mtp_last_head_restricted())));
             self.cost.observe_draft(streams, rows, depth, ms);
             for ((i, a), d) in asks.iter().zip(drafts) {
                 if a.depth == 0 {
@@ -774,7 +787,7 @@ impl SpecRuntime {
             let ms = t.elapsed().as_secs_f64() * 1e3;
             self.stats.mtp_ms += ms;
             self.stats.mtp_calls += 1;
-            cost_log(format_args!("D {} 0 {depth} {ms:.4}", asks.len()));
+            cost_log(format_args!("{}", draft_cost_line(asks.len(), 0, depth, ms, None)));
             self.cost.observe_draft(asks.len(), 0, depth, ms);
             for (&i, d) in asked.iter().zip(drafts) {
                 if d.is_empty() {
@@ -852,6 +865,21 @@ impl SpecRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A draft call's cost-log line has six fields, the head tag last (`r` restricted, `f` full, `-` unknown), and parses back to its numbers.
+    #[test]
+    fn a_draft_cost_line_carries_the_head_and_parses() {
+        for (restricted, tag) in [(Some(true), "r"), (Some(false), "f"), (None, "-")] {
+            let l = draft_cost_line(2, 17, 3, 4.56789, restricted);
+            let f: Vec<&str> = l.split_whitespace().collect();
+            assert_eq!(f.len(), 6, "{l}");
+            assert_eq!(f[0], "D");
+            let nums: (usize, usize, usize, f64) =
+                (f[1].parse().unwrap(), f[2].parse().unwrap(), f[3].parse().unwrap(), f[4].parse().unwrap());
+            assert_eq!(nums, (2, 17, 3, 4.5679));
+            assert_eq!(f[5], tag);
+        }
+    }
 
     #[test]
     fn the_stats_count_a_round_by_depth_and_source() {

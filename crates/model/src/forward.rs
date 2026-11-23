@@ -31,7 +31,7 @@ use gb_cuda::exl3_linear::{Dtype, Exl3Weights};
 use gb_cuda::gdn::{self, Batch, Owed, OwedPath, PathRows, PreInputs, PreWeights, Record};
 use gb_cuda::graph::{is_capture_code, CaptureError, Graph};
 use gb_cuda::tree::{Tree, PATH_STRIDE, PLAN_STRIDE};
-use gb_cuda::{glue, DevBuf, Stream};
+use gb_cuda::{glue, logprob, DevBuf, Stream};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -179,6 +179,8 @@ pub struct Model {
     /// Per slot: rope position minus cache index for every token after the last image of the prompt (0 for text-only
     /// sequences). M-RoPE compresses an image's positions, so later text sits `delta` behind its KV index.
     rope_delta: Vec<i32>,
+    /// Target layers copied into the five DFlash2 tap rows (the attached draft's config, or the 27B default without one).
+    pub tap_layers: [usize; crate::draft::TAPS],
     /// The DFlash2 draft, when one is attached.
     pub draft: Option<Draft>,
     /// The prefix cache's snapshot slots, when it is enabled (`Model::enable_prefix_cache`).
@@ -458,7 +460,8 @@ fn copy_gdn_slot(
     st: &Stream,
     out: bool,
 ) -> Result<(), ModelError> {
-    let (sb, cb) = (gdn::S_SLOT_ELEMS * 4, gdn::CONV_SLOT_ELEMS * 2);
+    assert_eq!(snap_pool.shape, pools.shape, "GDN snapshot pools must have the target's shape");
+    let (sb, cb) = (pools.shape.s_slot_elems() * 4, pools.shape.conv_slot_elems() * 2);
     if out {
         snap_pool.s[li].copy_range_from(snap * sb, &pools.s[li], slot * sb, sb, st)?;
         snap_pool.conv[li].copy_range_from(snap * cb, &pools.conv[li], slot * cb, cb, st)?;
@@ -560,22 +563,40 @@ impl Model {
         prefill_rows: usize,
         window_rows: usize,
     ) -> Result<Self, ModelError> {
+        Self::with_window_rows_taps(cfg, w, slots, kv_blocks, max_context, prefill_rows, window_rows, TAP_LAYERS)
+    }
+
+    /// [`Model::with_window_rows`] with the tap indices read from the attached DFlash2 draft's config.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_window_rows_taps(
+        cfg: QwenConfig,
+        w: Weights,
+        slots: usize,
+        kv_blocks: usize,
+        max_context: usize,
+        prefill_rows: usize,
+        window_rows: usize,
+        tap_layers: [usize; crate::draft::TAPS],
+    ) -> Result<Self, ModelError> {
+        crate::shapes::check_target(&cfg).map_err(ModelError::Config)?;
         check_window_rows(window_rows)?;
         // a value the switch refuses stops the boot here, by name, before the scratch or a kernel exists
         let prefill_gemm = crate::prefill_p2::current().map_err(ModelError::Config)?;
         let max_blocks = max_context.div_ceil(BLOCK_TOKENS);
+        let attn_shape = cfg.attn_shape().map_err(ModelError::Config)?;
+        let gdn_shape = cfg.gdn_shape().map_err(ModelError::Config)?;
         let s = Scratch::new(&cfg, prefill_rows.max(MAX_DECODE_ROWS))?;
         let pools = GdnPools::new(&cfg, slots)?;
         let mut kv = Vec::new();
         for _ in 0..cfg.full_layers() {
-            kv.push(PagedKv::new(kv_blocks)?);
+            kv.push(PagedKv::with_shape(kv_blocks, attn_shape)?);
         }
         let n_lin = cfg.linear_layers();
         let mut recs = [Vec::with_capacity(n_lin), Vec::with_capacity(n_lin)];
         let mut win_qkv = Vec::with_capacity(n_lin);
         for _ in 0..n_lin {
-            recs[0].push(Record::alloc(window_rows)?);
-            recs[1].push(Record::alloc(window_rows)?);
+            recs[0].push(Record::alloc_shaped(window_rows, gdn_shape)?);
+            recs[1].push(Record::alloc_shaped(window_rows, gdn_shape)?);
             win_qkv.push(DevBuf::zeroed(window_rows * cfg.conv_channels() * 2)?);
         }
         let rows = s.rows;
@@ -604,8 +625,8 @@ impl Model {
             rec_par: 0,
             win_qkv,
             owed: None,
-            gdn_prefill_ws: DevBuf::zeroed(gdn::prefill_workspace_bytes(prefill_rows))?,
-            attn_ws: DevBuf::zeroed(attention::decode_workspace_bytes(window_rows, max_context))?,
+            gdn_prefill_ws: DevBuf::zeroed(gdn::prefill_workspace_bytes_shaped(gdn_shape, prefill_rows))?,
+            attn_ws: DevBuf::zeroed(attention::decode_workspace_bytes_for(attn_shape, window_rows, max_context))?,
             logits: DevBuf::zeroed(window_rows * cfg.vocab * 2)?,
             topk_ws: DevBuf::zeroed(glue::topk_workspace_bytes(window_rows, cfg.vocab, MAX_CANDIDATES))?,
             topk_ids: DevBuf::zeroed(window_rows * MAX_CANDIDATES * 4)?,
@@ -615,6 +636,7 @@ impl Model {
             last_window: None,
             pending: BTreeMap::new(),
             rope_delta: vec![0; slots],
+            tap_layers,
             draft: None,
             snaps: None,
             gdn_cuts: Vec::new(),
@@ -1016,11 +1038,14 @@ impl Model {
             split_start,
             wq,
             prefill_gemm,
+            tap_layers,
             ..
         } = self;
         let st = &*stream;
         let d = cfg.hidden;
         let eps = cfg.rms_eps as f32;
+        let gdn_shape = cfg.gdn_shape().map_err(ModelError::Config)?;
+        let attn_prep = cfg.attn_prep();
         let batch = Batch { seq_start: &s.seq_start, slot: &s.seq_slot, n_seq: b.n_seq(), rows, n_slots: pools.slots };
         unsafe {
             glue::embed(cp(&w.embed), cp(&s.ids), mp(&s.x), rows, d, cfg.vocab, st)?;
@@ -1111,7 +1136,8 @@ impl Model {
                     } else {
                         let inp = PreInputs { qkv: &s.qkv, a: &s.ga, b: &s.gb };
                         if gdn_cuts.is_empty() {
-                            gdn::prefill(
+                            gdn::prefill_shaped(
+                                gdn_shape,
                                 st,
                                 &inp,
                                 &wts,
@@ -1132,7 +1158,8 @@ impl Model {
                             let mut at = 0usize;
                             for k in 0..=gdn_cuts.len() {
                                 let end = gdn_cuts.get(k).map_or(rows, |c| c.0);
-                                gdn::prefill_part(
+                                gdn::prefill_part_shaped(
+                                    gdn_shape,
                                     st,
                                     &inp,
                                     at,
@@ -1209,7 +1236,7 @@ impl Model {
                         let pos = if b.rope3.is_some() { cp(&s.rope3) } else { cp(&s.positions) };
                         let k_out = if tw { mp(&tree.as_ref().expect("tree buffers").kn[fi]) } else { mp(&s.fk2) };
                         prep(
-                            &glue::AttnPrepCfg::QWEN_TARGET,
+                            &attn_prep,
                             cp(&s.qkv),
                             cp(&s.fk),
                             pos,
@@ -1285,7 +1312,7 @@ impl Model {
             unsafe {
                 glue::add_rmsnorm(cp(&s.r), cp(&s.a), cp(next), mp(&s.x), mp(&s.h), rows, d, eps, st)?;
             }
-            if let Some(t) = TAP_LAYERS.iter().position(|&l| l == i) {
+            if let Some(t) = tap_layers.iter().position(|&l| l == i) {
                 unsafe {
                     glue::copy_rows(cp(&s.x), d, (s.taps.ptr() as *mut u16).add(t * d) as *mut c_void, 5 * d, rows, d, st)?;
                 }
@@ -1737,6 +1764,60 @@ impl Model {
         Ok(row.into_iter().map(|v| f32::from_bits((v as u32) << 16)).collect())
     }
 
+    /// The log-probability records of the first `chosen.len()` rows of the prefill chunk that just ran, appended to `out`:
+    /// row `r` is reduced on the device to its log-sum-exp, the logit of token `chosen[r]` (-1: none) and its top `out.k`
+    /// logits (`gb_cuda::logprob`), and only those are read back. The chunk's final-normed rows are still in `s.h`; the head
+    /// runs on them in pieces of the window (the decode head is row invariant, so the pieces do not matter), each copied to
+    /// the front of `s.r` as the last-row head does. Touches no per-slot state. It overwrites the logits and candidate
+    /// buffers, so read a wanted last row ([`Model::score_head_row_zero`]) before calling it.
+    pub fn chunk_row_records(&mut self, chosen: &[i32], out: &mut gb_engine::score::RowRecords) -> Result<(), ModelError> {
+        let (d, vocab, cap, k) = (self.cfg.hidden, self.cfg.vocab, self.window_rows, out.k);
+        if k == 0 || k > logprob::MAX_TOP || k > vocab || chosen.len() * d * 2 > self.s.h.bytes() {
+            return Err(ModelError::Request(format!("a readout of {} rows with the top {k} of {vocab}", chosen.len())));
+        }
+        // the candidate buffers hold `MAX_CANDIDATES` entries a window row: the chosen ids go in front of the top ids, the
+        // normalisers behind the top values
+        const { assert!(logprob::MAX_TOP + 2 <= MAX_CANDIDATES) };
+        let (ids_at, norm_at) = (cap * 4, cap * logprob::MAX_TOP * 4);
+        let mut at = 0;
+        while at < chosen.len() {
+            let n = (chosen.len() - at).min(cap);
+            let Model { w, s, stream, logits, topk_ws, topk_ids, topk_vals, .. } = self;
+            topk_ids.upload(&chosen[at..at + n])?;
+            unsafe {
+                glue::copy_rows((s.h.ptr() as *const u16).add(at * d) as *const c_void, d, mp(&s.r), d, n, d, stream)?;
+            }
+            w.lm_head.forward(&s.r, logits, n, Dtype::BF16, Dtype::BF16, &mut s.ws, stream)?;
+            unsafe {
+                logprob::rows(
+                    cp(logits),
+                    n,
+                    vocab,
+                    vocab,
+                    k,
+                    cp(topk_ids),
+                    topk_vals.ptr_at(norm_at),
+                    topk_ids.ptr_at(ids_at),
+                    mp(topk_vals),
+                    mp(topk_ws),
+                    topk_ws.bytes(),
+                    stream,
+                )?;
+            }
+            stream.sync()?;
+            let (mut norm, mut ids, mut vals) = (vec![0f32; n * 2], vec![0i32; n * k], vec![0f32; n * k]);
+            topk_vals.download_range(norm_at, &mut norm)?;
+            topk_ids.download_range(ids_at, &mut ids)?;
+            topk_vals.download_range(0, &mut vals)?;
+            out.lse.extend(norm.chunks_exact(2).map(|p| p[0]));
+            out.chosen.extend(norm.chunks_exact(2).map(|p| p[1]));
+            out.top_ids.extend(ids.iter().map(|&t| t as u32));
+            out.top_logits.extend(vals);
+            at += n;
+        }
+        Ok(())
+    }
+
     /// Start a prefix-cache pool of `slots` snapshot slots (including the draft's window when a draft is attached: call this after
     /// `model.draft` is set). Allocates `slots x SnapPool::bytes_per_slot` once; errors when a pool exists already.
     pub fn enable_prefix_cache(&mut self, slots: usize) -> Result<(), ModelError> {
@@ -1806,8 +1887,9 @@ impl Model {
                 .map_err(|e| ModelError::Request(format!("no page for the copy of the last prefix page: {e:?}")))?
                 as usize;
             for kv in &mut self.kv {
-                kv.k.copy_within(dst * PagedKv::BLOCK_BYTES, src * PagedKv::BLOCK_BYTES, PagedKv::BLOCK_BYTES, &self.stream)?;
-                kv.v.copy_within(dst * PagedKv::BLOCK_BYTES, src * PagedKv::BLOCK_BYTES, PagedKv::BLOCK_BYTES, &self.stream)?;
+                let bytes = kv.block_bytes();
+                kv.k.copy_within(dst * bytes, src * bytes, bytes, &self.stream)?;
+                kv.v.copy_within(dst * bytes, src * bytes, bytes, &self.stream)?;
             }
         }
         let Model { pools, snaps, stream, cfg, draft, .. } = self;
@@ -1833,7 +1915,7 @@ impl Model {
             }
         };
         let (mut hs, mut hc, mut hk) = (0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64);
-        let (sb, cb) = (gdn::S_SLOT_ELEMS * 4, gdn::CONV_SLOT_ELEMS * 2);
+        let (sb, cb) = (self.pools.shape.s_slot_elems() * 4, self.pools.shape.conv_slot_elems() * 2);
         let mut buf = vec![0u8; sb.max(cb)];
         for li in 0..self.cfg.linear_layers() {
             self.pools.s[li].download_range(slot * sb, &mut buf[..sb])?;
@@ -1841,15 +1923,16 @@ impl Model {
             self.pools.conv[li].download_range(slot * cb, &mut buf[..cb])?;
             fnv(&mut hc, &buf[..cb]);
         }
-        let row = attention::KV_TOKEN_ELEMS * 2;
+        let row = self.cfg.kv_heads * self.cfg.head_dim * 2;
         let blocks = self.kv_tab.blocks_of(slot).to_vec();
         let mut page = vec![0u8; BLOCK_TOKENS * row];
         for kv in &self.kv {
+            let block_bytes = kv.block_bytes();
             for (i, &blk) in blocks.iter().enumerate().take(len.div_ceil(BLOCK_TOKENS)) {
                 let n = (len - i * BLOCK_TOKENS).min(BLOCK_TOKENS) * row;
-                kv.k.download_range(blk as usize * PagedKv::BLOCK_BYTES, &mut page[..n])?;
+                kv.k.download_range(blk as usize * block_bytes, &mut page[..n])?;
                 fnv(&mut hk, &page[..n]);
-                kv.v.download_range(blk as usize * PagedKv::BLOCK_BYTES, &mut page[..n])?;
+                kv.v.download_range(blk as usize * block_bytes, &mut page[..n])?;
                 fnv(&mut hk, &page[..n]);
             }
         }
@@ -2023,7 +2106,8 @@ impl Model {
                 let tr = tree.as_ref().expect("checked above");
                 let batch = Batch { seq_start: &s.seq_start, slot: &s.seq_slot, n_seq, rows: win.rows, n_slots: pools.slots };
                 for (qkv, conv) in win_qkv.iter().zip(pools.conv.iter_mut()) {
-                    gdn::commit_conv_path(
+                    gdn::commit_conv_path_shaped(
+                        pools.shape,
                         stream,
                         qkv,
                         conv,
@@ -2056,7 +2140,7 @@ impl Model {
                     n_slots: pools.slots,
                 };
                 for (qkv, conv) in win_qkv.iter().zip(pools.conv.iter_mut()) {
-                    gdn::commit_conv(stream, qkv, conv, &batch, &s.keep)?;
+                    gdn::commit_conv_shaped(pools.shape, stream, qkv, conv, &batch, &s.keep)?;
                 }
             }
             self.owed = Some(OwedWindow {

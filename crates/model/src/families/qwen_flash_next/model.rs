@@ -28,10 +28,13 @@
 
 use super::config::FlashNextConfig;
 use super::device::{FlashNextLayer, FlashNextWeights, MixerWeights, PleWeights};
+use super::graph_cache::{logs_evictions, GraphLru, GraphStats, CHAIN_GRAPH_CAP, WINDOW_GRAPH_CAP};
 use super::ngram::TokContext;
+use super::weights::WeightMap;
 use crate::error::ModelError;
 use crate::forward::{Candidates, Mode, PrefillPath};
 use crate::kvtables::{KvTables, BLOCK_TOKENS};
+use crate::pack::Pack;
 use crate::rows::RowBatch;
 use gb_cuda::attention::{self, BlockTable, KvHeads, PagedKv, RowIndex};
 use gb_cuda::exl3_linear::{Dtype, Exl3Weights, MAX_DECODE_ROWS};
@@ -42,9 +45,9 @@ use gb_cuda::graph::{CaptureError, Graph};
 use gb_cuda::moe::{MoeDims, MoeExperts, SharedExpert};
 use gb_cuda::moe_prefill::{finish_shared, PrefillScratch, SharedScratchBig};
 use gb_cuda::rt::HostStage;
-use gb_cuda::{fmoe, fn_glue, fn_moe, glue, hcx, mtpk, ple, qfn_verify, qsa, CudaError, DevBuf, Stream};
+use gb_cuda::{fmoe, fn_glue, fn_moe, glue, hcx, logprob, mtpk, ple, qfn_verify, qsa, CudaError, DevBuf, Stream};
 use gb_engine::RowRequest;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -235,6 +238,8 @@ impl AttnGrid {
 
 /// The shape a captured graph was recorded for; replaying it on any other shape would be wrong.
 trait GraphKey: Copy + Eq + std::hash::Hash + std::fmt::Debug {
+    /// The cache's name in the log.
+    const KIND: &'static str;
     fn grid(&self) -> AttnGrid;
 }
 
@@ -338,11 +343,13 @@ impl ChainKey {
 }
 
 impl GraphKey for WindowKey {
+    const KIND: &'static str = "window";
     fn grid(&self) -> AttnGrid {
         self.grid
     }
 }
 impl GraphKey for ChainKey {
+    const KIND: &'static str = "chain";
     fn grid(&self) -> AttnGrid {
         self.grid
     }
@@ -457,6 +464,9 @@ pub struct FlashNextModel {
     dv_vals: DevBuf,
     /// PLE stage scratch (1-byte buffers when the model has no PLE stage).
     ple_host: Vec<u16>,
+    /// The history (two context tokens, then the positions) of the prompt chunk after the one in flight, set by the backend
+    /// before a chunk and handed to [`NgramTable::readahead`] once that chunk's own gather is done.
+    ple_ahead: Option<Vec<u32>>,
     ple_packed: DevBuf,
     ple_emb: DevBuf,
     ple_key: DevBuf,
@@ -496,8 +506,11 @@ pub struct FlashNextModel {
     last_window: Option<RowBatch>,
     pending: BTreeMap<usize, usize>,
     /// Replayable windows and draft chains, and the context the grid of the one being run covers.
-    graphs: HashMap<WindowKey, Graph>,
-    mtp_graphs: HashMap<ChainKey, Graph>,
+    graphs: GraphLru<WindowKey, Graph>,
+    mtp_graphs: GraphLru<ChainKey, Graph>,
+    /// Windows and chains that ran eagerly, and captures the runtime refused (`graph_stats`).
+    graph_eager: u64,
+    graph_capture_failures: u64,
     attn_ctx: Option<usize>,
     use_graphs: bool,
     /// The fused hyper-connection pre-mix (`REXL3_FAST=0` takes the reference kernels instead).
@@ -859,7 +872,22 @@ impl FlashNextModel {
 
     /// [`FlashNextModel::load`], with the MTP head loaded only when `mtp` (a boot that drafts with a DFlash2 draft leaves it on disk).
     pub fn load_with(dir: &Path, opts: ModelOptions, mtp: bool) -> Result<Self, ModelError> {
-        check_opts(&opts)?;
+        let cfg = Self::load_config(dir, &opts)?;
+        let w = FlashNextWeights::load_with(dir, &cfg, opts.warm, mtp, |_, _| {})?;
+        Self::new(cfg, w, opts)
+    }
+
+    /// [`FlashNextModel::load_with`] from the pack in `dir` as the boot has already opened (`pack`) and bound (`map`) it: the weights are
+    /// staged from those, not from a new scan of the same headers.
+    pub fn load_from(dir: &Path, pack: &Pack, map: &WeightMap, opts: ModelOptions, mtp: bool) -> Result<Self, ModelError> {
+        let cfg = Self::load_config(dir, &opts)?;
+        let w = FlashNextWeights::load_from(dir, &cfg, pack, map, opts.warm, mtp, |_, _| {})?;
+        Self::new(cfg, w, opts)
+    }
+
+    /// The pack's config, checked against what the kernels are built for (before any weight is read).
+    fn load_config(dir: &Path, opts: &ModelOptions) -> Result<FlashNextConfig, ModelError> {
+        check_opts(opts)?;
         let cfg = FlashNextConfig::from_dir(dir).map_err(ModelError::Config)?;
         cfg.check_shapes().map_err(ModelError::Config)?;
         if cfg.rms_norm_eps as f32 != EPS {
@@ -868,8 +896,7 @@ impl FlashNextModel {
                 cfg.rms_norm_eps
             )));
         }
-        let w = FlashNextWeights::load_with(dir, &cfg, opts.warm, mtp, |_, _| {})?;
-        Self::new(cfg, w, opts)
+        Ok(cfg)
     }
 
     /// The model on already loaded weights (the path the device tests take).
@@ -1066,6 +1093,7 @@ impl FlashNextModel {
             dv_ids: DevBuf::zeroed(WINDOW_ROWS * 4)?,
             dv_vals: DevBuf::zeroed(WINDOW_ROWS * 4)?,
             ple_host: Vec::new(),
+            ple_ahead: None,
             ple_packed: DevBuf::zeroed(one(ple_on, rows * ple_words * 2))?,
             ple_emb: DevBuf::zeroed(one(ple_on, rows * pd * 2))?,
             ple_key: DevBuf::zeroed(one(ple_on, rows * ch * 2))?,
@@ -1100,8 +1128,10 @@ impl FlashNextModel {
             last_window: None,
             pending: BTreeMap::new(),
             dflash: None,
-            graphs: HashMap::new(),
-            mtp_graphs: HashMap::new(),
+            graphs: GraphLru::new(WINDOW_GRAPH_CAP),
+            mtp_graphs: GraphLru::new(CHAIN_GRAPH_CAP),
+            graph_eager: 0,
+            graph_capture_failures: 0,
             attn_ctx: None,
             use_graphs: graphs_enabled(),
             fast,
@@ -1355,6 +1385,69 @@ impl FlashNextModel {
         self.sync()?;
         self.logits.download_range(0, &mut out[..n * vocab])?;
         Ok(())
+    }
+
+    /// The log-probability records of the first `chosen.len()` rows of the last prefill chunk, appended to `out`: each row
+    /// is reduced on the device to its log-sum-exp, the logit of token `chosen[r]` (-1: none) and its top `out.k` logits
+    /// (`gb_cuda::logprob`), and only those are read back. The head runs in pieces of [`WINDOW_ROWS`] rows as in
+    /// [`FlashNextModel::last_rows_logits`] (the decode head is row invariant, so the pieces do not matter), with the same
+    /// rule: call it before the MTP head runs. Reads no per-slot state, writes none.
+    pub fn chunk_row_records(&mut self, chosen: &[i32], out: &mut gb_engine::score::RowRecords) -> Result<(), ModelError> {
+        let (h, vocab, k) = (self.cfg.hidden, self.cfg.vocab, out.k);
+        if chosen.len() > self.mixed_rows || k == 0 || k > logprob::MAX_TOP || k > vocab {
+            return Err(ModelError::Request(format!(
+                "a readout of {} rows with the top {k} of {vocab}: the last chunk left {} rows",
+                chosen.len(),
+                self.mixed_rows
+            )));
+        }
+        // the candidate buffers hold `MAX_CANDIDATES` entries a window row: the chosen ids go in front of the top ids, the
+        // normalisers behind the top values
+        const { assert!(logprob::MAX_TOP + 2 <= MAX_CANDIDATES) };
+        let (ids_at, norm_at) = (WINDOW_ROWS * 4, WINDOW_ROWS * logprob::MAX_TOP * 4);
+        let mut at = 0;
+        while at < chosen.len() {
+            let n = (chosen.len() - at).min(WINDOW_ROWS);
+            put(&mut self.stage, &mut self.topk_ids, &chosen[at..at + n], &self.stream)?;
+            let x = self.x_mixed.subview(at * h * 2, n * h * 2);
+            self.w.lm_head.forward(&x, &mut self.logits, n, Dtype::BF16, Dtype::BF16, &mut self.ws, &self.stream)?;
+            // SAFETY: bf16 logits `[n, vocab]`; i32 chosen `[n]` at the front of the ids buffer and the top ids behind it; the
+            // top values at the front of the values buffer and the `[n, 2]` normalisers behind them; the top-k workspace.
+            unsafe {
+                logprob::rows(
+                    self.logits.ptr().cast_const(),
+                    n,
+                    vocab,
+                    vocab,
+                    k,
+                    self.topk_ids.ptr().cast_const(),
+                    self.topk_vals.ptr_at(norm_at),
+                    self.topk_ids.ptr_at(ids_at),
+                    self.topk_vals.ptr(),
+                    self.topk_ws.ptr(),
+                    self.topk_ws.bytes(),
+                    &self.stream,
+                )
+            }?;
+            self.sync()?;
+            let (mut norm, mut ids, mut vals) = (vec![0f32; n * 2], vec![0i32; n * k], vec![0f32; n * k]);
+            self.topk_vals.download_range(norm_at, &mut norm)?;
+            self.topk_ids.download_range(ids_at, &mut ids)?;
+            self.topk_vals.download_range(0, &mut vals)?;
+            out.lse.extend(norm.chunks_exact(2).map(|p| p[0]));
+            out.chosen.extend(norm.chunks_exact(2).map(|p| p[1]));
+            out.top_ids.extend(ids.iter().map(|&t| t as u32));
+            out.top_logits.extend(vals);
+            at += n;
+        }
+        Ok(())
+    }
+
+    /// The full-vocabulary logits of the last row of the last prefill chunk, widened to f32 ([`FlashNextModel::last_rows_logits`]).
+    pub fn chunk_last_row_logits(&mut self) -> Result<Vec<f32>, ModelError> {
+        let mut row = vec![0u16; self.cfg.vocab];
+        self.last_rows_logits(self.mixed_rows.saturating_sub(1), 1, &mut row)?;
+        Ok(row.into_iter().map(|v| f32::from_bits((v as u32) << 16)).collect())
     }
 
     /// Keep the first `keep` rows of `slot`'s last window.
@@ -1766,6 +1859,12 @@ impl FlashNextModel {
         self.ensure_pages(b)
     }
 
+    /// Names the tokens of the prompt chunk after the next one prefilled (`history`: its two context tokens, then its
+    /// positions), so their n-gram table pages are read while that chunk runs. A no-op without the PLE stage.
+    pub fn ple_readahead(&mut self, history: &[u32]) {
+        self.ple_ahead = self.w.ple.is_some().then(|| history.to_vec());
+    }
+
     /// The PLE stage's host work for a trunk batch: hash every row's n-grams, gather their packed table rows and upload
     /// them, and record the rows' tokens as context for later batches.
     fn prepare_ple(&mut self, b: &RowBatch) -> Result<(), ModelError> {
@@ -1785,6 +1884,10 @@ impl FlashNextModel {
             self.ple_tok.store(slot, first, &b.ids[r.clone()]);
         }
         put(&mut self.stage, &mut self.ple_packed, &self.ple_host[..b.rows * per], &self.stream)?;
+        // this chunk's rows are read: the disk is free for the next chunk's while the GPU runs this one
+        if let Some(history) = self.ple_ahead.take() {
+            t.readahead(history);
+        }
         Ok(())
     }
 
@@ -2155,13 +2258,14 @@ impl FlashNextModel {
             st,
         )?;
 
-        // 6. the experts. A window groups them across its rows (FrostMoE); a prefill chunk always routes on the device
-        // and runs the CoopMK decode, the shared expert riding along as slot `num_experts`.
+        // 6. the experts. A window groups them across its rows (FrostMoE, its gate/up staging only the window's rows at one to
+        // four rows: the same bits); a prefill chunk always routes on the device and runs the CoopMK decode, the shared expert
+        // riding along as slot `num_experts`.
         let tables = layer.moe.tables();
         if window {
             let shape =
                 fmoe::Shape { t: rows, ne: num_experts, top_k, h, i: interm, kc: fmoe::DEFAULT_KC, max_tokens: WINDOW_ROWS };
-            fmoe::forward(
+            fmoe::forward_row_staged(
                 &self.x_mixed,
                 &self.router_logits,
                 fmoe::LogitsDtype::Bf16,
@@ -2201,8 +2305,13 @@ impl FlashNextModel {
                 ss,
                 st,
             )?;
-            // the routed experts on the picks in `pf` (fp32 out, f32 weights; no shared slot here)
-            ex.run_prefill_f32_wts(&self.x_mixed, Dtype::BF16, rows, None, &mut self.moe_out_f32, pf, st)?;
+            // One node: the two expert GEMMs as ring-fed launches over slices of one expert (`gb_cuda::fn_moe_prefill`), the same
+            // bits as the per-item launches, which a layer they do not take keeps (fp32 out, f32 weights; no shared slot here).
+            if ex.ring_prefill(pf) {
+                ex.run_prefill_ring_f32_wts(&self.x_mixed, Dtype::BF16, rows, None, &mut self.moe_out_f32, pf, st)?;
+            } else {
+                ex.run_prefill_f32_wts(&self.x_mixed, Dtype::BF16, rows, None, &mut self.moe_out_f32, pf, st)?;
+            }
             // finish: bf16 out = bf16(routed + sigmoid(gate) * shared), the one cast
             finish_shared(&self.moe_out_f32, &self.shared_out_f32, &self.sh_gate_scalar, &mut self.moe_out, rows, h, st)?;
         } else {
@@ -2546,12 +2655,22 @@ impl FlashNextModel {
         }
     }
 
-    fn window_graphs(&mut self) -> &mut HashMap<WindowKey, Graph> {
+    fn window_graphs(&mut self) -> &mut GraphLru<WindowKey, Graph> {
         &mut self.graphs
     }
 
-    fn chain_graphs(&mut self) -> &mut HashMap<ChainKey, Graph> {
+    fn chain_graphs(&mut self) -> &mut GraphLru<ChainKey, Graph> {
         &mut self.mtp_graphs
+    }
+
+    /// What the window and chain graph caches have done so far (`/metrics` through the backend's `graph_counters`).
+    pub fn graph_stats(&self) -> GraphStats {
+        GraphStats {
+            window: self.graphs.stats,
+            chain: self.mtp_graphs.stats,
+            eager: self.graph_eager,
+            capture_failures: self.graph_capture_failures,
+        }
     }
 
     /// Run `body` for a window of live context `live` under the graph recorded for `key`: captured on first use, then
@@ -2559,7 +2678,7 @@ impl FlashNextModel {
     /// and the grid is what attention launches with while `body` runs, graphs on or off.
     fn run_graph<K: GraphKey>(
         &mut self,
-        graphs: fn(&mut Self) -> &mut HashMap<K, Graph>,
+        graphs: fn(&mut Self) -> &mut GraphLru<K, Graph>,
         key: K,
         live: usize,
         body: impl Fn(&mut Self) -> Result<(), ModelError>,
@@ -2573,38 +2692,59 @@ impl FlashNextModel {
         }
         self.attn_ctx = Some(grid.ctx());
         let r = if self.use_graphs {
-            let mut map = std::mem::take(graphs(self));
+            let mut map = graphs(self).take();
             let r = self.capture_and_launch(&mut map, key, body);
             *graphs(self) = map;
             r
         } else {
+            self.graph_eager += 1;
             body(self)
         };
         self.attn_ctx = None;
         r
     }
 
-    // not `entry()`: a capture the runtime refuses must leave the map untouched and run the work eagerly instead
-    #[allow(clippy::map_entry)]
+    /// Replay the graph of `key`, capturing it first when it is not resident. A capture the runtime refuses leaves the cache
+    /// untouched and runs the work eagerly instead. A new graph that finds the cache full evicts the least recently used one, after
+    /// the stream has drained: the victim's last replay may still be executing, and the new graph has not been launched yet. The
+    /// wait and the eviction issue no kernel, so the launches of a window are the same whatever is resident.
     fn capture_and_launch<K: GraphKey>(
         &mut self,
-        map: &mut HashMap<K, Graph>,
+        map: &mut GraphLru<K, Graph>,
         key: K,
         body: impl Fn(&mut Self) -> Result<(), ModelError>,
     ) -> Result<(), ModelError> {
-        if !map.contains_key(&key) {
+        if map.contains(&key) {
+            map.stats.replays += 1;
+        } else {
+            let t0 = std::time::Instant::now();
             let cap = match Graph::begin(&self.stream) {
                 Ok(c) => c,
                 Err(e) if e.is_fatal() => return Err(ModelError::Cuda(e)),
                 Err(e) => {
                     eprintln!("rexl3 level=warn graph capture refused ({e}): running Flash-Next windows eagerly");
                     self.use_graphs = false;
+                    self.graph_capture_failures += 1;
+                    self.graph_eager += 1;
                     return body(self);
                 }
             };
             let ran = body(self);
             match cap.finish(ran) {
                 Ok(g) => {
+                    map.stats.captures += 1;
+                    map.stats.capture_ms += t0.elapsed().as_secs_f64() * 1e3;
+                    // `sync` (the stream, then the host stage it released), as every wait of the model is
+                    let before = map.stats.evictions;
+                    map.make_room(|| self.sync())?;
+                    if logs_evictions(before, map.stats.evictions) {
+                        eprintln!(
+                            "rexl3 event=flash_next_graph_evicted kind={} evictions={} cap={}",
+                            K::KIND,
+                            map.stats.evictions,
+                            map.cap()
+                        );
+                    }
                     map.insert(key, g);
                 }
                 Err(CaptureError::Closure(e)) => return Err(e),
@@ -2614,11 +2754,13 @@ impl FlashNextModel {
                     }
                     eprintln!("rexl3 level=warn {e}: running Flash-Next windows eagerly");
                     self.use_graphs = false;
+                    self.graph_capture_failures += 1;
+                    self.graph_eager += 1;
                     return body(self);
                 }
             }
         }
-        map[&key].launch(&self.stream)?;
+        map.get(&key).expect("resident or just inserted").launch(&self.stream)?;
         Ok(())
     }
 }
@@ -2837,6 +2979,40 @@ mod tests {
         assert_ne!(before, across);
     }
 
+    /// One drafted, verified pass over a prompt of `n` synthetic tokens from an empty slot 0: the MTP drafts, a five-row window
+    /// and a four-row window (ids and value bits). 2046 / 2047 straddle the row-2048 QSA switch inside a window and between
+    /// catch-up and chained MTP steps; 2051 is sparse throughout.
+    type ScriptOut = (Vec<u32>, (Vec<i32>, Vec<u32>), (Vec<i32>, Vec<u32>));
+    fn qsa_threshold_script(m: &mut FlashNextModel, n: usize) -> ScriptOut {
+        m.begin_slot(0).unwrap();
+        let vocab = m.vocab_size() as u64;
+        let prompt: Vec<u32> = (0..n).map(|i| ((i as u64 * 2_654_435_761) % (vocab - 16) + 8) as u32).collect();
+        let path = PrefillPath::for_prompt(n);
+        let mut last = None;
+        for first in (0..n).step_by(m.opts.prefill_rows) {
+            let end = (first + m.opts.prefill_rows).min(n);
+            let chunk = &prompt[first..end];
+            let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: first as u64, tokens: chunk.to_vec() }]);
+            last = m.prefill_chunk(&b, path, (end == n).then_some(1)).unwrap();
+            m.mtp_after_prefill(0, first, chunk, prompt.get(end).copied(), path).unwrap();
+        }
+        let next = last.unwrap().ids[0] as u32;
+        let mut history = prompt;
+        history.push(next);
+        let drafts = m.mtp_propose(0, &history, 4).unwrap();
+        assert!(!drafts.is_empty());
+        let window = |m: &mut FlashNextModel, first, tokens: Vec<u32>| {
+            let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: first as u64, tokens }]);
+            let out = m.window_candidates(&b, 4).unwrap();
+            m.commit(0, b.rows);
+            m.flush().unwrap();
+            (out.ids, out.vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+        };
+        let crossing = window(m, n, vec![next; 5]);
+        let sparse = window(m, n + 5, vec![next; 4]);
+        (drafts, crossing, sparse)
+    }
+
     /// Real-pack gate: no model load or CUDA context on the CPU test path. Run only on an idle GPU after the pause.
     #[test]
     fn real_pack_graph_replay_equals_eager_across_qsa_threshold() {
@@ -2854,37 +3030,7 @@ mod tests {
         assert!(m.graph_features().qsa_trunk && m.graph_features().qsa_mtp, "pack needs both QSA indexers");
         assert!(m.has_mtp(), "pack needs the MTP head");
 
-        // Each run begins from the same empty slot. 2046/2047 straddle the row-2048 QSA switch
-        // inside a window and between catch-up and chained MTP steps; 2051 is sparse throughout.
-        let run = |m: &mut FlashNextModel, n: usize| {
-            m.begin_slot(0).unwrap();
-            let vocab = m.vocab_size() as u64;
-            let prompt: Vec<u32> = (0..n).map(|i| ((i as u64 * 2_654_435_761) % (vocab - 16) + 8) as u32).collect();
-            let path = PrefillPath::for_prompt(n);
-            let mut last = None;
-            for first in (0..n).step_by(m.opts.prefill_rows) {
-                let end = (first + m.opts.prefill_rows).min(n);
-                let chunk = &prompt[first..end];
-                let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: first as u64, tokens: chunk.to_vec() }]);
-                last = m.prefill_chunk(&b, path, (end == n).then_some(1)).unwrap();
-                m.mtp_after_prefill(0, first, chunk, prompt.get(end).copied(), path).unwrap();
-            }
-            let next = last.unwrap().ids[0] as u32;
-            let mut history = prompt;
-            history.push(next);
-            let drafts = m.mtp_propose(0, &history, 4).unwrap();
-            assert!(!drafts.is_empty());
-            let window = |m: &mut FlashNextModel, first, tokens: Vec<u32>| {
-                let b = RowBatch::from_requests(&[RowRequest { slot: 0, first_position: first as u64, tokens }]);
-                let out = m.window_candidates(&b, 4).unwrap();
-                m.commit(0, b.rows);
-                m.flush().unwrap();
-                (out.ids, out.vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
-            };
-            let crossing = window(m, n, vec![next; 5]);
-            let sparse = window(m, n + 5, vec![next; 4]);
-            (drafts, crossing, sparse)
-        };
+        let run = qsa_threshold_script;
 
         m.use_graphs = false;
         let eager: Vec<_> = [2046, 2047, 2051].map(|n| run(&mut m, n)).into();
@@ -2896,6 +3042,56 @@ mod tests {
         let replayed: Vec<_> = [2046, 2047, 2051].map(|n| run(&mut m, n)).into();
         assert_eq!((m.graphs.len(), m.mtp_graphs.len()), sizes, "expected replay, not new captures");
         assert_eq!(replayed, eager, "replayed windows / MTP chains differ bit for bit from eager");
+    }
+
+    /// Real-pack gate: the bound never reaches a bit. With room for two window graphs and one chain graph the script below needs
+    /// more shapes than fit (three five-row windows that differ by their QSA split, one four-row window they share, a chain per
+    /// prompt length), so every pass evicts graphs and captures them again: the first prompt's shapes are captured, evicted and
+    /// captured again when the script returns to it. Each pass must equal the eager run bit for bit, the caches must stay at their
+    /// caps, and the counters must show the evictions, the re-captures and the replays of the shared shape.
+    #[test]
+    fn real_pack_evicted_graphs_are_recaptured_to_the_same_bits() {
+        use std::path::PathBuf;
+        if std::env::var("REXL3_FN_REAL").ok().as_deref() != Some("1") {
+            eprintln!("not run: REXL3_FN_REAL=1 and REXL3_FLASH_NEXT_DIR are required for graph eviction parity");
+            return;
+        }
+        let dir = PathBuf::from(std::env::var("REXL3_FLASH_NEXT_DIR").expect("set the real-pack directory"));
+        assert_ne!(std::env::var("REXL3_QSA").ok().as_deref(), Some("0"), "the script's shapes differ by their QSA split");
+        assert!(gb_cuda::device_available(), "graph eviction parity needs an idle CUDA device");
+        let opts = ModelOptions { slots: 1, kv_pages: 64, max_context: 8192, prefill_rows: 1024, warm: false };
+        let mut m = FlashNextModel::load(&dir, opts).unwrap();
+        assert!(m.has_mtp(), "pack needs the MTP head");
+        const SCRIPT: [usize; 4] = [2046, 2047, 2051, 2046];
+        const CAPS: (usize, usize) = (2, 1);
+
+        m.use_graphs = false;
+        let eager: Vec<_> = SCRIPT.map(|n| qsa_threshold_script(&mut m, n)).into();
+        assert_eq!(eager[0], eager[3], "the script is a function of the prompt alone");
+        assert!(m.graphs.is_empty() && m.mtp_graphs.is_empty(), "the eager pass captured nothing");
+
+        m.use_graphs = true;
+        m.graphs.set_cap(CAPS.0);
+        m.mtp_graphs.set_cap(CAPS.1);
+        for pass in 0..2 {
+            let before = m.graph_stats();
+            let bounded: Vec<_> = SCRIPT.map(|n| qsa_threshold_script(&mut m, n)).into();
+            let after = m.graph_stats();
+            assert!(m.use_graphs, "a capture was refused; the pass ran eagerly");
+            assert_eq!(after.eager, before.eager, "pass {pass}: nothing ran eagerly");
+            assert_eq!(bounded, eager, "pass {pass}: an evicted and re-captured graph differs bit for bit from eager");
+            assert_eq!((m.graphs.len(), m.mtp_graphs.len()), CAPS, "pass {pass}: the caches sit at their caps");
+            let (w, c) = (after.window, after.chain);
+            assert_eq!(w.captures - w.evictions, CAPS.0 as u64, "pass {pass}: window residents are captures less evictions");
+            assert_eq!(c.captures - c.evictions, CAPS.1 as u64, "pass {pass}: chain residents are captures less evictions");
+            // more captures than the cache holds: the script's shapes do not fit, and returning to the first prompt re-captures
+            assert!(w.captures - before.window.captures > CAPS.0 as u64, "pass {pass}: windows {before:?} -> {after:?}");
+            assert!(c.captures - before.chain.captures > CAPS.1 as u64, "pass {pass}: chains {before:?} -> {after:?}");
+            assert!(w.evictions > before.window.evictions && c.evictions > before.chain.evictions, "pass {pass}: no eviction");
+            assert!(w.replays > before.window.replays, "pass {pass}: the shared window shape replays");
+            assert!(w.capture_ms > before.window.capture_ms && c.capture_ms > before.chain.capture_ms);
+        }
+        eprintln!("graph eviction parity: {:?}", m.graph_stats());
     }
 
     /// Real-pack gate: Finding 5 of the P0-A adversarial review. Consecutive
@@ -3087,6 +3283,96 @@ mod tests {
         assert!(flash_next_moe_dims(2560, 640, 512, 0).is_none()); // topk 0
         assert!(flash_next_moe_dims(2560, 640, 512, 32).is_none()); // topk > 16
         assert!(flash_next_moe_dims(2560, 640, 16, 17).is_none()); // topk > experts
+    }
+
+    /// Real-pack gate (`REXL3_FN_REAL=1`, `REXL3_FLASH_NEXT_DIR`, an idle CUDA device): on every MoE layer of the pack the
+    /// ring-fed expert GEMMs (`gb_cuda::fn_moe_prefill`) give the per-item launches' routed sum and every pair's output bit
+    /// for bit, on random rows with uniform and skewed random routing: every layer at a full chunk and at 2,478 rows, three
+    /// layers at each of 1, 17, 129, 300 and 1,000 rows as well.
+    #[test]
+    fn real_pack_ring_fed_expert_gemms_equal_the_per_item_launches_on_every_layer() {
+        if std::env::var("REXL3_FN_REAL").ok().as_deref() != Some("1") {
+            eprintln!("not run: REXL3_FN_REAL=1 and REXL3_FLASH_NEXT_DIR are required");
+            return;
+        }
+        let dir = std::path::PathBuf::from(std::env::var("REXL3_FLASH_NEXT_DIR").expect("set the real-pack directory"));
+        assert!(gb_cuda::device_available(), "needs an idle CUDA device");
+        let opts = ModelOptions { slots: 1, kv_pages: 64, max_context: 8192, prefill_rows: 4096, warm: false };
+        let mut m = FlashNextModel::load(&dir, opts).unwrap();
+        let layers = m.moe_experts.len();
+        assert!(layers > 0 && m.moe_experts.iter().all(Option::is_some), "every layer takes the grouped prefill");
+        let d = m.moe_experts[0].as_ref().unwrap().dims;
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut compared, mut cases) = (0usize, 0usize);
+        for li in 0..layers {
+            let every = [0, layers / 2, layers - 1].contains(&li);
+            for rows in [1usize, 17, 129, 300, 1000, 2478, 4096] {
+                if !every && rows < 2478 {
+                    continue;
+                }
+                let skewed = (li + rows) % 2 == 1;
+                let p = rows * d.topk;
+                let mut pick = Vec::with_capacity(p);
+                for _ in 0..rows {
+                    let mut chosen: Vec<i32> = Vec::new();
+                    while chosen.len() < d.topk {
+                        let u = (next() >> 11) as f64 / (1u64 << 53) as f64;
+                        let c = if skewed {
+                            ((1.0 / (u + 1e-6)) as usize - 1).min(d.experts - 1)
+                        } else {
+                            (u * d.experts as f64) as usize
+                        };
+                        if !chosen.contains(&(c as i32)) {
+                            chosen.push(c as i32);
+                        }
+                    }
+                    pick.extend(chosen);
+                }
+                let wts: Vec<f32> = (0..p).map(|_| 0.02 + 0.3 * ((next() >> 40) as f32 / 16_777_216.0)).collect();
+                // bf16 rows of a unit normal (the sum of four uniforms, scaled)
+                let x: Vec<u16> = (0..rows * d.hidden)
+                    .map(|_| {
+                        let v = next();
+                        let s = (0..4).map(|i| ((v >> (16 * i)) & 0xffff) as f32 / 65536.0).sum::<f32>() - 2.0;
+                        gb_cuda::dsv4_attn::bf16_bits(s * 1.7)
+                    })
+                    .collect();
+                let x = DevBuf::from_slice(&x).unwrap();
+                let ex = m.moe_experts[li].as_ref().unwrap();
+                let pf = m.moe_pf.as_mut().unwrap();
+                assert!(ex.ring_prefill(pf), "layer {li}: the ring-fed GEMMs take every layer of this pack");
+                let mut run = |ring: bool, poison: u8| {
+                    pf.poison(poison, &m.stream).unwrap();
+                    // the model's stream is non-blocking: the poison must land before the legacy-stream uploads below
+                    m.stream.sync().unwrap();
+                    pf.set_picks_f32(&pick, &wts).unwrap();
+                    let mut out = DevBuf::zeroed(rows * d.hidden * 4).unwrap();
+                    gb_cuda::rt::device_sync().unwrap();
+                    if ring {
+                        ex.run_prefill_ring_f32_wts(&x, Dtype::BF16, rows, None, &mut out, pf, &m.stream).unwrap();
+                    } else {
+                        ex.run_prefill_f32_wts(&x, Dtype::BF16, rows, None, &mut out, pf, &m.stream).unwrap();
+                    }
+                    m.stream.sync().unwrap();
+                    let y: Vec<u32> = pf.y_pairs.to_vec().unwrap();
+                    (out.to_vec::<u32>().unwrap(), y[..p * d.hidden].to_vec())
+                };
+                let (out_a, y_a) = run(false, 0x3c);
+                let (out_b, y_b) = run(true, 0xc3);
+                assert!(out_a.iter().any(|&v| v != 0), "layer {li} rows {rows}: degenerate output");
+                assert!(out_a == out_b, "layer {li} rows {rows}: the routed sum differs");
+                assert!(y_a == y_b, "layer {li} rows {rows}: a pair's output differs");
+                compared += out_a.len() + y_a.len();
+                cases += 1;
+            }
+        }
+        println!("FNPF-REAL {layers} layers, {cases} cases, {compared} fp32 values compared, 0 differ");
     }
 
     #[test]

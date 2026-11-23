@@ -23,7 +23,7 @@
 use crate::rt::{Block, CudaError, DevBuf, Stream};
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// `CudaError` code base of this module's errors (an `NCCL_ERROR_BASE`-style band of its own).
 pub const ROCE_ERROR_BASE: i32 = 21_000;
@@ -432,6 +432,15 @@ impl Layout {
     }
 }
 
+/// The bytes of the registered region [`RoceComm::new`] allocates (`cudaHostAlloc`, mapped and pinned) for sites of `caps` under `cfg`:
+/// the layout's own size, so a memory planner can charge it before the transport exists. Pure host arithmetic.
+pub fn region_bytes(cfg: &RoceConfig, caps: &[usize]) -> u64 {
+    if caps.is_empty() {
+        return 0;
+    }
+    Layout::of(cfg, caps).bytes as u64
+}
+
 /// One rank's end of the transport. Not `Clone`; share it behind an `Arc`.
 pub struct RoceComm {
     rank: usize,
@@ -447,6 +456,7 @@ pub struct RoceComm {
     sms: i32,
     connected: bool,
     started: AtomicBool,
+    start_lock: Mutex<()>,
     aborted: AtomicBool,
     isolated: std::sync::atomic::AtomicUsize,
     /// Per site: the exchanges this host queued there (lane T, zero-copy callers: the next exchange's sequence is this + 1, so its
@@ -460,6 +470,25 @@ pub struct RoceComm {
 // and the control words are addresses.
 unsafe impl Send for RoceComm {}
 unsafe impl Sync for RoceComm {}
+
+#[doc(hidden)]
+pub fn start_with_rollback(
+    started: &AtomicBool,
+    start_lock: &Mutex<()>,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if started.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let _lock = start_lock.lock().map_err(|_| "RoCE start lock is poisoned".to_string())?;
+    if started.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Do not publish readiness until startup and optional isolation both succeed. Every error returns with the flag still false.
+    start()?;
+    started.store(true, Ordering::Release);
+    Ok(())
+}
 
 impl RoceComm {
     /// Rank `rank` (0 or 1) of a pair, with one site per entry of `caps` (bytes per rank of the largest message each site carries).
@@ -552,6 +581,7 @@ impl RoceComm {
             sms,
             connected: false,
             started: AtomicBool::new(false),
+            start_lock: Mutex::new(()),
             aborted: AtomicBool::new(false),
             isolated: std::sync::atomic::AtomicUsize::new(0),
             issued: (0..nsites).map(|_| AtomicU64::new(0)).collect(),
@@ -628,28 +658,31 @@ impl RoceComm {
         if !self.connected {
             return Err("start before connect".into());
         }
-        if self.started.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        #[cfg(not(gb_no_cuda))]
-        {
-            let mut e = [0u8; 256];
-            let cpu = self.cfg.proxy_cpu.map_or(-1, |c| c as i32);
-            // SAFETY: the context is live; e is writable
-            let rc = unsafe { ffi::gb_roce_start(self.ctx, cpu, e.as_mut_ptr() as *mut _, e.len() as i32) };
-            if rc != 0 {
-                return Err(text(&e));
-            }
-            if self.cfg.isolate_proxy && cpu >= 0 {
-                // SAFETY: as above
-                let n = unsafe { ffi::gb_roce_isolate(self.ctx, e.as_mut_ptr() as *mut _, e.len() as i32) };
-                if n < 0 {
+        start_with_rollback(&self.started, &self.start_lock, || {
+            #[cfg(not(gb_no_cuda))]
+            {
+                let mut e = [0u8; 256];
+                let cpu = self.cfg.proxy_cpu.map_or(-1, |c| c as i32);
+                // SAFETY: the context is live; e is writable
+                let rc = unsafe { ffi::gb_roce_start(self.ctx, cpu, e.as_mut_ptr() as *mut _, e.len() as i32) };
+                if rc != 0 {
                     return Err(text(&e));
                 }
-                self.isolated.store(n as usize, Ordering::Release);
+                if self.cfg.isolate_proxy && cpu >= 0 {
+                    // SAFETY: as above
+                    let n = unsafe { ffi::gb_roce_isolate(self.ctx, e.as_mut_ptr() as *mut _, e.len() as i32) };
+                    if n < 0 {
+                        let error = text(&e);
+                        // The proxy is already running: put it back down so this failed start really is retryable.
+                        // SAFETY: the live context was started immediately above.
+                        unsafe { ffi::gb_roce_stop(self.ctx) };
+                        return Err(error);
+                    }
+                    self.isolated.store(n as usize, Ordering::Release);
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// How many other threads had the proxy's core taken out of their affinity mask at [`start`](Self::start).
@@ -922,6 +955,22 @@ impl Drop for RoceComm {
 mod tests {
     use super::*;
 
+    /// The region a planner charges is the layout's: four halves of every site (rounded to a page) after a 64 KiB-aligned header, ring and
+    /// flag slots, the whole rounded to 64 KiB; no sites, no region.
+    #[test]
+    fn the_planned_region_is_the_layouts_size() {
+        let cfg = RoceConfig::default();
+        assert_eq!(region_bytes(&cfg, &[]), 0);
+        assert_eq!(region_bytes(&cfg, &[1 << 20]), 4 * (1 << 20) + 65536);
+        // a cap off the page is rounded up per half, and the region to 64 KiB
+        assert_eq!(region_bytes(&cfg, &[100]), 2 * 65536, "64 KiB of header, 16 KiB of halves, rounded to 64 KiB");
+        let caps = [128 << 10, 256 << 10, 512 << 10, 1 << 20, 2 << 20, 8 << 20, 8 << 20, 32 << 20, 4 << 20, 16 << 20];
+        let b = region_bytes(&cfg, &caps);
+        assert_eq!(b, Layout::of(&cfg, &caps).bytes as u64);
+        assert_eq!(b % 65536, 0);
+        assert!(b >= 4 * caps.iter().sum::<usize>() as u64 && b < 4 * caps.iter().sum::<usize>() as u64 + (1 << 20), "{b}");
+    }
+
     #[test]
     fn the_records_match_the_c_layout() {
         let c = c_abi();
@@ -992,5 +1041,37 @@ mod tests {
         let mut d = c.clone();
         d.stripe_min = 16 << 10;
         assert_ne!(Layout::of(&d, &[512 << 10, 64 << 20]).hash, a.hash);
+    }
+
+    #[test]
+    fn a_failed_start_can_be_retried_and_a_successful_start_is_idempotent() {
+        let started = AtomicBool::new(false);
+        let lock = Mutex::new(());
+        let mut attempts = 0;
+        let mut call = || {
+            start_with_rollback(&started, &lock, || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err("injected proxy startup failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        assert_eq!(call().unwrap_err(), "injected proxy startup failure");
+        assert!(!started.load(Ordering::Acquire));
+        call().unwrap();
+        assert!(started.load(Ordering::Acquire));
+        call().unwrap();
+        assert_eq!(attempts, 2, "the double-start after success must not invoke the proxy again");
+    }
+
+    #[test]
+    fn isolation_failure_does_not_publish_started() {
+        let started = AtomicBool::new(false);
+        let lock = Mutex::new(());
+        let result = start_with_rollback(&started, &lock, || Err("injected isolation failure".into()));
+        assert_eq!(result.unwrap_err(), "injected isolation failure");
+        assert!(!started.load(Ordering::Acquire));
     }
 }

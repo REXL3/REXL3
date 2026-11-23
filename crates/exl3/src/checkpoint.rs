@@ -121,6 +121,12 @@ fn invalid(msg: impl Into<String>) -> Error {
 /// The length prefix is capped at `MAX_HEADER_BYTES` and must fit in the file, so a hostile or truncated file
 /// is an error and never a huge allocation.
 pub fn read_header_checked(path: &Path) -> std::io::Result<(u64, u64, BTreeMap<String, Value>)> {
+    let (size, data_len, buf) = read_header_bytes(path)?;
+    Ok((size, data_len, header_values(path, &buf)?))
+}
+
+/// The checked header's JSON bytes: (header bytes, data bytes after the header, the JSON text). See [`read_header_checked`].
+fn read_header_bytes(path: &Path) -> std::io::Result<(u64, u64, Vec<u8>)> {
     let ctx = |e: Error| Error::new(e.kind(), format!("{}: {e}", path.display()));
     let mut f = File::open(path).map_err(ctx)?;
     let file_len = f.metadata().map_err(ctx)?.len();
@@ -139,13 +145,126 @@ pub fn read_header_checked(path: &Path) -> std::io::Result<(u64, u64, BTreeMap<S
         .ok_or_else(|| ctx(invalid(format!("header length {size} runs past the end of a {file_len}-byte file"))))?;
     let mut buf = vec![0u8; size as usize];
     f.read_exact(&mut buf).map_err(ctx)?;
-    let v: Value = serde_json::from_slice(&buf).map_err(|e| ctx(invalid(e.to_string())))?;
+    Ok((size, data_len, buf))
+}
+
+/// A header's JSON text as `read_header_checked` returns it: every tensor's value, `__metadata__` left out.
+fn header_values(path: &Path, buf: &[u8]) -> std::io::Result<BTreeMap<String, Value>> {
+    let ctx = |e: Error| Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let v: Value = serde_json::from_slice(buf).map_err(|e| ctx(invalid(e.to_string())))?;
     let mut map: BTreeMap<String, Value> = match v {
         Value::Object(m) => m.into_iter().collect(),
         _ => return Err(ctx(invalid("header is not an object"))),
     };
     map.remove("__metadata__");
-    Ok((size, data_len, map))
+    Ok(map)
+}
+
+/// One tensor's record in a well-formed header: the three fields [`entry_of`] reads, in the types it accepts. Only a JSON object with
+/// each of them exactly once parses (other keys are skipped, as `entry_of` ignores them); an array, a missing or repeated field, or a
+/// value of another type fails, and the header is then read the general way.
+struct RawTensor {
+    dtype: String,
+    shape: Vec<u64>,
+    data_offsets: Vec<u64>,
+}
+
+impl<'de> serde::Deserialize<'de> for RawTensor {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = RawTensor;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a tensor record object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<RawTensor, A::Error> {
+                use serde::de::Error as _;
+                let (mut dtype, mut shape, mut offsets) = (None, None, None);
+                while let Some(key) = m.next_key::<String>()? {
+                    match key.as_str() {
+                        "dtype" if dtype.is_none() => dtype = Some(m.next_value::<String>()?),
+                        "shape" if shape.is_none() => shape = Some(m.next_value::<Vec<u64>>()?),
+                        "data_offsets" if offsets.is_none() => offsets = Some(m.next_value::<Vec<u64>>()?),
+                        "dtype" | "shape" | "data_offsets" => return Err(A::Error::custom("a repeated field")),
+                        _ => {
+                            m.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                match (dtype, shape, offsets) {
+                    (Some(dtype), Some(shape), Some(data_offsets)) => Ok(RawTensor { dtype, shape, data_offsets }),
+                    _ => Err(A::Error::custom("a missing field")),
+                }
+            }
+        }
+        d.deserialize_map(Visit)
+    }
+}
+
+/// A header parsed straight into tensor records, without building a `Value` tree (on a large pack the tree is most of a scan's time):
+/// `__metadata__` skipped, a name given twice keeps its last record, as `header_values` does. Anything else fails, and the caller then
+/// reads the header the general way, so a malformed record is reported exactly as before.
+struct RawHeader(BTreeMap<String, RawTensor>);
+
+impl<'de> serde::Deserialize<'de> for RawHeader {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = RawHeader;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a safetensors header object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<RawHeader, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(name) = m.next_key::<String>()? {
+                    if name == "__metadata__" {
+                        m.next_value::<serde::de::IgnoredAny>()?;
+                    } else {
+                        let t = m.next_value::<RawTensor>()?;
+                        out.insert(name, t);
+                    }
+                }
+                Ok(RawHeader(out))
+            }
+        }
+        d.deserialize_map(Visit)
+    }
+}
+
+/// [`entry_of`] for a record of the typed fast path: the same entry, or the same reason, as `entry_of` gives for its `Value`.
+fn entry_of_raw(file: &str, t: RawTensor) -> Result<Entry, String> {
+    let shape = t
+        .shape
+        .into_iter()
+        .map(|x| usize::try_from(x).map_err(|_| "shape holds a non-integer"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if t.data_offsets.len() != 2 {
+        return Err(format!("data_offsets has {} values, expected 2", t.data_offsets.len()));
+    }
+    Ok(Entry { file: file.to_string(), dtype: t.dtype, shape, offsets: (t.data_offsets[0], t.data_offsets[1]) })
+}
+
+/// One shard's header for [`scan`]: (header bytes, data bytes, every tensor by name with its entry or the reason it is malformed), in
+/// name order. Parsed into records directly when the header is well formed, else through [`header_values`] and [`entry_of`].
+type ShardHeader = (u64, u64, Vec<(String, Result<Entry, String>)>);
+
+fn shard_header(path: &Path, fname: &str) -> std::io::Result<ShardHeader> {
+    let (size, data_len, buf) = read_header_bytes(path)?;
+    if let Ok(RawHeader(raw)) = serde_json::from_slice::<RawHeader>(&buf) {
+        drop(buf); // the header's text is not needed past its records
+        return Ok((size, data_len, raw.into_iter().map(|(name, t)| (name, entry_of_raw(fname, t))).collect()));
+    }
+    let map = header_values(path, &buf)?;
+    Ok((
+        size,
+        data_len,
+        map.into_iter()
+            .map(|(name, v)| {
+                let e = entry_of(fname, &v);
+                (name, e)
+            })
+            .collect(),
+    ))
 }
 
 pub fn read_header(path: &Path) -> std::io::Result<(u64, BTreeMap<String, Value>)> {
@@ -354,6 +473,80 @@ where
     Ok(b.chunks_exact(2).map(|c| conv(u16::from_le_bytes([c[0], c[1]]))).collect())
 }
 
+/// How many threads read a pack's group markers ([`read_markers_ahead`]), and so the most shard files it holds open at once.
+#[cfg(unix)]
+const MARKER_THREADS: usize = 32;
+
+/// The markers of many groups, read up front on several threads: `(prefix, file, header size, marker entry)` in, `prefix -> marker`
+/// out. A pack has one 4-byte marker per EXL3 group, scattered through its shards, and a scan checks every one. Read one after another
+/// they cost a page-sized disk read each on a pack that is not in the page cache (75,751 groups took about 18 s on one model); the
+/// reads are independent, so the threads overlap them.
+///
+/// The jobs are sorted by shard and offset and split into one contiguous run per thread, and a thread holds only the shard it is
+/// reading (it closes it before opening the next), so at most [`MARKER_THREADS`] files are open whatever the shard count. Only reads
+/// that succeed are returned, and each value is exactly the one [`read_marker`] returns for that entry. A prefix missing from the map
+/// (its open or read failed, for example at the process's file limit, its thread could not be started or joined, or this is not a unix
+/// build) is read by the caller with [`read_marker`], so any error it reports is the serial reader's own.
+#[cfg(unix)]
+fn read_markers_ahead(jobs: &[(String, PathBuf, u64, Entry)]) -> BTreeMap<String, u32> {
+    let mut out = BTreeMap::new();
+    if jobs.is_empty() {
+        return out;
+    }
+    let mut order: Vec<&(String, PathBuf, u64, Entry)> = jobs.iter().collect();
+    order.sort_by(|a, b| (&a.1, a.3.offsets.0).cmp(&(&b.1, b.3.offsets.0)));
+    let per = order.len().div_ceil(MARKER_THREADS).max(1);
+    std::thread::scope(|sc| {
+        let mut workers = Vec::new();
+        for run in order.chunks(per) {
+            match std::thread::Builder::new().name("rexl3-markers".into()).spawn_scoped(sc, move || read_marker_run(run)) {
+                Ok(w) => workers.push(w),
+                Err(_) => break, // the runs not started are read serially by the caller
+            }
+        }
+        for w in workers {
+            if let Ok(read) = w.join() {
+                out.extend(read);
+            }
+        }
+    });
+    out
+}
+
+#[cfg(not(unix))]
+fn read_markers_ahead(_jobs: &[(String, PathBuf, u64, Entry)]) -> BTreeMap<String, u32> {
+    BTreeMap::new() // the caller reads every marker serially
+}
+
+/// One thread's run of [`read_markers_ahead`]: the markers it could read. One shard file is open at a time; a failed open or read
+/// leaves that prefix out (the caller retries it serially).
+#[cfg(unix)]
+fn read_marker_run(run: &[&(String, PathBuf, u64, Entry)]) -> Vec<(String, u32)> {
+    use std::os::unix::fs::FileExt;
+    let mut open: Option<(&Path, File)> = None;
+    let mut read = Vec::with_capacity(run.len());
+    for (prefix, path, header_size, e) in run.iter().copied() {
+        if e.dtype != "I32" || e.nbytes() != 4 {
+            continue; // the serial reader reports the type error
+        }
+        let Ok(start) = tensor_start(*header_size, e) else { continue };
+        if open.as_ref().map(|(p, _)| *p != path.as_path()).unwrap_or(true) {
+            open = None; // close the previous shard before opening the next
+            match File::open(path) {
+                Ok(f) => open = Some((path.as_path(), f)),
+                Err(_) => continue,
+            }
+        }
+        let Some((_, f)) = &open else { continue };
+        let _t = loadstats::timer(Stage::Read, 4);
+        let mut b = [0u8; 4];
+        if f.read_exact_at(&mut b, start).is_ok() {
+            read.push((prefix.clone(), u32::from_le_bytes(b)));
+        }
+    }
+    read
+}
+
 fn read_marker(path: &Path, header_size: u64, e: &Entry) -> Result<u32, String> {
     if e.dtype != "I32" || e.nbytes() != 4 {
         return Err(format!("marker must be one int32, got {} {:?}", e.dtype, e.shape));
@@ -362,14 +555,80 @@ fn read_marker(path: &Path, header_size: u64, e: &Entry) -> Result<u32, String> 
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+/// A well-formed index: a JSON object whose one `weight_map` is an object of strings (other keys skipped). Anything else fails, and
+/// [`index_files`] then reads the index the general way.
+struct Index(BTreeMap<String, String>);
+
+impl<'de> serde::Deserialize<'de> for Index {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Index;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an index object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Index, A::Error> {
+                use serde::de::Error as _;
+                let mut map = None;
+                while let Some(key) = m.next_key::<String>()? {
+                    if key == "weight_map" {
+                        if map.is_some() {
+                            return Err(A::Error::custom("a repeated weight_map"));
+                        }
+                        map = Some(m.next_value::<StringMap>()?.0);
+                    } else {
+                        m.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                map.map(Index).ok_or_else(|| A::Error::custom("no weight_map"))
+            }
+        }
+        d.deserialize_map(Visit)
+    }
+}
+
+/// A JSON object of strings (a name given twice keeps its last value, as a `Value` object does).
+struct StringMap(BTreeMap<String, String>);
+
+impl<'de> serde::Deserialize<'de> for StringMap {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = StringMap;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object of strings")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<StringMap, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some((k, v)) = m.next_entry::<String, String>()? {
+                    out.insert(k, v);
+                }
+                Ok(StringMap(out))
+            }
+        }
+        d.deserialize_map(Visit)
+    }
+}
+
 /// The `weight_map` of a `model.safetensors.index.json` (tensor name -> shard file), if the folder has one.
 fn index_files(root: &Path, issues: &mut Vec<String>) -> Option<BTreeMap<String, String>> {
     let p = root.join("model.safetensors.index.json");
     if !p.exists() {
         return None;
     }
-    let parsed =
-        std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string()));
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) => {
+            issues.push(format!("model.safetensors.index.json: {e}"));
+            return None;
+        }
+    };
+    // a well-formed index parsed straight into its map (no `Value` tree: a 33 MB index took most of a second that way); anything else
+    // the general way below, which reports it as before
+    if let Ok(Index(weight_map)) = serde_json::from_slice::<Index>(&bytes) {
+        return Some(weight_map);
+    }
+    let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string());
     match parsed {
         Ok(v) => match v.get("weight_map").and_then(|m| m.as_object()) {
             Some(m) => Some(m.iter().filter_map(|(k, f)| f.as_str().map(|f| (k.clone(), f.to_string()))).collect()),
@@ -434,9 +693,10 @@ fn scan_impl(root: &Path, read_markers: bool, index_places: bool) -> std::io::Re
     let mut malformed: BTreeMap<String, String> = BTreeMap::new();
     for path in &files {
         let fname = path.file_name().unwrap().to_string_lossy().to_string();
-        let (hs, data_len, header) = read_header_checked(path)?;
+        // one shard at a time, its records merged before the next is read: the scan holds one header's records, never all of them
+        let (hs, data_len, header) = shard_header(path, &fname)?;
         ck.header_sizes.insert(fname.clone(), hs);
-        for (name, v) in header {
+        for (name, parsed) in header {
             if index_places {
                 if let Some(wm) = &weight_map {
                     match wm.get(&name) {
@@ -455,7 +715,7 @@ fn scan_impl(root: &Path, read_markers: bool, index_places: bool) -> std::io::Re
             if malformed.contains_key(&name) {
                 continue;
             }
-            let e = match entry_of(&fname, &v).and_then(|e| validate_entry(&e, data_len).map(|_| e)) {
+            let e = match parsed.and_then(|e| validate_entry(&e, data_len).map(|_| e)) {
                 Ok(e) => e,
                 Err(why) => {
                     malformed.insert(name, why);
@@ -513,6 +773,21 @@ fn scan_impl(root: &Path, read_markers: bool, index_places: bool) -> std::io::Re
             }
         }
     }
+    // every group's marker, read ahead on several threads (the loop below checks them one by one, in order)
+    let marker_jobs: Vec<(String, PathBuf, u64, Entry)> = if read_markers {
+        by_prefix
+            .iter()
+            .filter(|(prefix, parts)| parts.contains_key("trellis") && !bad_prefix.contains_key(*prefix))
+            .filter_map(|(prefix, parts)| {
+                let g = parse_group(prefix, parts).ok().filter(|g| g.codebook != Codebook::Inst3)?;
+                let e = parts.get(g.codebook.name())?;
+                Some((prefix.clone(), root.join(&e.file), *ck.header_sizes.get(&e.file)?, e.clone()))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut markers_ahead = read_markers_ahead(&marker_jobs);
     let mut taken: BTreeSet<String> = BTreeSet::new();
     for (prefix, parts) in &by_prefix {
         if !parts.contains_key("trellis") && !bad_prefix.contains_key(prefix) {
@@ -530,7 +805,11 @@ fn scan_impl(root: &Path, read_markers: bool, index_places: bool) -> std::io::Re
                 if read_markers && g.codebook != Codebook::Inst3 {
                     let e = &parts[g.codebook.name()];
                     let want = if g.codebook == Codebook::Mcg { MARKER_MCG } else { MARKER_MUL1 };
-                    match read_marker(&root.join(&e.file), ck.header_sizes[&e.file], e) {
+                    let marker = match markers_ahead.remove(prefix) {
+                        Some(v) => Ok(v),
+                        None => read_marker(&root.join(&e.file), ck.header_sizes[&e.file], e),
+                    };
+                    match marker {
                         Ok(v) if v == want => {
                             ck.markers.insert(format!("{prefix}.{}", g.codebook.name()), v);
                         }
@@ -775,5 +1054,142 @@ mod read_le16_tests {
             let err = read_le16_at(&f, 0, 4096, threads, |v| v).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::UnexpectedEof, "threads {threads}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn entry(file: &str, dtype: &str, offsets: (u64, u64)) -> Entry {
+        Entry { file: file.into(), dtype: dtype.into(), shape: Vec::new(), offsets }
+    }
+
+    /// A marker the read-ahead cannot read is left out of its map, never stored as a failure, so the scan reads it again serially and
+    /// any refusal is the serial reader's.
+    #[test]
+    fn read_ahead_returns_only_successful_reads() {
+        let dir = std::env::temp_dir().join(format!("gb-exl3-read-ahead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shard = dir.join("m.safetensors");
+        // header size 0: the 8-byte length prefix, then the data (two markers)
+        let mut bytes = 0u64.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&MARKER_MCG.to_le_bytes());
+        bytes.extend_from_slice(&MARKER_MUL1.to_le_bytes());
+        std::fs::write(&shard, &bytes).unwrap();
+        let missing = dir.join("missing.safetensors");
+        let jobs = vec![
+            ("a".to_string(), shard.clone(), 0, entry("m.safetensors", "I32", (0, 4))),
+            ("b".to_string(), shard.clone(), 0, entry("m.safetensors", "I32", (4, 8))),
+            ("c".to_string(), missing.clone(), 0, entry("missing.safetensors", "I32", (0, 4))),
+            ("d".to_string(), shard.clone(), 0, entry("m.safetensors", "F16", (0, 2))),
+            ("e".to_string(), shard.clone(), 0, entry("m.safetensors", "I32", (8, 12))),
+        ];
+        let got = read_markers_ahead(&jobs);
+        assert_eq!(got, BTreeMap::from([("a".to_string(), MARKER_MCG), ("b".to_string(), MARKER_MUL1)]));
+        // what the serial reader then reports for the left-out ones
+        assert!(read_marker(&missing, 0, &jobs[2].3).unwrap_err().starts_with("cannot read marker: "));
+        assert!(read_marker(&shard, 0, &jobs[3].3).unwrap_err().starts_with("marker must be one int32"));
+        assert!(read_marker(&shard, 0, &jobs[4].3).unwrap_err().starts_with("cannot read marker: "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a shard's tensors were before the typed fast path: the `Value` tree, then [`entry_of`] for each tensor.
+    fn general_path(path: &Path, fname: &str) -> std::io::Result<ShardHeader> {
+        let (size, data_len, map) = read_header_checked(path)?;
+        Ok((
+            size,
+            data_len,
+            map.into_iter()
+                .map(|(name, v)| {
+                    let e = entry_of(fname, &v);
+                    (name, e)
+                })
+                .collect(),
+        ))
+    }
+
+    fn write_shard(path: &Path, header: &str, data: usize) {
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.resize(bytes.len() + data, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The fast path reads every header to exactly what the general path reads: well-formed records, and each kind of malformed one
+    /// (which makes the fast path give up on the file, so the general path's reasons are kept), and headers that are not readable at all.
+    #[test]
+    fn the_typed_header_path_reads_what_the_value_path_reads() {
+        let dir = std::env::temp_dir().join(format!("gb-exl3-typed-header-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = r#""a.trellis":{"dtype":"I16","shape":[1,2,32],"data_offsets":[0,128]},"b":{"shape":[2],"dtype":"F16","data_offsets":[128,132],"x":[1,{"y":2}]}"#;
+        let cases = [
+            format!("{{{ok}}}"),
+            format!(r#"{{"__metadata__":{{"format":"pt"}},{ok}}}"#),
+            format!(r#"{{{ok},"a.trellis":{{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}}}"#), // a name given twice: the last record
+            format!(r#"{{{ok},"c":["F16",[2],[0,4]]}}"#),                                          // a record that is an array
+            format!(r#"{{{ok},"c":{{"shape":[2],"data_offsets":[0,4]}}}}"#),                       // no dtype
+            format!(r#"{{{ok},"c":{{"dtype":"F16","dtype":"F32","shape":[2],"data_offsets":[0,4]}}}}"#), // a repeated field
+            format!(r#"{{{ok},"c":{{"dtype":"F16","shape":[2.0],"data_offsets":[0,4]}}}}"#),       // a float dimension
+            format!(r#"{{{ok},"c":{{"dtype":"F16","shape":[-2],"data_offsets":[0,4]}}}}"#),
+            format!(r#"{{{ok},"c":{{"dtype":"F16","shape":[2],"data_offsets":[0,4,8]}}}}"#), // three offsets
+            format!(r#"{{{ok},"c":{{"dtype":7,"shape":[2],"data_offsets":[0,4]}}}}"#),
+            format!(r#"{{{ok},"c":null}}"#),
+            format!(r#"[{{{ok}}}]"#), // not an object: an error either way
+            r#"{"a": "#.to_string(),  // not JSON
+        ];
+        for (i, header) in cases.iter().enumerate() {
+            let path = dir.join(format!("m{i}.safetensors"));
+            write_shard(&path, header, 256);
+            let fast = shard_header(&path, "m.safetensors");
+            let general = general_path(&path, "m.safetensors");
+            match (fast, general) {
+                (Ok(f), Ok(g)) => assert_eq!(f, g, "case {i}: {header}"),
+                (Err(f), Err(g)) => assert_eq!(f.to_string(), g.to_string(), "case {i}"),
+                (f, g) => panic!("case {i}: fast {f:?}, general {g:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The index's fast path returns the general path's map for a well-formed index and leaves anything else to it (issues included).
+    #[test]
+    fn the_typed_index_path_reads_what_the_value_path_reads() {
+        let dir = std::env::temp_dir().join(format!("gb-exl3-typed-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let general = |text: &str| -> (Option<BTreeMap<String, String>>, Vec<String>) {
+            let mut issues = Vec::new();
+            let map = match serde_json::from_str::<Value>(text) {
+                Ok(v) => match v.get("weight_map").and_then(|m| m.as_object()) {
+                    Some(m) => Some(m.iter().filter_map(|(k, f)| f.as_str().map(|f| (k.clone(), f.to_string()))).collect()),
+                    None => {
+                        issues.push("model.safetensors.index.json has no weight_map".to_string());
+                        None
+                    }
+                },
+                Err(e) => {
+                    issues.push(format!("model.safetensors.index.json: {e}"));
+                    None
+                }
+            };
+            (map, issues)
+        };
+        for text in [
+            r#"{"metadata":{"total_size":4},"weight_map":{"a":"x.safetensors","b":"y.safetensors"}}"#,
+            r#"{"weight_map":{"a":"x.safetensors","a":"y.safetensors"}}"#,
+            r#"{"weight_map":{"a":"x.safetensors","b":3}}"#,
+            r#"{"weight_map":{"a":"x.safetensors"},"weight_map":{"b":"y.safetensors"}}"#,
+            r#"{"metadata":{}}"#,
+            r#"[{"a":"x.safetensors"}]"#,
+            r#"{"weight_map":["a"]}"#,
+            r#"{"weight_map":"#,
+        ] {
+            std::fs::write(dir.join("model.safetensors.index.json"), text).unwrap();
+            let mut issues = Vec::new();
+            let got = index_files(&dir, &mut issues);
+            assert_eq!((got, issues), general(text), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

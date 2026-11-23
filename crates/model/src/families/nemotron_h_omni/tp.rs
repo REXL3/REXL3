@@ -45,6 +45,33 @@ pub trait TpComm: Send + Sync {
     fn topology(&self) -> TpTopology;
     fn allreduce_sum_f32(&self, buf: &mut DevBuf, off_bytes: usize, count: usize, st: &Stream) -> Result<(), CudaError>;
 
+    /// Gather `rank_bytes` per rank into the contiguous `ranks * rank_bytes` range at `off_bytes`, in place. Communicators
+    /// without this collective (including test doubles and the RoCE-only transport) fail rather than silently skipping it.
+    fn allgather_bytes(&self, buf: &mut DevBuf, off_bytes: usize, rank_bytes: usize, st: &Stream) -> Result<(), CudaError> {
+        let _ = (buf, off_bytes, rank_bytes, st);
+        if self.topology().is_single() {
+            Ok(())
+        } else {
+            Err(CudaError(gb_cuda::nccl::ERR_BAD_ARGUMENT))
+        }
+    }
+
+    /// Reduce `ranks * recv_count` f32 values and keep this rank's contiguous `recv_count`-element slice in place.
+    fn reduce_scatter_sum_f32_in_place(
+        &self,
+        buf: &mut DevBuf,
+        off_bytes: usize,
+        recv_count: usize,
+        st: &Stream,
+    ) -> Result<(), CudaError> {
+        let _ = (buf, off_bytes, recv_count, st);
+        if self.topology().is_single() {
+            Ok(())
+        } else {
+            Err(CudaError(gb_cuda::nccl::ERR_BAD_ARGUMENT))
+        }
+    }
+
     /// The same sum by the ONE-SHOT exchange: every rank sends its range to every peer, receives theirs into staging slots, and one
     /// kernel adds the R operands in fixed rank order (one network hop whatever R is; `(R - 1) x` the bytes). Over buffers of disjoint
     /// support it is bit-identical to [`allreduce_sum_f32`](Self::allreduce_sum_f32). The default IS the allreduce (a communicator with

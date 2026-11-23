@@ -75,30 +75,56 @@ extern "C" __global__ void hc_norm_stage_kernel(
     }
 }
 
-// ── Kernel 2: Coalesced down projection ──
-// Grid: ((rank + 7) / 8, T), Block: 256 (32 warps across blocks, 1 warp per rank row)
+// ── Kernel 2: K-split down projection, optionally fused with injection ──
+// Grid: ((rank + inject_rows + 1) / 2, T), Block: 256. Four warps split each output row's K dimension;
+// two rows share a CTA. Each lane first reproduces its original serial accumulator within each contiguous
+// K quarter. The quarters are then summed in a fixed order per lane before the original warp reduction,
+// exposing 4x as many CTAs on small token batches with a deterministic FP32 reduction.
 extern "C" __global__ void hc_down_coalesced_kernel(
     const float* __restrict__ normed,
     const half* __restrict__ down_w,
     float* __restrict__ low_out,
+    const half* __restrict__ inject_w,
+    float* __restrict__ inj_out,
     const unsigned int hc_dim,
     const unsigned int rank,
+    const unsigned int hc,
     const float inv_hc
 ) {
     const unsigned int t = blockIdx.y;
-    const unsigned int r = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
-    if (r >= rank) return;
+    const unsigned int local_row = threadIdx.x >> 7; // two groups of four warps
+    const unsigned int r = blockIdx.x * 2 + local_row;
+    const unsigned int rows = rank + (inject_w != nullptr ? hc : 0u);
+    const bool valid = r < rows;
     const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int part = (threadIdx.x >> 5) & 3u;
 
     const float* nx = normed + (size_t)t * hc_dim;
-    const half* row = down_w + (size_t)r * hc_dim;
+    const bool is_inject = r >= rank;
+    // Injection is an fp32 golden-visible output: retain the original one-warp serial accumulation and reduction
+    // order bit for bit. The other three warps contribute zero while the down rows use the K-split path.
+    const unsigned int begin = is_inject ? 0u : (hc_dim * part) >> 2;
+    const unsigned int end = is_inject ? hc_dim : (hc_dim * (part + 1)) >> 2;
+    const half* row = !valid
+        ? down_w
+        : (is_inject ? inject_w + (size_t)(r - rank) * hc_dim : down_w + (size_t)r * hc_dim);
     float acc = 0.0f;
-    for (unsigned int i = lane; i < hc_dim; i += 32) {
+    for (unsigned int i = begin + lane; valid && (!is_inject || part == 0) && i < end; i += 32) {
         acc += __half2float(row[i]) * nx[i];
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
-    if (lane == 0) low_out[(size_t)t * rank + r] = qhc_silu(acc * inv_hc);
+
+    __shared__ float partial[2][4][32];
+    partial[local_row][part][lane] = acc;
+    __syncthreads();
+    if (part == 0) {
+        acc = ((partial[local_row][0][lane] + partial[local_row][1][lane]) + partial[local_row][2][lane]) + partial[local_row][3][lane];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
+        if (lane == 0 && valid) {
+            if (is_inject) inj_out[(size_t)t * hc + (r - rank)] = 2.0f * qhc_sigmoid(acc * inv_hc);
+            else low_out[(size_t)t * rank + r] = qhc_silu(acc * inv_hc);
+        }
+    }
 }
 
 // ── Kernel 3: Coalesced up projection + stream mean ──
@@ -139,32 +165,6 @@ extern "C" __global__ void hc_up_coalesced_kernel(
     if (lane == 0) {
         y_out[(size_t)t * H + d] = __float2bfloat16(mixed * inv_hc);
     }
-}
-
-// ── Kernel 4: Coalesced block injection ──
-// Grid: (1, T), Block: 256
-extern "C" __global__ void hc_inject_coalesced_kernel(
-    const float* __restrict__ normed,
-    const half* __restrict__ inject_w,
-    float* __restrict__ inj_out,
-    const unsigned int hc_dim,
-    const unsigned int hc,
-    const float inv_hc
-) {
-    const unsigned int t = blockIdx.y;
-    const unsigned int s2 = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
-    if (s2 >= hc) return;
-    const unsigned int lane = threadIdx.x & 31u;
-
-    const float* nx = normed + (size_t)t * hc_dim;
-    const half* row = inject_w + (size_t)s2 * hc_dim;
-    float acc = 0.0f;
-    for (unsigned int i = lane; i < hc_dim; i += 32) {
-        acc += __half2float(row[i]) * nx[i];
-    }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
-    if (lane == 0) inj_out[(size_t)t * hc + s2] = 2.0f * qhc_sigmoid(acc * inv_hc);
 }
 
 // ── Kernel 5: Post injection ──
@@ -257,13 +257,17 @@ GB_EXPORT int gb_fn_hc_pre(
         norm_eps
     );
 
-    // 2. Coalesced down projection
-    hc_down_coalesced_kernel<<<dim3((rank + 7) / 8, num_tokens), QHC_BLOCK, 0, st>>>(
+    // 2. K-split down projection, with injection fused into the same launch when requested
+    const unsigned int inject_rows = inject_w != nullptr && inj_out != nullptr ? hc_mult : 0u;
+    hc_down_coalesced_kernel<<<dim3((rank + inject_rows + 1) / 2, num_tokens), QHC_BLOCK, 0, st>>>(
         (const float*)normed_scratch,
         (const half*)down_w,
         low_scratch,
+        (const half*)inject_w,
+        inj_out,
         hc_dim,
         rank,
+        hc_mult,
         inv_hc
     );
 
@@ -279,17 +283,6 @@ GB_EXPORT int gb_fn_hc_pre(
         inv_hc
     );
 
-    // 4. Coalesced inject (if requested)
-    if (inject_w != nullptr && inj_out != nullptr) {
-        hc_inject_coalesced_kernel<<<dim3((hc_mult + 7) / 8, num_tokens), QHC_BLOCK, 0, st>>>(
-            (const float*)normed_scratch,
-            (const half*)inject_w,
-            inj_out,
-            hc_dim,
-            hc_mult,
-            inv_hc
-        );
-    }
     return GB_CHECK_LAUNCH();
 }
 

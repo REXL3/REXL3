@@ -74,6 +74,17 @@ fn cached_engine_with(units: usize, policy: CutPolicy) -> Engine<MockBackend> {
         .with_prefix_cache(PrefixConfig { policy, ghost_blocks: 1 << 12, ..Default::default() })
 }
 
+/// An engine whose backend's block pool really runs out when the entries hold the whole page budget (captures are skipped then, as the
+/// real backends' do): the page-aware planning is what makes room before that happens.
+fn cached_engine_strict(units: usize) -> Engine<MockBackend> {
+    let b = MockBackend::new(VOCAB, SLOTS, Fault::None)
+        .with_path_dependent_state()
+        .with_native_draft()
+        .with_prefix_cache(budget(units), PrefixFault::None)
+        .with_strict_cache_pages();
+    Engine::new(b, admission(), engine_config(), drafter()).with_prefix_cache(policy())
+}
+
 fn plain_engine(slice: Option<usize>) -> Engine<MockBackend> {
     Engine::new(mock(slice, None), admission(), engine_config(), drafter())
 }
@@ -227,6 +238,107 @@ fn a_hit_counts_in_the_stats_and_saves_the_prefill() {
     assert_eq!((s.lookups, s.hits, s.tokens_saved), (2, 1, 892));
     assert!((s.hit_rate() - 0.5).abs() < 1e-9);
     assert_eq!(s.bytes_held, s.entries * (1 << 20) + s.pages_held * (1 << 16));
+}
+
+/// The gate's shape: on a fresh cache a long prompt's entry fills nearly every page of the minimal budget, so the next short prompt's
+/// capture must evict it (least recently used) instead of silently skipping — otherwise the short prompt never gets an entry and its next
+/// occurrence misses. The strict mock runs out of pages exactly like the real block pools do.
+#[test]
+fn a_long_entry_that_fills_the_cache_does_not_block_a_short_capture() {
+    let mut e = cached_engine_strict(2); // 2 snapshot slots, 16 pages
+    let long = toks(91, 3600); // end cut 3592: 15 of the 16 pages
+    one(&mut e, greedy(long, 8));
+    let s = e.prefix_stats();
+    assert_eq!(s.entries, 1);
+    assert!(s.pages_held >= 15, "the long entry fills the cache: {s:?}");
+    let short = toks(92, 700); // end cut 692: 3 pages
+    let o1 = one(&mut e, greedy(short.clone(), 8));
+    assert_eq!(o1.cached_tokens, 0, "cold for the short prompt");
+    let s = e.prefix_stats();
+    assert_eq!(s.entries, 1, "the short entry replaced the long one: {s:?}");
+    assert_eq!((s.inserts, s.evictions), (2, 1), "{s:?}");
+    assert!(s.evicted_for_pages >= 1, "the eviction made room for the short capture's pages: {s:?}");
+    let o2 = one(&mut e, greedy(short, 8));
+    assert_eq!(o2.cached_tokens, 692, "the short capture was inserted and now hits: {o2:?}");
+    no_leaks(&e).unwrap();
+}
+
+#[test]
+fn nested_cuts_of_one_prompt_share_their_strict_page_budget() {
+    let strict = CacheBudget { snapshot_slots: 2, page_blocks: 4, ..budget(2) };
+    let b = MockBackend::new(VOCAB, SLOTS, Fault::None)
+        .with_path_dependent_state()
+        .with_native_draft()
+        .with_prefix_cache(strict, PrefixFault::None)
+        .with_strict_cache_pages();
+    let mut e = Engine::new(Flaky::new(b), admission(), engine_config(), drafter()).with_prefix_cache(policy());
+    let prompt = toks(93, 1032);
+    one(&mut e, greedy(prompt[..520].to_vec(), 8));
+    assert_eq!((e.prefix_stats().entries, e.prefix_stats().pages_held), (1, 2));
+
+    // Dropping the restored 512-token entry leaves the ghost's shared cut plus the 1,024-token
+    // end cut. They need two and four pages respectively, but only four distinct pages together.
+    e.backend.fail_restore = true;
+    one(&mut e, greedy(prompt.clone(), 8));
+    let s = e.prefix_stats();
+    assert_eq!((s.entries, s.inserts, s.pages_held), (2, 3, 4), "{s:?}");
+    assert_eq!(s.no_room, 0, "neither nested cut may be dropped: {s:?}");
+    assert_eq!((e.backend.inner.snapshots_in_use(), e.backend.inner.pages_in_use()), (2, 4));
+    assert_eq!(one(&mut e, greedy(prompt, 8)).cached_tokens, 1024);
+}
+
+/// Prompts that share an 800-token system prompt, each followed by 2,000 tokens of its own: the end cut is past the cache's reach and the
+/// shared cut is not.
+fn shared_system_prompt_queries() -> Vec<Request> {
+    let sys = toks(101, 800);
+    (0..4u64)
+        .map(|i| {
+            let mut p = sys.clone();
+            p.extend(toks(102 + i, 2000));
+            greedy(p, 10)
+        })
+        .collect()
+}
+
+/// A region cache whose reach is below the prompt: the end cut (~2,792 tokens, 11 pages) cannot be stored in 8 pages (a 2,048-token
+/// reach), but the shared 768-token cut (3 pages) can, and must be, so the next requests resume from it. The end cut is skipped and
+/// counted once per request in `no_room`, as the insert it would have been was refused before.
+#[test]
+fn a_shared_cut_is_kept_when_the_end_cut_exceeds_the_cache_reach() {
+    let bud = CacheBudget { snapshot_slots: 6, page_blocks: 8, ..budget(6) };
+    let mut e = Engine::new(mock(None, Some((bud, PrefixFault::None))), admission(), engine_config(), drafter())
+        .with_prefix_cache(policy());
+    let hits: Vec<usize> = shared_system_prompt_queries().into_iter().map(|r| one(&mut e, r).cached_tokens).collect();
+    assert_eq!(hits, vec![0, 0, 768, 768]);
+    let s = e.prefix_stats();
+    assert_eq!(
+        (s.hits, s.tokens_saved, s.inserts, s.no_room, s.evictions, s.entries, s.pages_held),
+        (2, 1536, 1, 4, 0, 1, 3),
+        "{s:?}"
+    );
+    no_leaks(&e).unwrap();
+}
+
+/// The same prompts on a backend whose block pool really runs out (the page-aware planning), with the pool filled by an earlier long
+/// entry: the shared cut's pages are made by evicting that entry, and the end cut past the reach is still skipped on its own.
+#[test]
+fn a_full_strict_cache_makes_room_for_a_shared_cut_when_the_end_cut_exceeds_the_reach() {
+    let bud = CacheBudget { snapshot_slots: 6, page_blocks: 8, ..budget(6) };
+    let b = MockBackend::new(VOCAB, SLOTS, Fault::None)
+        .with_path_dependent_state()
+        .with_native_draft()
+        .with_prefix_cache(bud, PrefixFault::None)
+        .with_strict_cache_pages();
+    let mut e = Engine::new(b, admission(), engine_config(), drafter()).with_prefix_cache(policy());
+    one(&mut e, greedy(toks(91, 2056), 8)); // end cut 2,048: all 8 pages
+    let s = e.prefix_stats();
+    assert_eq!((s.entries, s.pages_held), (1, 8), "the long entry fills the cache: {s:?}");
+    let hits: Vec<usize> = shared_system_prompt_queries().into_iter().map(|r| one(&mut e, r).cached_tokens).collect();
+    assert_eq!(hits, vec![0, 0, 768, 768]);
+    let s = e.prefix_stats();
+    assert_eq!((s.inserts, s.no_room, s.entries, s.pages_held), (2, 4, 1, 3), "{s:?}");
+    assert!(s.evicted_for_pages >= 1, "the long entry was evicted for the shared cut's pages: {s:?}");
+    no_leaks(&e).unwrap();
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------

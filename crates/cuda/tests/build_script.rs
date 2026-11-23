@@ -5,10 +5,13 @@
 #[path = "../build.rs"]
 mod build_script;
 
-use build_script::{host_flags, nvcc_jobs, run_bounded};
+use build_script::{
+    host_flags, initial_kernel_hash, invalidate_stamp_before_compile, kernel_build_stamp, kernel_object_is_fresh, nvcc_jobs,
+    run_bounded, NVCC_FLAGS,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[test]
 fn nvcc_jobs_follows_cargo_jobs() {
@@ -92,4 +95,58 @@ fn the_roce_shim_keeps_its_flag_on_aarch64_only() {
     assert!(has(&flags));
     assert_eq!(host_flags(flags.clone(), "aarch64"), flags);
     assert!(!has(&host_flags(flags, "x86_64")));
+}
+
+#[test]
+fn kernel_hash_excludes_nvcc_version_but_the_build_stamp_includes_it() {
+    let base = initial_kernel_hash("sm_121", NVCC_FLAGS);
+    assert_eq!(base, initial_kernel_hash("sm_121", NVCC_FLAGS));
+    assert_ne!(base, initial_kernel_hash("sm_120", NVCC_FLAGS));
+    assert_ne!(base, initial_kernel_hash("sm_121", &["-c", "-O2"]));
+
+    let stamp = kernel_build_stamp("sm_121", NVCC_FLAGS, "13.0.88", base);
+    assert!(stamp.contains("arch=sm_121\n"));
+    assert!(stamp.contains(&format!("nvcc_flags={}\n", NVCC_FLAGS.join(" "))));
+    assert!(stamp.contains("nvcc_version=13.0.88\n"));
+    assert!(stamp.contains(&format!("kernel_hash={base:016x}\n")));
+    assert_ne!(stamp, kernel_build_stamp("sm_120", NVCC_FLAGS, "13.0.88", base));
+    assert_ne!(stamp, kernel_build_stamp("sm_121", NVCC_FLAGS, "13.0.89", base));
+}
+
+#[test]
+fn changed_identity_is_stale_and_an_aborted_arch_switch_leaves_no_stamp() {
+    let d = std::env::temp_dir().join(format!("rexl3-kernel-stamp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("kernel.cu");
+    let obj = d.join("kernel.o");
+    let stamp_path = d.join("rexl3-kernel-build.stamp");
+    std::fs::write(&src, "kernel").unwrap();
+    std::fs::write(&obj, "sm_121").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(60);
+    let times = std::fs::FileTimes::new().set_modified(old);
+    std::fs::File::options().write(true).open(&src).unwrap().set_times(times).unwrap();
+
+    let hash = initial_kernel_hash("sm_121", NVCC_FLAGS);
+    let stamp_121 = kernel_build_stamp("sm_121", NVCC_FLAGS, "13.0.88", hash);
+    let stamp_120 = kernel_build_stamp("sm_120", NVCC_FLAGS, "13.0.88", hash);
+    std::fs::write(&stamp_path, &stamp_121).unwrap();
+    assert!(kernel_object_is_fresh(&src, &obj, None, false));
+
+    // The object is newer than its source, but an arch change still forces compilation.
+    let identity_changed = std::fs::read_to_string(&stamp_path).unwrap() != stamp_120;
+    assert!(identity_changed);
+    assert!(!kernel_object_is_fresh(&src, &obj, None, identity_changed));
+
+    // Simulate compiling one sm_120 object, then aborting before the other objects/archive complete.
+    invalidate_stamp_before_compile(&stamp_path, true);
+    assert!(!stamp_path.exists(), "the old identity must be gone before the first object is written");
+    std::fs::write(&obj, "sm_120").unwrap();
+    assert!(!stamp_path.exists(), "a failed build must not commit a new identity");
+
+    // Switching back cannot trust the mixed object directory: the missing stamp makes everything stale.
+    let identity_changed = std::fs::read_to_string(&stamp_path).ok().as_deref() != Some(stamp_121.as_str());
+    assert!(identity_changed);
+    assert!(!kernel_object_is_fresh(&src, &obj, None, identity_changed));
+    let _ = std::fs::remove_dir_all(&d);
 }

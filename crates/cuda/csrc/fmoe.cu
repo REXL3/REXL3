@@ -279,7 +279,8 @@ __device__ __forceinline__ float route_logit(const void* logits, int f32, size_t
 
 __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const void* __restrict__ logits, int logits_f32,
                                                               const __nv_bfloat16* __restrict__ shared_gate,
-                                                              void* route_base, int emax, int T, int NE, int K) {
+                                                              const int* __restrict__ own, void* route_base, int emax,
+                                                              int T, int NE, int K) {
     __shared__ int s_exp[ROUTE_EMAX];
     __shared__ float s_wt[ROUTE_EMAX];
     __shared__ int s_rank[ROUTE_EMAX];
@@ -340,29 +341,36 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const void* __rest
     }
     __syncthreads();
 
-    // 2. rank of every entry among the entries of its expert (entries are token-major, so tokens ascend in a group)
+    // 2. rank of every entry among the entries of its expert (entries are token-major, so tokens ascend in a group).
+    // The unfilled local-TP path compacts unowned selections out here, so every active CTA warp gets owned work.
     for (int i = tid; i < E; i += blockDim.x) {
         const int e = s_exp[i];
+        if (own && !own[e]) {
+            r.e_slot[i] = -1;
+            s_rank[i] = -1;
+            continue;
+        }
         int rank = 0;
-        for (int j = 0; j < i; ++j) rank += s_exp[j] == e;
+        for (int j = 0; j < i; ++j) rank += (!own || own[s_exp[j]]) && s_exp[j] == e;
         s_rank[i] = rank;
     }
     __syncthreads();
     // 3. group leaders (rank % 8 == 0) get ids in entry order; their size; then offsets in group order
     for (int i = tid; i < E; i += blockDim.x) {
-        if (s_rank[i] % GT == 0) {
+        if (s_rank[i] >= 0 && s_rank[i] % GT == 0) {
             int gid = 0;
-            for (int j = 0; j < i; ++j) gid += (s_rank[j] % GT) == 0;
+            for (int j = 0; j < i; ++j) gid += s_rank[j] >= 0 && (s_rank[j] % GT) == 0;
             const int e = s_exp[i];
             int n = 0;
-            for (int j = i; j < E; ++j) n += (s_exp[j] == e && s_rank[j] >= s_rank[i] && s_rank[j] < s_rank[i] + GT);
+            for (int j = i; j < E; ++j)
+                n += s_rank[j] >= 0 && s_exp[j] == e && s_rank[j] >= s_rank[i] && s_rank[j] < s_rank[i] + GT;
             s_gid[i] = gid;
             s_ntok[gid] = n;
         }
     }
     __syncthreads();
     for (int i = tid; i < E; i += blockDim.x) {
-        if (s_rank[i] % GT == 0) {
+        if (s_rank[i] >= 0 && s_rank[i] % GT == 0) {
             const int gid = s_gid[i];
             int off = 0;
             for (int q = 0; q < gid; ++q) off += s_ntok[q];
@@ -373,6 +381,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const void* __rest
     // 4. every entry: its group (the leader with the same expert and chunk), slot = group offset + rank % 8
     for (int i = tid; i < E; i += blockDim.x) {
         const int e = s_exp[i], rk = s_rank[i];
+        if (rk < 0) continue;
         int lead = i;
         if (rk % GT) {
             const int want = rk - rk % GT;
@@ -391,10 +400,13 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const void* __rest
         }
     }
     if (tid == 0) {
-        int U = 0;
-        for (int i = 0; i < E; ++i) U += (s_rank[i] % GT) == 0;
+        int U = 0, V = 0;
+        for (int i = 0; i < E; ++i) {
+            U += s_rank[i] >= 0 && (s_rank[i] % GT) == 0;
+            V += s_rank[i] >= 0;
+        }
         r.hdr[0] = U;
-        r.hdr[1] = E;
+        r.hdr[1] = V;
         r.hdr[2] = T;
         r.hdr[3] = KT;
     }
@@ -446,8 +458,8 @@ __device__ __forceinline__ int group_of(int e) { return e >> 6; }
 __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const void* __restrict__ logits, int logits_f32,
                                                                     const __nv_bfloat16* __restrict__ shared_gate,
                                                                     const float* __restrict__ expert_bias, float scale,
-                                                                    void* route_base, int emax, int T, int NE, int K,
-                                                                    int n_group, int topk_group) {
+                                                                    const int* __restrict__ own, void* route_base, int emax,
+                                                                    int T, int NE, int K, int n_group, int topk_group) {
     __shared__ int s_exp[ROUTE_EMAX];
     __shared__ float s_wt[ROUTE_EMAX];
     __shared__ int s_rank[ROUTE_EMAX];
@@ -547,29 +559,36 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const void* 
     }
     __syncthreads();
 
-    // 2. rank of every entry among the entries of its expert (entries are token-major, so tokens ascend in a group)
+    // 2. rank of every entry among the entries of its expert (entries are token-major, so tokens ascend in a group).
+    // The unfilled local-TP path compacts unowned selections out here, so every active CTA warp gets owned work.
     for (int i = tid; i < E; i += blockDim.x) {
         const int e = s_exp[i];
+        if (own && !own[e]) {
+            r.e_slot[i] = -1;
+            s_rank[i] = -1;
+            continue;
+        }
         int rank = 0;
-        for (int j = 0; j < i; ++j) rank += s_exp[j] == e;
+        for (int j = 0; j < i; ++j) rank += (!own || own[s_exp[j]]) && s_exp[j] == e;
         s_rank[i] = rank;
     }
     __syncthreads();
     // 3. group leaders (rank % 8 == 0) get ids in entry order; their size; then offsets in group order
     for (int i = tid; i < E; i += blockDim.x) {
-        if (s_rank[i] % GT == 0) {
+        if (s_rank[i] >= 0 && s_rank[i] % GT == 0) {
             int gid = 0;
-            for (int j = 0; j < i; ++j) gid += (s_rank[j] % GT) == 0;
+            for (int j = 0; j < i; ++j) gid += s_rank[j] >= 0 && (s_rank[j] % GT) == 0;
             const int e = s_exp[i];
             int n = 0;
-            for (int j = i; j < E; ++j) n += (s_exp[j] == e && s_rank[j] >= s_rank[i] && s_rank[j] < s_rank[i] + GT);
+            for (int j = i; j < E; ++j)
+                n += s_rank[j] >= 0 && s_exp[j] == e && s_rank[j] >= s_rank[i] && s_rank[j] < s_rank[i] + GT;
             s_gid[i] = gid;
             s_ntok[gid] = n;
         }
     }
     __syncthreads();
     for (int i = tid; i < E; i += blockDim.x) {
-        if (s_rank[i] % GT == 0) {
+        if (s_rank[i] >= 0 && s_rank[i] % GT == 0) {
             const int gid = s_gid[i];
             int off = 0;
             for (int q = 0; q < gid; ++q) off += s_ntok[q];
@@ -580,6 +599,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const void* 
     // 4. every entry: its group (the leader with the same expert and chunk), slot = group offset + rank % 8
     for (int i = tid; i < E; i += blockDim.x) {
         const int e = s_exp[i], rk = s_rank[i];
+        if (rk < 0) continue;
         int lead = i;
         if (rk % GT) {
             const int want = rk - rk % GT;
@@ -601,10 +621,13 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_group_kernel(const void* 
         }
     }
     if (tid == 0) {
-        int U = 0;
-        for (int i = 0; i < E; ++i) U += (s_rank[i] % GT) == 0;
+        int U = 0, V = 0;
+        for (int i = 0; i < E; ++i) {
+            U += s_rank[i] >= 0 && (s_rank[i] % GT) == 0;
+            V += s_rank[i] >= 0;
+        }
         r.hdr[0] = U;
-        r.hdr[1] = E;
+        r.hdr[1] = V;
         r.hdr[2] = T;
         r.hdr[3] = KT;
     }
@@ -626,6 +649,12 @@ struct GateUpArgs {
     int H, I, KC;     // KC: k chunks (H / 128 must be a multiple)
     int ne;           // routed expert count (the shared expert is entry ne)
     float routed_limit, shared_limit;  // SwiGLU clamps (<= 0: no clamp)
+    // pairs mode (a rank of a tensor-parallel group): own[e] != 0 for the experts this rank computes (the shared expert is entry
+    // ne); a group of another expert is skipped. nullptr: every expert (the single-node path, unchanged).
+    const int* own;
+    // token rows staged a warp by gate_up_kernel_smem<NKC, true> only: min(T, GT) (a group never holds more tokens than the call). The
+    // other gate/up kernels stage GT rows and never read it.
+    int xrows;
 };
 
 __global__ void __launch_bounds__(WARPS * 32, 4) gate_up_kernel(GateUpArgs a) {
@@ -644,6 +673,7 @@ __global__ void __launch_bounds__(WARPS * 32, 4) gate_up_kernel(GateUpArgs a) {
     const int mat = q / NB;  // 0 gate, 1 up
 
     const int e = r.g_exp[grp], ntok = r.g_ntok[grp], off = r.g_off[grp];
+    if (a.own && !a.own[e]) return;
     const float limit = (e == a.ne) ? a.shared_limit : a.routed_limit;
     const int bits = a.ktab[e * 3 + mat];
     const uint32_t* T = reinterpret_cast<const uint32_t*>(mat ? a.uT[e] : a.gT[e]);
@@ -759,6 +789,12 @@ struct DownArgs {
     int* cntc;
     __nv_bfloat16* out;  // [T][H]
     int H, I;
+    // pairs mode: own as in GateUpArgs; with pairs != 0 the kernel stops at y and the combine is a separate launch after the ranks'
+    // exchange of y. fill_unowned controls whether slots owned by another rank are filled with -0.0 for the y all-reduce, or left as
+    // arbitrary scratch for combine_owned_f32.
+    const int* own;
+    int pairs;
+    int fill_unowned;
 };
 
 __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
@@ -774,6 +810,16 @@ __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
     const int kc = q % KCD, nb = q / KCD;
 
     const int e = r.g_exp[grp], ntok = r.g_ntok[grp], off = r.g_off[grp];
+    if (a.own && !a.own[e]) {
+        // With the original pairs combine, another rank's slots hold -0.0 (x + -0.0 == x for every x, so the exchange's sum is the
+        // owner's y bit for bit). The owned combine instead leaves those slots untouched and never reads them.
+        if (a.fill_unowned && kc == 0) {
+            const int col = nb * 128 + 4 * lane;
+            for (int c = 0; c < ntok; ++c)
+                *reinterpret_cast<float4*>(a.y + (size_t)(off + c) * a.H + col) = make_float4(-0.f, -0.f, -0.f, -0.f);
+        }
+        return;
+    }
     const int bits = a.ktab[e * 3 + 2];
     const uint32_t* T = reinterpret_cast<const uint32_t*>(a.dT[e]);
     const int g = lane >> 2, t = lane & 3;
@@ -835,6 +881,7 @@ __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
         *reinterpret_cast<float4*>(a.y + (size_t)slot * a.H + col) = make_float4(v[0], v[1], v[2], v[3]);
     }
     if (lane == 0) a.cntd[grp * NBD + nb] = 0;
+    if (a.pairs) return;  // the combine runs after the exchange (gb_fmoe_combine)
     __threadfence();
     int lastc = 0;
     if (lane == 0) lastc = atomicAdd(a.cntc + nb, 1) == U - 1;
@@ -858,6 +905,65 @@ __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Kernel 3c: the combine alone (pairs mode, after the ranks' exchange of y): per token, per 4 columns, the entries in top-k order
+// (the shared expert last), the SAME expression and order as the down kernel's in-line combine, one bf16 rounding.
+// Grid: H / 128 blocks of 32 threads.
+// ---------------------------------------------------------------------------------------------------------------
+__global__ void __launch_bounds__(32) combine_kernel(const void* route, int emax, const float* y, __nv_bfloat16* out, int H) {
+    const int lane = threadIdx.x, nb = blockIdx.x;
+    const Route r = route_view(const_cast<void*>(route), emax);
+    const int col = nb * 128 + 4 * lane;
+    const int Tn = r.hdr[2], KT = r.hdr[3];
+    for (int tok = 0; tok < Tn; ++tok) {
+        float v[4] = {0.f, 0.f, 0.f, 0.f};
+        for (int k = 0; k < KT; ++k) {
+            const int slot = r.e_slot[tok * KT + k];
+            const float w = r.s_w[slot];
+            const float4 x = ldcg4(y + (size_t)slot * H + col);
+            v[0] += w * x.x; v[1] += w * x.y; v[2] += w * x.z; v[3] += w * x.w;
+        }
+        st_bf16x4(out + (size_t)tok * H + col, v);
+    }
+}
+
+// Local tensor-parallel combine. e_slot is the [T][K+1] selection table in top-k order; the group table identifies each
+// grouped slot's expert. Only owned slots load y: after forward_pairs_unfilled every other slot may be NaN poison.
+// Grid: (H / 128, T) one-warp blocks, four columns per lane; accumulation remains in ascending selection-slot order.
+__global__ void __launch_bounds__(32) combine_owned_kernel(const void* route, int emax, const int* own, const float* y,
+                                                           float* out, int H, int NE) {
+    const int lane = threadIdx.x, nb = blockIdx.x, tok = blockIdx.y;
+    const Route r = route_view(const_cast<void*>(route), emax);
+    const int col = nb * 128 + 4 * lane;
+    const int Tn = r.hdr[2], KT = r.hdr[3];
+    if (tok >= Tn) return;
+    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int k = 0; k < KT; ++k) {
+        const int slot = r.e_slot[tok * KT + k];
+        if (slot < 0) continue;
+        int g = 0;
+        while (g < r.hdr[0] && (slot < r.g_off[g] || slot >= r.g_off[g] + r.g_ntok[g])) ++g;
+        if (g == r.hdr[0]) continue;
+        const int id = r.g_exp[g];
+        if (id < 0 || id > NE || (own && !own[id])) continue;
+        const float w = r.s_w[slot];
+        const float4 x = ldcg4(y + (size_t)slot * H + col);
+        acc.x = fmaf(w, x.x, acc.x);
+        acc.y = fmaf(w, x.y, acc.y);
+        acc.z = fmaf(w, x.z, acc.z);
+        acc.w = fmaf(w, x.w, acc.w);
+    }
+    *reinterpret_cast<float4*>(out + (size_t)tok * H + col) = acc;
+}
+
+__global__ void __launch_bounds__(256) cast_f32_bf16_kernel(const float* src, __nv_bfloat16* dst, long long elems) {
+    const long long i = 4LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= elems) return;
+    const float4 x = *reinterpret_cast<const float4*>(src + i);
+    const float v[4] = {x.x, x.y, x.z, x.w};
+    st_bf16x4(dst + i, v);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Kernel 2b: gate + up (+ SwiGLU, + rotation), in-CTA K reduction (the wave-6b prototype).
 //
 // One CTA owns every KC K-chunk of one (group, 128-column block) and computes BOTH matrices for each chunk (every
@@ -872,8 +978,16 @@ __global__ void __launch_bounds__(WARPS * 32, 4) down_kernel(DownArgs a) {
 // merged gate vector between the two phases). Fits 100 KiB for the supported counts at H <= 2560.
 // Grid: `E * NB` (legacy: `E * 2 * NB * KC` warps worth of work, one CTA per (group, nb)).
 // ---------------------------------------------------------------------------------------------------------------
-template <int NKC>
-__global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
+//
+// ROWS (gb_fmoe_forward_row_staged at T <= 4 only): stage a.xrows = min(T, GT) token rows instead of GT, and ask for two CTAs an SM.
+// At GT rows Flash-Next's <10> takes 87,296 B of shared memory and 111 registers a thread, so both hold the SM to one 320-thread CTA
+// and a one-row window's 55 CTAs run in two waves on the GB10's 48 SMs. At one row the CTA takes 10,912 B (43,648 B at four), and the
+// two-CTA bound caps the registers at 96 (no spills). The MMA's B rows past the staged ones read the last staged row: they feed only
+// the token columns >= ntok, which store_partials never writes (D column n depends on B row n alone), and ntok <= xrows, so every
+// stored partial, the reduction order and the output bits are those of the GT-row kernel. A min-blocks of 0 leaves the stock
+// instantiations' launch bounds (and SASS) as they were.
+template <int NKC, bool ROWS = false>
+__global__ void __launch_bounds__(NKC * 32, ROWS ? 2 : 0) gate_up_kernel_smem(GateUpArgs a) {
     extern __shared__ __align__(16) half smem_x[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     if (warp >= NKC) return;
@@ -885,17 +999,19 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
     const int kc = warp;
 
     const int e = r.g_exp[grp], ntok = r.g_ntok[grp], off = r.g_off[grp];
+    if (a.own && !a.own[e]) return;  // the whole block is this group's: every warp leaves together
     const float limit = (e == a.ne) ? a.shared_limit : a.routed_limit;
     const int kblocks = (a.H >> 7) / NKC;
     const int kb0 = kc * kblocks;
     const int xstride = kblocks * 128 + 8;  // +8 halves: conflict-free B fragment reads
-    half* xs = smem_x + warp * GT * xstride;
-    float* s_part = reinterpret_cast<float*>(smem_x + NKC * GT * xstride);
+    const int XR = ROWS ? a.xrows : GT;     // token rows staged (and partial rows kept) a warp
+    half* xs = smem_x + warp * XR * xstride;
+    float* s_part = reinterpret_cast<float*>(smem_x + NKC * XR * xstride);
 
     const int g = lane >> 2, t = lane & 3;
     // stage the group's tokens rotated by this matrix's suh (same as the legacy kernel's staging loop)
     auto stage = [&](const half* su) {
-        for (int c = 0; c < GT; ++c) {
+        for (int c = 0; c < XR; ++c) {
             for (int b = 0; b < kblocks; ++b) {
                 float v[4] = {0.f, 0.f, 0.f, 0.f};
                 if (c < ntok) {
@@ -916,7 +1032,7 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
         __syncwarp();
     };
     auto getb = [&](int kt, uint32_t& b0, uint32_t& b1) {
-        const half* xrow = xs + g * xstride + 2 * t;
+        const half* xrow = xs + (ROWS ? min(g, XR - 1) : g) * xstride + 2 * t;
         b0 = *reinterpret_cast<const uint32_t*>(xrow + kt * 16);
         b1 = *reinterpret_cast<const uint32_t*>(xrow + kt * 16 + 8);
     };
@@ -937,7 +1053,7 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
             for (int c = 0; c < 4; ++c) acc[j][c] = 0.f;
         run_tiles_bits(bits, base, stride_k, kblocks * 8, lane, acc, getb);
         // every warp (including warp 0) stages its gate partials; row warp = kc
-        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * GT * 128 + c * 128; });
+        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * XR * 128 + c * 128; });
     }
     __syncthreads();
     if (warp == 0) {
@@ -947,12 +1063,12 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
             float vg[4];
             vg[0] = vg[1] = vg[2] = vg[3] = 0.f;
             for (int k = 0; k < NKC; ++k) {
-                const float4 x = *reinterpret_cast<const float4*>(s_part + k * GT * 128 + c * 128 + 4 * lane);
+                const float4 x = *reinterpret_cast<const float4*>(s_part + k * XR * 128 + c * 128 + 4 * lane);
                 vg[0] += x.x; vg[1] += x.y; vg[2] += x.z; vg[3] += x.w;
             }
             had128(vg, lane);
             // keep the merged gate vector in the spare shared row until the up phase's activation
-            *reinterpret_cast<float4*>(s_part + NKC * GT * 128 + c * 128 + 4 * lane) =
+            *reinterpret_cast<float4*>(s_part + NKC * XR * 128 + c * 128 + 4 * lane) =
                 make_float4(vg[0], vg[1], vg[2], vg[3]);
         }
     }
@@ -972,7 +1088,7 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
             for (int c = 0; c < 4; ++c) acc[j][c] = 0.f;
         run_tiles_bits(bits, base, stride_k, kblocks * 8, lane, acc, getb);
         // every warp stages its up partials into the same rows (the gate rows are consumed above)
-        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * GT * 128 + c * 128; });
+        store_partials(acc, lane, ntok, [&](int c) { return s_part + warp * XR * 128 + c * 128; });
         __syncthreads();
         if (warp == 0) {
             const half* gsv = reinterpret_cast<const half*>(a.gSv[e]);
@@ -988,11 +1104,11 @@ __global__ void __launch_bounds__(NKC * 32) gate_up_kernel_smem(GateUpArgs a) {
                 float vu[4];
                 vu[0] = vu[1] = vu[2] = vu[3] = 0.f;
                 for (int k = 0; k < NKC; ++k) {
-                    const float4 x = *reinterpret_cast<const float4*>(s_part + k * GT * 128 + c * 128 + 4 * lane);
+                    const float4 x = *reinterpret_cast<const float4*>(s_part + k * XR * 128 + c * 128 + 4 * lane);
                     vu[0] += x.x; vu[1] += x.y; vu[2] += x.z; vu[3] += x.w;
                 }
                 had128(vu, lane);
-                const float4 vg4 = *reinterpret_cast<const float4*>(s_part + NKC * GT * 128 + c * 128 + 4 * lane);
+                const float4 vg4 = *reinterpret_cast<const float4*>(s_part + NKC * XR * 128 + c * 128 + 4 * lane);
                 const float vg[4] = {vg4.x, vg4.y, vg4.z, vg4.w};
                 float act[4];
 #pragma unroll
@@ -1480,7 +1596,13 @@ struct PGateUp {
 
 // Block = (tile, 128-column block). Warps 0-3: gate, 4-7: up, 32 columns each. The tile's pre-rotated rows are staged in
 // 64-wide k chunks, double buffered with async copies, while every warp runs its columns over the previous chunk.
-__global__ void __launch_bounds__(PW * 32, 2) p_gate_up_kernel(PGateUp a) {
+// Ada needs more than the 128 registers/thread that two blocks per SM permit; do not force a spilling allocation there.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 890
+constexpr int P_GU_MIN_BLOCKS = 1;
+#else
+constexpr int P_GU_MIN_BLOCKS = 2;
+#endif
+__global__ void __launch_bounds__(PW * 32, P_GU_MIN_BLOCKS) p_gate_up_kernel(PGateUp a) {
     extern __shared__ __align__(16) unsigned char p_smem[];
     const int cb = blockIdx.x, tile = blockIdx.y;
     if (tile >= a.hdr[0]) return;
@@ -1760,12 +1882,13 @@ GB_EXPORT size_t gb_fmoe_workspace_bytes(int max_tokens, int top_k, int H, int I
 // SwiGLU clamps: routed_limit applies to the routed experts, shared_limit to the shared expert (entry NE); <= 0: none.
 // Test/debug hook: when 1, gb_fmoe_forward uses the legacy global-partial kernels (A/B bit-exactness tests).
 static int g_fmoe_legacy = 0;
-GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
-                              const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
-                              const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
-                              const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int KC,
-                              int max_tokens, void* ws, void* stream, const float* expert_bias, int n_group,
-                              int topk_group, float routed_limit, float shared_limit, float routed_scaling) {
+static int fmoe_run(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
+                    const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
+                    const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
+                    const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int KC,
+                    int max_tokens, void* ws, void* stream, const float* expert_bias, int n_group,
+                    int topk_group, float routed_limit, float shared_limit, float routed_scaling, const int* own, int pairs,
+                    int fill_unowned, int row_staged = 0) {
     if (T < 1 || T > 64 || T > max_tokens || NE > 512 || top_k > 16 || H % 128 || I % 128 || KC < 1 ||
         (H / 128) % KC)
         return (int)cudaErrorInvalidValue;
@@ -1778,18 +1901,21 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32,
     FmoeWs w = fmoe_layout(static_cast<char*>(ws), emax, H, I, KC);
     const int E = T * (top_k + (shared_gate ? 1 : 0));
 
+    // Only the unfilled local combine may discard unowned selections: the all-reduce pairs path still needs their
+    // original slots for the -0.0 fill. Grids below stay at the fixed E upper bound, preserving graph capture.
+    const int* route_own = own && !fill_unowned ? own : nullptr;
     if (group)
         route_group_kernel<<<1, ROUTE_THREADS, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
-                                                        expert_bias, routed_scaling, w.route, emax, T, NE, top_k, n_group,
-                                                        topk_group);
+                                                        expert_bias, routed_scaling, route_own, w.route, emax, T, NE, top_k,
+                                                        n_group, topk_group);
     else
-        route_kernel<<<1, ROUTE_THREADS, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate,
+        route_kernel<<<1, ROUTE_THREADS, 0, st>>>(logits, logits_f32, (const __nv_bfloat16*)shared_gate, route_own,
                                                  w.route, emax, T, NE, top_k);
     int rc = GB_CHECK_LAUNCH();
     if (rc) return rc;
 
     GateUpArgs ga{(const __nv_bfloat16*)x, w.route, emax, gT, gSu, gSv, uT, uSu, uSv, dSu, ktab,
-                  (float*)w.part, (int*)w.cnt, (half*)w.xd, H, I, KC, NE, routed_limit, shared_limit};
+                  (float*)w.part, (int*)w.cnt, (half*)w.xd, H, I, KC, NE, routed_limit, shared_limit, own};
     const int jobs_a = E * 2 * (I / 128) * KC;
     const size_t smem_a = (size_t)WARPS * GT * ((H / 128 / KC) * 128 + 8) * sizeof(half);
     // the staged tokens live in the default 48 KiB of dynamic shared memory (the legacy kernel never raises its limit): at most 5 blocks of
@@ -1800,7 +1926,22 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32,
     // memory, keeping the legacy ascending kc sum order exactly). The gate/up fused path is the default (it is
     // bit-exact with the legacy path); gb_fmoe_set_legacy forces the global-partial kernels (A/B tests). The down
     // path stays the legacy down_kernel (bit-exact, the wave-6 67.07 tok/s winner).
-    const bool use_gu_smem = !g_fmoe_legacy;
+    // On 142-SM L40S, Cyberfrost TP leaves too few useful fused CTAs after ownership exits. The legacy split-K
+    // grid was 25-26% faster at one row and remained no slower through 16 rows (KC=10, cold 16-layer rotation).
+    const bool use_gu_smem = !g_fmoe_legacy && !(own && H == 2560 && I == 640);
+    // `row_staged` (gb_fmoe_forward_row_staged only): at KC 10 and T <= 4, gate_up_kernel_smem<10, true> stages min(T, GT) token rows
+    // and fits two CTAs an SM (two of its 43,648 B at four rows fit the 100 KiB carveout; five rows would not). Same bits.
+    if (row_staged && use_gu_smem && KC == 10 && T <= 4 && (H / 128) % KC == 0) {
+        const int kblocks = (H / 128) / KC;
+        ga.xrows = T < GT ? T : GT;
+        const size_t smem_rs = (size_t)KC * ga.xrows * (kblocks * 128 + 8) * sizeof(half) + (size_t)(KC + 1) * ga.xrows * 128 * sizeof(float);
+        if (smem_rs <= 48 * 1024) {
+            gate_up_kernel_smem<10, true><<<E * (I / 128), 320, smem_rs, st>>>(ga);
+            rc = GB_CHECK_LAUNCH();
+            if (rc) return rc;
+            goto down_launch;
+        }
+    }
     if (use_gu_smem && (H / 128) % KC == 0) {
         const int kblocks = (H / 128) / KC;
         const size_t smem_gu = (size_t)KC * GT * (kblocks * 128 + 8) * sizeof(half) + (size_t)(KC + 1) * GT * 128 * sizeof(float);
@@ -1831,10 +1972,9 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32,
                     if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
                     gate_up_kernel_smem<16><<<grid_gu, 512, smem_gu, st>>>(ga);
                     break;
+                // KC=20 needs 640 threads; that leaves only 96 registers/thread on Ada and spills the fused kernel.
+                // Keep the bit-identical four-warp legacy path for this shape instead of emitting local-memory traffic.
                 case 20:
-                    if (smem_gu > 48 * 1024) cudaFuncSetAttribute(gate_up_kernel_smem<20>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_gu);
-                    gate_up_kernel_smem<20><<<grid_gu, 640, smem_gu, st>>>(ga);
-                    break;
                 default:
                     gate_up_kernel<<<(jobs_a + WARPS - 1) / WARPS, WARPS * 32, smem_a, st>>>(ga);
                     break;
@@ -1850,9 +1990,97 @@ GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32,
 
 down_launch:
     DownArgs da{(const half*)w.xd, w.route, emax, dT, dSv, ktab, (float*)w.partd, (float*)w.y, (int*)w.cntd,
-                (int*)w.cntc, (__nv_bfloat16*)out, H, I};
+                (int*)w.cntc, (__nv_bfloat16*)out, H, I, own, pairs, fill_unowned};
     const int jobs_b = E * (H / 128) * (I / 128);
     down_kernel<<<(jobs_b + WARPS - 1) / WARPS, WARPS * 32, 0, st>>>(da);
+    return GB_CHECK_LAUNCH();
+}
+
+GB_EXPORT int gb_fmoe_forward(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
+                              const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
+                              const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
+                              const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int KC,
+                              int max_tokens, void* ws, void* stream, const float* expert_bias, int n_group,
+                              int topk_group, float routed_limit, float shared_limit, float routed_scaling) {
+    return fmoe_run(x, logits, logits_f32, shared_gate, gT, gSu, gSv, uT, uSu, uSv, dT, dSu, dSv, ktab, out, T, NE, top_k, H, I, KC,
+                    max_tokens, ws, stream, expert_bias, n_group, topk_group, routed_limit, shared_limit, routed_scaling, nullptr, 0, 0);
+}
+
+// gb_fmoe_forward with the row-staged gate/up at KC 10 and one to four rows (see `row_staged` in fmoe_run): the same bits as gb_fmoe_forward
+// at every row count, a different gate/up launch at one to four rows only. Its own entry point, so the families that call gb_fmoe_forward
+// keep their launches.
+GB_EXPORT int gb_fmoe_forward_row_staged(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
+                                         const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
+                                         const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
+                                         const int* ktab, void* out, int T, int NE, int top_k, int H, int I, int KC,
+                                         int max_tokens, void* ws, void* stream, const float* expert_bias, int n_group,
+                                         int topk_group, float routed_limit, float shared_limit, float routed_scaling) {
+    return fmoe_run(x, logits, logits_f32, shared_gate, gT, gSu, gSv, uT, uSu, uSv, dT, dSu, dSv, ktab, out, T, NE, top_k, H, I, KC,
+                    max_tokens, ws, stream, expert_bias, n_group, topk_group, routed_limit, shared_limit, routed_scaling, nullptr, 0, 0,
+                    1);
+}
+
+// Pairs mode of gb_fmoe_forward for a rank of a tensor-parallel group: the same route (every rank routes alike), the gate/up and down
+// work of the experts with own[e] != 0 only (own has NE + 1 entries, the shared expert last), and no combine: on return the
+// workspace's y (gb_fmoe_y_offset) holds every entry slot's expert output, -0.0 in the slots of experts this rank does not own. After
+// the ranks sum y (an fp32 all-reduce without flush to zero), gb_fmoe_combine writes exactly what gb_fmoe_forward writes.
+GB_EXPORT int gb_fmoe_forward_pairs(const void* x, const void* logits, int logits_f32, const void* shared_gate, const uint64_t* gT,
+                                    const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT, const uint64_t* uSu,
+                                    const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu, const uint64_t* dSv,
+                                    const int* ktab, const int* own, int T, int NE, int top_k, int H, int I, int KC, int max_tokens,
+                                    void* ws, void* stream, float routed_limit, float shared_limit) {
+    if (!own || !shared_gate) return (int)cudaErrorInvalidValue;
+    return fmoe_run(x, logits, logits_f32, shared_gate, gT, gSu, gSv, uT, uSu, uSv, dT, dSu, dSv, ktab, nullptr, T, NE, top_k, H, I,
+                    KC, max_tokens, ws, stream, nullptr, 0, 0, routed_limit, shared_limit, 1.0f, own, 1, 1);
+}
+
+// Identical to gb_fmoe_forward_pairs except that y slots of unowned experts are left untouched. They are arbitrary scratch and must
+// only be consumed by gb_fmoe_combine_owned_f32, which skips them rather than requiring the -0.0 fill and an all-reduce.
+GB_EXPORT int gb_fmoe_forward_pairs_unfilled(const void* x, const void* logits, int logits_f32, const void* shared_gate,
+                                             const uint64_t* gT, const uint64_t* gSu, const uint64_t* gSv, const uint64_t* uT,
+                                             const uint64_t* uSu, const uint64_t* uSv, const uint64_t* dT, const uint64_t* dSu,
+                                             const uint64_t* dSv, const int* ktab, const int* own, int T, int NE, int top_k, int H,
+                                             int I, int KC, int max_tokens, void* ws, void* stream, float routed_limit,
+                                             float shared_limit) {
+    if (!own || !shared_gate) return (int)cudaErrorInvalidValue;
+    return fmoe_run(x, logits, logits_f32, shared_gate, gT, gSu, gSv, uT, uSu, uSv, dT, dSu, dSv, ktab, nullptr, T, NE, top_k, H, I,
+                    KC, max_tokens, ws, stream, nullptr, 0, 0, routed_limit, shared_limit, 1.0f, own, 1, 0);
+}
+
+// Byte offset of y ([entries][H] fp32, entries = T * (top_k + 1) in slot order) inside the workspace.
+GB_EXPORT size_t gb_fmoe_y_offset(int max_tokens, int top_k, int H, int I, int KC) {
+    const int emax = max_tokens * (top_k + 1);
+    char* base = reinterpret_cast<char*>(256);  // any non-null base: the layout is relative
+    return (size_t)(fmoe_layout(base, emax, H, I, KC).y - base);
+}
+
+// The combine of a pairs-mode forward, after the exchange: out [T][H] bf16 from the workspace's route and (summed) y.
+GB_EXPORT int gb_fmoe_combine(void* ws, void* out, int H, int I, int KC, int top_k, int max_tokens, void* stream) {
+    if (H % 128 || I % 128 || KC < 1) return (int)cudaErrorInvalidValue;
+    const int emax = max_tokens * (top_k + 1);
+    FmoeWs w = fmoe_layout(static_cast<char*>(ws), emax, H, I, KC);
+    combine_kernel<<<H / 128, 32, 0, gb_stream(stream)>>>(w.route, emax, (const float*)w.y, (__nv_bfloat16*)out, H);
+    return GB_CHECK_LAUNCH();
+}
+
+// Reduce only this rank's owned y slots to fp32. Unlike gb_fmoe_combine there is no exchange and no bf16 rounding; callers sum the
+// rank-local outputs in rank order and then cast once with gb_fmoe_cast_f32_bf16.
+GB_EXPORT int gb_fmoe_combine_owned_f32(const void* ws, const int* own, float* out_f32, int H, int I, int KC, int top_k, int NE,
+                                        int T, int max_tokens, void* stream) {
+    if (!ws || !own || !out_f32 || T < 1 || T > max_tokens || NE < 0 || top_k < 0 || H % 128 || I % 128 || KC < 1 ||
+        (H / 128) % KC)
+        return (int)cudaErrorInvalidValue;
+    const int emax = max_tokens * (top_k + 1);
+    FmoeWs w = fmoe_layout(static_cast<char*>(const_cast<void*>(ws)), emax, H, I, KC);
+    const dim3 grid(H / 128, T);
+    combine_owned_kernel<<<grid, 32, 0, gb_stream(stream)>>>(w.route, emax, own, (const float*)w.y, out_f32, H, NE);
+    return GB_CHECK_LAUNCH();
+}
+
+GB_EXPORT int gb_fmoe_cast_f32_bf16(const float* src, void* dst, long long elems, void* stream) {
+    if (elems < 0 || elems % 4 || (elems && (!src || !dst))) return (int)cudaErrorInvalidValue;
+    if (!elems) return (int)cudaSuccess;
+    cast_f32_bf16_kernel<<<(unsigned)((elems / 4 + 255) / 256), 256, 0, gb_stream(stream)>>>(src, (__nv_bfloat16*)dst, elems);
     return GB_CHECK_LAUNCH();
 }
 

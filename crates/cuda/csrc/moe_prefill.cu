@@ -512,6 +512,38 @@ __global__ void __launch_bounds__(32) combine_f32_kernel(const float* __restrict
     *reinterpret_cast<float4*>(out + (size_t)r * D + n) = make_float4(acc[0], acc[1], acc[2], acc[3]);
 }
 
+// One rank's partial f32-weight combine. pick_local holds -1 for every slot this rank does not own; those y rows are
+// deliberately unwritten scratch, so they must never be loaded. Owned slots accumulate in their original slot order.
+__global__ void __launch_bounds__(32) combine_local_f32_kernel(const float* __restrict__ y, const int* __restrict__ pick_local,
+                                                               const float* __restrict__ wts, float* __restrict__ out, int D,
+                                                               int topk) {
+    const int r = blockIdx.x, lane = threadIdx.x;
+    const int n = blockIdx.y * 128 + 4 * lane;
+    float4 u[kMaxTopK];
+    bool ok[kMaxTopK];
+#pragma unroll
+    for (int k = 0; k < kMaxTopK; ++k) {
+        ok[k] = false;
+        if (k < topk) {
+            const int l = pick_local[(size_t)r * topk + k];
+            ok[k] = l >= 0;
+            if (ok[k]) u[k] = *reinterpret_cast<const float4*>(y + ((size_t)r * topk + k) * D + n);
+        }
+    }
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+    for (int q = 0; q < kMaxTopK; ++q) {
+        if (q < topk && ok[q]) {
+            const float w = wts[(size_t)r * topk + q];
+            acc[0] = fmaf(w, u[q].x, acc[0]);
+            acc[1] = fmaf(w, u[q].y, acc[1]);
+            acc[2] = fmaf(w, u[q].z, acc[2]);
+            acc[3] = fmaf(w, u[q].w, acc[3]);
+        }
+    }
+    *reinterpret_cast<float4*>(out + (size_t)r * D + n) = make_float4(acc[0], acc[1], acc[2], acc[3]);
+}
+
 // The router's fp32 weights (`moe_topk_softmax` writes f32) into the scratch's fp16 weights: out [n] = fp16(in [n]),
 // round to nearest even (the format the combine reads; the Qwen path calls this right after routing).
 __global__ void wts_f32_f16_kernel(const float* __restrict__ in, half* __restrict__ out, size_t n) {
@@ -790,6 +822,17 @@ GB_EXPORT int gb_moe_pf_combine_f32(const void* y, const void* pick, const void*
     const dim3 grid((unsigned)rows, (unsigned)(D / 128));
     combine_f32_kernel<<<grid, 32, 0, gb_stream(stream)>>>(static_cast<const float*>(y), static_cast<const int*>(pick), static_cast<const float*>(wts),
                                                             static_cast<const float*>(shared), static_cast<float*>(out), D, E, topk);
+    return GB_CHECK_LAUNCH();
+}
+
+// out [rows, D] fp32 = this rank's weighted sum of its owned slots. y's unowned rows are unwritten and never read.
+GB_EXPORT int gb_moe_pf_combine_local_f32(const void* y, const void* pick_local, const void* wts, void* out, int rows, int topk, int D,
+                                          void* stream) {
+    if (rows < 1 || topk < 1 || topk > kMaxTopK || D <= 0 || D % 128 || !y || !pick_local || !wts || !out)
+        return (int)cudaErrorInvalidValue;
+    const dim3 grid((unsigned)rows, (unsigned)(D / 128));
+    combine_local_f32_kernel<<<grid, 32, 0, gb_stream(stream)>>>(static_cast<const float*>(y), static_cast<const int*>(pick_local),
+                                                                 static_cast<const float*>(wts), static_cast<float*>(out), D, topk);
     return GB_CHECK_LAUNCH();
 }
 

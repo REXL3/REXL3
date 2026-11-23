@@ -146,6 +146,29 @@ impl<'p> LoadCtx<'p> {
         Ok(dst)
     }
 
+    /// A plain fp32 tensor, accepted as stored or widened from bf16. The two source dtypes follow the same pipeline/serial paths;
+    /// BF16 conversion is exactly [`LoadCtx::f32_from_bf16`], so existing 27B loads keep their bytes.
+    pub fn f32_plain(&mut self, pack: &'p Pack, name: &str, shape: &[usize], add_one: bool) -> Result<DevBuf, ModelError> {
+        match pack.ck.plain.get(name).map(|e| e.dtype.as_str()) {
+            Some("F32") if !add_one => {
+                let e = pack.entry(name, "F32", shape)?;
+                if self.mode == LoadMode::Serial {
+                    let values = pack.ck.read_floats(e).map_err(|e| ModelError::Config(format!("{name}: {e}")))?;
+                    let values: Vec<f32> = values.into_iter().map(|x| x as f32).collect();
+                    return Ok(DevBuf::from_slice(&values)?);
+                }
+                let len = e.nbytes() as usize;
+                let dst = self.buffer(len)?;
+                let (path, off) = pack.ck.tensor_location(e).map_err(io_err)?;
+                let file = self.loader.file(&path);
+                self.loader.copy_file(&dst, file, off, len, Xform::None)?;
+                Ok(dst)
+            }
+            Some("F32") => Err(ModelError::Config(format!("{name}: F32 with a +1 fold is not supported"))),
+            _ => self.f32_from_bf16(pack, name, shape, add_one),
+        }
+    }
+
     /// A bf16 tensor widened to fp32 (see [`Pack::f32_from_bf16`]); done on a loader thread, it is a few KiB.
     pub fn f32_from_bf16(&mut self, pack: &'p Pack, name: &str, shape: &[usize], add_one: bool) -> Result<DevBuf, ModelError> {
         let e = pack.entry(name, "BF16", shape)?;
@@ -188,9 +211,9 @@ impl<'p> LoadCtx<'p> {
         }
         let parts = pack.ck.group_parts(prefix).map_err(io_err)?;
         let g = parts.group;
-        let bits = Exl3Weights::bits_of(g)?;
+        let k2 = Exl3Weights::k2_of(g)?;
         let trellis_len = parts.trellis.nbytes() as usize;
-        if trellis_len != (g.k / 16) * (g.n / 16) * 16 * bits * 2 {
+        if trellis_len != (g.k / 16) * (g.n / 16) * 16 * k2 {
             return Err(gb_cuda::CudaError(1).into());
         }
         let trellis = self.buffer(trellis_len)?;

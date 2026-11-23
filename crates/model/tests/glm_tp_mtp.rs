@@ -290,3 +290,137 @@ fn the_serving_rank_load_with_the_nextn_layer_equals_one_model() {
     eprintln!("BYTE-IDENTICAL through tp_boot::plan_from -> load_rank_with: {} lines, keeps, counters", r.lines.len());
     eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
 }
+
+/// Rank `rank` of two that holds only its vocabulary half of the lm_head (`REXL3_GLM_TP_SPLIT=lm-held`, `GlmConfig::with_lm_rank`): the pack
+/// mapped with the rank's experts and those strips of the head only, the restricted draft head read from the pack's bytes
+/// (`mtp_restrict_vocab_from_pack`), `mode` set. Also the regions' bytes.
+fn load_held(dir: &Path, own: &ExpertOwnership, rank: usize, mode: VocabMode) -> (GlmModel, u64) {
+    use gb_model::families::glm::{config::GlmConfig, GlmPack, PackInventory};
+    gb_cuda::rt::init_context().unwrap();
+    let cfg = GlmConfig::from_dir(dir).unwrap().with_lm_rank(rank, 2).unwrap();
+    let ck = gb_exl3::checkpoint::scan(dir, false).unwrap();
+    let inv = PackInventory::from_checkpoint(&ck).unwrap();
+    let pack = GlmPack::from_inventory_owned(&inv, cfg.clone(), own).unwrap();
+    let (lm, files) = (pack.weights.lm_head.clone(), pack.plan.files.clone());
+    assert_eq!(lm.placed_n(), cfg.vocab / 2, "rank {rank} places half the head's columns");
+    let b = boot_mapped_with(dir, pack, Some(LAYERS), true, &LoadOptions::from_env(20 * GIB), 0.0).unwrap();
+    let regions = b.device.regions.bytes();
+    let mut m = GlmModel::new_chunked(
+        cfg.clone(),
+        b.device,
+        &ModelOptions { slots: glm_mtp_script::SLOTS, kv_blocks: 64, max_context: 8192, layers: LAYERS },
+        CHUNK,
+    )
+    .unwrap();
+    let e = m.mtp_restrict_vocab(&vocab_ranges(512, cfg.vocab)).unwrap_err().to_string();
+    assert!(e.contains("lm-held") && e.contains("from the pack"), "a held half copied the restricted head from the device: {e}");
+    m.mtp_restrict_vocab_from_pack(&vocab_ranges(512, cfg.vocab), dir, &files, &lm).unwrap();
+    m.set_mtp_vocab(mode);
+    (m, regions)
+}
+
+/// `lm-held` (opt-in, the RED-SNOW 1M profile): each rank holds only its vocabulary half of the lm_head. The trunk's head and the NextN
+/// drafter's full-vocabulary head calls run the rank's half (with the whole head's plan) and swap the peer's in; the restricted draft head is
+/// read from the pack's bytes. Against one model holding the whole head: the restricted head's bytes are the copied head's, every answering
+/// call's candidates and fp16 logits, every round's drafts, the keeps and the speculation counters are byte-identical with the restricted
+/// head in every call, the adaptive one (the serving default) and the full head in every call (the drafter's full head split in each draft
+/// step); each rank's regions are smaller by exactly the other half of the head (its trellis and `svh`).
+#[test]
+#[ignore]
+fn two_ranks_holding_their_vocabulary_halves_draft_as_one_model_byte_for_byte() {
+    use gb_model::families::glm::model::tp::{split_from_vars, SPLIT_LM, SPLIT_LM_HELD};
+    let Some(dir) = pack_dir() else { return };
+    require_available(50 * GIB);
+    let guard = Guard::start(20 * GIB);
+    let modes = [("restricted", VocabMode::Restricted), ("adaptive", VocabMode::Adaptive(0.9)), ("full", VocabMode::Full)];
+    let bits = split_from_vars(|_| Some("lm-held".into())).unwrap();
+    assert_eq!(bits, SPLIT_LM | SPLIT_LM_HELD);
+
+    // one model, every expert, the whole head, no group
+    let mut reference = Vec::new();
+    let mut m = load(&dir, None, VocabMode::Restricted);
+    let copied: Vec<Vec<u8>> =
+        m.mtp_sub_head().unwrap().weights().buffers().iter().map(|(_, b)| b.to_vec::<u8>().unwrap()).collect();
+    let whole_head = m.dev.lm_head.weight_bytes() as u64;
+    for (name, mode) in modes {
+        m.set_graphs(false);
+        m.set_mtp_vocab(mode);
+        let mut be = GlmBackend::with_spec(m, spec_cfg());
+        let r = glm_mtp_script::run(&mut be, |b: &GlmBackend, rows| b.m.logits_host(0, rows).unwrap());
+        let s = stats_key(&be.spec.as_ref().unwrap().stats);
+        m = be.m;
+        let drafted: usize = r.drafts.iter().flatten().map(|d| d.as_ref().map_or(0, |v| v.len())).sum();
+        eprintln!("one model, {name} head: {} lines, {drafted} drafts; {s}", r.lines.len());
+        assert!(drafted > 0, "{name}: the head drafted nothing");
+        reference.push((r, s));
+    }
+    drop(m);
+    let owns = [ExpertOwnership::range(E, 0, 2).unwrap(), ExpertOwnership::range(E, 1, 2).unwrap()];
+    // the regions of a rank that holds the whole head, for the bytes the half saves
+    let whole_regions: Vec<u64> = (0..2)
+        .map(|r| {
+            let pack = GlmFamily::map_pack_owned(&dir, &owns[r]).unwrap();
+            let b = boot_mapped_with(&dir, pack, Some(LAYERS), true, &LoadOptions::from_env(20 * GIB), 0.0).unwrap();
+            b.device.regions.bytes()
+        })
+        .collect();
+    for (i, (name, mode)) in modes.into_iter().enumerate() {
+        let (mut a, ra) = load_held(&dir, &owns[0], 0, mode);
+        let (mut b, rb) = load_held(&dir, &owns[1], 1, mode);
+        for (r, (m, held)) in [(&a, ra), (&b, rb)].into_iter().enumerate() {
+            let read: Vec<Vec<u8>> =
+                m.mtp_sub_head().unwrap().weights().buffers().iter().map(|(_, b)| b.to_vec::<u8>().unwrap()).collect();
+            assert_eq!(
+                read, copied,
+                "rank {r}: the restricted head read from the pack differs from the one copied from a whole head"
+            );
+            let other = whole_head - m.dev.lm_head.weight_bytes() as u64;
+            assert_eq!(
+                whole_regions[r] - held,
+                other,
+                "rank {r}: the regions are not smaller by exactly the other half of the head"
+            );
+            if i == 0 {
+                eprintln!(
+                    "rank {r}: holds {} of the head's {} columns, {:.1} MiB of {:.1} MiB; regions {:.1} MiB smaller; the restricted head's bytes == the copy's",
+                    m.dev.lm_head.n,
+                    2 * m.dev.lm_head.n,
+                    m.dev.lm_head.weight_bytes() as f64 / 1048576.0,
+                    whole_head as f64 / 1048576.0,
+                    other as f64 / 1048576.0
+                );
+            }
+        }
+        let mut comms = LoopbackGroup::with_timeout(2, Duration::from_secs(300)).into_iter();
+        a.enable_tp(Arc::new(comms.next().unwrap()), owns[0].clone()).unwrap();
+        b.enable_tp(Arc::new(comms.next().unwrap()), owns[1].clone()).unwrap();
+        a.enable_head_split(bits).unwrap();
+        b.enable_head_split(bits).unwrap();
+        let (la, lb) = Link::<GlmCall>::pair(Duration::from_secs(300)).unwrap();
+        let h = std::thread::spawn(move || run_follower(GlmRank::new(b), lb, FollowerConfig::new(t())).unwrap());
+        let leader = TpLeader::lead(GlmRank::new(a), la, t());
+        let mut be = GlmTpBackend::with_spec(leader, CHUNK, glm_mtp_script::SLOTS, spec_cfg());
+        let t0 = std::time::Instant::now();
+        let r = glm_mtp_script::run(&mut be, |b: &GlmTpBackend<GlmRank>, rows| b.leader.inner().m.logits_host(0, rows).unwrap());
+        assert!(be.take_error().is_none());
+        be.leader.barrier().expect("the follower agreed with every call");
+        let s = stats_key(&be.spec.as_ref().unwrap().stats);
+        let tp = be.leader.inner().m.tp().unwrap();
+        let ex = (tp.exchanges, tp.exchanged_bytes);
+        drop(be);
+        assert!(matches!(h.join().unwrap(), FollowerExit::Shutdown(_)), "the follower ended cleanly");
+        for (x, y) in r.lines.iter().zip(&reference[i].0.lines) {
+            assert_eq!(x, y, "lm-held, {name} head: the group's line differs from the one model's");
+        }
+        assert_eq!(r, reference[i].0, "lm-held, {name} head: drafts, keeps or lines differ");
+        assert_eq!(s, reference[i].1, "lm-held, {name} head: the speculation counters differ");
+        eprintln!(
+            "lm-held BYTE-IDENTICAL ({name} head) in {:.1?}: {} lines, keeps, counters; {} exchanges of {:.1} MiB on rank 0",
+            t0.elapsed(),
+            r.lines.len(),
+            ex.0,
+            ex.1 as f64 / 1048576.0
+        );
+    }
+    eprintln!("MemAvailable min {:.1} GiB", gib(guard.finish()));
+}

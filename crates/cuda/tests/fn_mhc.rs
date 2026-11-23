@@ -422,6 +422,50 @@ fn hcg_reads_only_its_declared_operands_with_poisoned_neighbors_at_qfn_dims() {
     assert_eq!(base.1, fresh.1, "hcg inject not reproducible on fresh buffers");
 }
 
+/// End-to-end decode-window timing at the exact Qwen4Exp shape and the 97 mixer calls in one verify step.
+/// Run with `cargo test -p gb-cuda --test fn_mhc hcx_decode_97_calls_bench -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn hcx_decode_97_calls_bench() {
+    let Some(st) = gpu() else { return };
+    const CALLS: usize = 97;
+    const SAMPLES: usize = 7;
+    let r = rig_with(8, QH, QHC, QR);
+    let input = DevBuf::from_slice(&r.input).unwrap();
+    let mut x = DevBuf::zeroed(8 * QHC * QH * 4).unwrap();
+    fn_mhc::hc_expand(&input, &mut x, QH, QHC, 8, &st).unwrap();
+    let norm = DevBuf::from_slice(&r.norm).unwrap();
+    let down = DevBuf::from_slice(&r.down).unwrap();
+    let up = DevBuf::from_slice(&r.up).unwrap();
+    let inject = DevBuf::from_slice(&r.inject).unwrap();
+    let mix = fn_mhc::Mixer { norm: &norm, down: &down, up: &up, inject: Some(&inject) };
+    let mut y = DevBuf::zeroed(8 * QH * 2).unwrap();
+    let mut inj = DevBuf::zeroed(8 * QHC * 4).unwrap();
+    let mut scratch = DevBuf::zeroed(hcx::scratch_bytes(QHC, QR)).unwrap();
+    for rows in [1usize, 3, 8] {
+        // Warm every dispatch specialization and its weight-cache path before taking any samples.
+        for _ in 0..CALLS {
+            hcx::pre(&x, &mix, &mut y, Some(&mut inj), &mut scratch, QH, QHC, QR, 1e-6, rows, &st).unwrap();
+        }
+        st.sync().unwrap();
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let start = std::time::Instant::now();
+            for _ in 0..CALLS {
+                hcx::pre(&x, &mix, &mut y, Some(&mut inj), &mut scratch, QH, QHC, QR, 1e-6, rows, &st).unwrap();
+            }
+            st.sync().unwrap();
+            samples.push(start.elapsed().as_secs_f64() * 1e6);
+        }
+        samples.sort_by(f64::total_cmp);
+        let median = samples[SAMPLES / 2];
+        println!(
+            "[hcx_decode_97] rows={rows}: total={median:.1} us, per_call={:.2} us (median of {SAMPLES})",
+            median / CALLS as f64
+        );
+    }
+}
+
 /// The DFlash2 tap (Flash-Next's width, 4 streams): every row's mean of the streams, summed in stream order in fp32, times 1/4, one bf16
 /// rounding, lands in its column band of the tap buffer, bit for bit as the host computes it; the other bands are left untouched.
 #[test]

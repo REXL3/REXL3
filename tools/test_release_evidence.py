@@ -1162,5 +1162,137 @@ class BitIdentityAlias(unittest.TestCase):
             e.validate_bit_identity(record, source={}, expected=dict(target, effective_max_context=262144))
 
 
+class SupersededHistory(ReceiptContract):
+    """A qualifier rerun of a row whose probe changed archives the earlier attempt: the
+    receipt's ``superseded`` list and ``superseded_archive`` are bound by the verifier and their files ship as
+    evidence, so an approval sealed at the v0.1.3 engine commit verifies here with the same member set."""
+
+    def attempt(self, tag, status, probe, *, result=None):
+        if result is None:
+            p = write(self.root, 'superseded/%s-result.json' % tag, encoded({'row': tag, 'status': status}))
+            result = {'path': 'superseded/' + p.name, 'sha256': sha(p.read_bytes())}
+        ev = write(self.root, 'superseded/%s-raw.txt' % tag, ('raw ' + tag).encode())
+        return dict(id='prefix_cache/cold_warm_same', gate='prefix_cache', phase='capabilities', status=status,
+                    probe_sha256=probe, error=None if status == 'PASS' else 'synthetic failure', row_sha256='0' * 64,
+                    result=result, elapsed_s=1.5, evidence=[{'path': 'superseded/' + ev.name, 'sha256': sha(ev.read_bytes())}],
+                    counters_before={'requests': 0.0}, counters_after=None,
+                    source_hashes={'release_qualification/probes.py': '1' * 64})
+
+    def archive_rows(self, attempts, name='single/superseded_rows.jsonl'):
+        lines = []
+        for item in attempts:
+            row = {k: v for k, v in item.items() if k != 'row_sha256'}
+            row['binding_sha256'] = '2' * 64   # archived rows may carry more keys than the summary binds
+            canonical = json.dumps(row, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+            item['row_sha256'] = sha(canonical.encode('utf-8'))
+            lines.append(json.dumps(dict(row, row_sha256=item['row_sha256']), sort_keys=True) + '\n')
+        p = write(self.root, name, ''.join(lines).encode())
+        return {'path': name, 'sha256': sha(p.read_bytes())}
+
+    def history(self, *, rerun_status='PASS', rerun_probe='4' * 64):
+        failed = self.attempt('first', 'FAIL', '3' * 64)
+        current = self.doc['gates']['prefix_cache']['evidence'][0]
+        rerun = self.attempt('rerun', rerun_status, rerun_probe, result=dict(current))
+        rerun['row_sha256'] = '5' * 64
+        self.doc['superseded_archive'] = self.archive_rows([failed])
+        self.doc['superseded'] = [dict(failed, rerun=rerun)]
+        self.doc['all_pass'] = True
+        return failed, rerun
+
+    def refused(self, pattern):
+        with self.assertRaisesRegex(ValueError, pattern):
+            self.validate()
+
+    def test_an_empty_history_validates_and_cannot_name_an_archive(self):
+        self.doc['superseded'] = []
+        self.assertEqual(self.validate(), self.doc)
+        self.doc['superseded_archive'] = {'path': 'identity.json', 'sha256': self.doc['identity_receipt']['sha256']}
+        self.refused('empty superseded history cannot name an archive')
+
+    def test_a_rerun_history_validates_and_ships_its_files(self):
+        failed, rerun = self.history()
+        self.assertEqual(self.validate(), self.doc)
+        approval = {'runtime_id': 'synthetic-demo', 'version': 1,
+                    'profiles': {'single': {'receipt': {'path': self.receipt.name}}}}
+        members = e.receipt_files(approval, self.root)
+        for path in ('single/superseded_rows.jsonl', failed['result']['path'], failed['evidence'][0]['path'],
+                     rerun['evidence'][0]['path'], rerun['result']['path']):
+            self.assertIn(path, members)
+
+    def test_no_history_adds_no_members(self):
+        self.validate()
+        approval = {'runtime_id': 'synthetic-demo', 'version': 1,
+                    'profiles': {'single': {'receipt': {'path': self.receipt.name}}}}
+        self.assertFalse([m for m in e.receipt_files(approval, self.root) if m.startswith('superseded')])
+
+    def test_a_same_fingerprint_rerun_is_refused(self):
+        self.history(rerun_probe='3' * 64)
+        self.refused('same-fingerprint rerun is forbidden')
+
+    def test_a_legacy_failure_without_a_fingerprint_cannot_be_rerun(self):
+        self.history()
+        entry = self.doc['superseded'][0]
+        entry['probe_sha256'] = None
+        attempt = {k: v for k, v in entry.items() if k != 'rerun'}
+        self.doc['superseded_archive'] = self.archive_rows([attempt])
+        entry['row_sha256'] = attempt['row_sha256']
+        self.refused('a legacy failure has no fingerprint authorizing rerun')
+
+    def test_the_rerun_result_must_be_current_gate_evidence(self):
+        _, rerun = self.history()
+        p = write(self.root, 'superseded/elsewhere.json', b'{}')
+        rerun['result'] = {'path': 'superseded/' + p.name, 'sha256': sha(p.read_bytes())}
+        self.refused('superseded rerun result is not current gate evidence')
+
+    def test_the_rerun_must_name_the_same_row(self):
+        _, rerun = self.history()
+        rerun['id'] = 'context/131072/10'
+        self.refused('superseded rerun names another row')
+
+    def test_an_all_pass_receipt_needs_a_passing_rerun(self):
+        self.history(rerun_status='FAIL')
+        self.refused('all_pass seal has a failed/missing rerun')
+        self.doc['superseded'][0]['rerun'] = None
+        self.refused('all_pass seal has a failed/missing rerun')
+        self.doc['all_pass'] = False
+        self.assertEqual(self.validate(), self.doc)
+
+    def test_the_summary_must_match_the_archive(self):
+        self.history()
+        self.doc['superseded'][0]['elapsed_s'] = 9.0
+        self.refused('superseded summary differs from archived attempt')
+
+    def test_archive_bytes_are_bound(self):
+        self.history()
+        path = self.root / 'single/superseded_rows.jsonl'
+        tampered = path.read_bytes().replace(b'"FAIL"', b'"PASS"')
+        path.write_bytes(tampered)
+        self.refused('superseded evidence hash drift')
+        self.doc['superseded_archive']['sha256'] = sha(tampered)
+        self.refused('superseded row integrity failed')
+        path.write_bytes(tampered.rstrip(b'\n'))
+        self.doc['superseded_archive']['sha256'] = sha(path.read_bytes())
+        self.refused('partial superseded archive')
+
+    def test_attempt_evidence_bytes_are_bound(self):
+        failed, _ = self.history()
+        (self.root / failed['evidence'][0]['path']).write_bytes(b'changed')
+        self.refused('superseded evidence hash drift')
+
+    def test_count_and_shape_are_checked(self):
+        failed, _ = self.history()
+        self.doc['superseded'].append(dict(self.doc['superseded'][0]))
+        self.refused('superseded summary/archive count mismatch')
+        self.doc['superseded'] = {'not': 'a list'}
+        self.refused('superseded must be a list')
+        self.history()
+        self.doc['superseded'][0]['source_hashes'] = {'probes.py': 'not-a-digest'}
+        self.refused('.')
+
+
+for _name in [n for n in vars(ReceiptContract) if n.startswith('test_')]:
+    setattr(SupersededHistory, _name, None)   # the base contract runs once, in its own class
+
+
 if __name__ == '__main__':
     unittest.main()

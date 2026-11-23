@@ -1,0 +1,76 @@
+{
+  "configuration_state": "frozen",
+  "default_profile": "nemotron35-super-vl-single-1m",
+  "profiles": {
+    "nemotron35-super-vl-single-1m": {
+      "argv": [
+        "--model",
+        "@MODEL_DIR@",
+        "--slots",
+        "16",
+        "--max-model-len",
+        "1048576",
+        "--spec",
+        "auto",
+        "--prefix-cache",
+        "on",
+        "--request-timeout",
+        "7200",
+        "--queue-timeout",
+        "6900",
+        "--served-model-name",
+        "nemotron-3.5-super-vl",
+        "--host",
+        "@HTTP_HOST@",
+        "--port",
+        "@HTTP_PORT@"
+      ],
+      "capabilities": {
+        "audio": false,
+        "images": true,
+        "json_schema": false,
+        "prefix_cache": true,
+        "reasoning": true,
+        "sse": true,
+        "text": true,
+        "tools": true,
+        "video": false
+      },
+      "env": {},
+      "files": {},
+      "http_host": "127.0.0.1",
+      "http_port": 9100,
+      "kind": "single",
+      "readiness_timeout_s": 600,
+      "site_fields": [
+        "http_host",
+        "http_port",
+        "model_dir"
+      ],
+      "smoke_request": {
+        "max_tokens": 2048,
+        "messages": [
+          {
+            "content": "Reply with the single word: ready",
+            "role": "user"
+          }
+        ],
+        "model": "nemotron-3.5-super-vl"
+      }
+    }
+  },
+  "qualification": {
+    "evidence": [],
+    "state": "unverified"
+  },
+  "runtime_id": "nemotron35-super-vl-sage-3.85",
+  "schema": "rexl3.runtime-profile.v1",
+  "source": {
+    "commit": "5a9d1bcec43b364264ab612d512c1df444c29a73",
+    "path": "docs/examples/cluster.nemotron35-super-vl-sage-3.85-single.json",
+    "repository": "REXL3/REXL3-dev",
+    "sha256": "9de893779662f1e24d4a6cbac0277de898ad0b0b2a894d82f0f2d725358195aa"
+  },
+  "state": "final",
+  "target_repo": "vcruz305/Nemotron-Super-VL-EXL3-3.85bpw"
+}

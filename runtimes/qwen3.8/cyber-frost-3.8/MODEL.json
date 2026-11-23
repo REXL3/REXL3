@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "Qwen4ExpForConditionalGeneration"
+  ],
+  "display_name": "CYBER-FROST 3.8",
+  "engine_family": "qwen_flash_next",
+  "family": "qwen3.8",
+  "model": "cyber-frost-3.8",
+  "pack": {
+    "bits": "3.35",
+    "format": "exl3",
+    "target_repo": "vcruz305/CYBER-FROST-3.8-SAGE-REXL3-3.35bpw",
+    "target_revision": "33be4227ff69c85cbb94f940abe7f22ad3b504e1"
+  },
+  "runtime_id": "cyberfrost-3.8-sage-rexl3-3.35",
+  "schema": "rexl3.prod-model.v1"
+}

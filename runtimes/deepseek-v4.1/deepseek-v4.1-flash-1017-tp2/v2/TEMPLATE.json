@@ -1,0 +1,9 @@
+{
+  "schema": "rexl3.template-approval.v2",
+  "version": "v1",
+  "digest": "sha256:4ee34195f95c706c9dfb6820fbae229f6c19c76a1d0b46dc13a26fe0fa775f4a",
+  "approved_tree": "64c2c2b1e5e958c5db82eda7f5ffcf5912667a5a",
+  "approved_at": "2026-11-19",
+  "approved_by": "am423",
+  "note": "Approved by the maintainer for the known-working host dependency policy (dev #441): when a lock sets host_policy to known-working, the launcher, doctor and rank attestation accept a non-driver native package (libnccl2, cuda-cudart, libcublas) at or above its tested floor on the same major version and print DEPENDENCY_NOT_YET_QUALIFIED for a version the lock does not list as qualified; the host-reported CUDA driver, runtime and cuBLAS versions are a floor with NATIVE_NOT_YET_QUALIFIED above it, and only the cuBLAS part of the system fingerprint may differ; a pending restart is the REBOOT_PENDING warning while a loaded NVIDIA kernel module that differs from the installed driver is refused as DRIVER_MODULE_MISMATCH; a package on apt hold reads as installed; ranks are compared on what is installed. A lock without the new fields keeps every exact comparison. Build identity, the driver policy approved for dev #418, the rank version probe approved for dev #421 and the launcher stop behaviour approved for #155 are unchanged. approved_tree is the Git tree of runtimes/template-v1 without TEMPLATE.json (tools/runtime_template_digest.py --tree). Any later edit to the template changes the digest and needs a new approval."
+}

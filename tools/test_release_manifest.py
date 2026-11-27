@@ -178,7 +178,9 @@ class EvidenceAssetsKeyTest(unittest.TestCase):
             doc = json.loads(path.read_text(encoding='utf-8'))
             with self.subTest(release=path.parent.name):
                 self.assertEqual(validate_manifest(doc, path.parent.name), doc)
-                self.assertIs(evidence_published(doc), True)
+                # v0.1.0-v0.1.2 publish the evidence archives; from v0.1.3 the cut may keep them on the
+                # dev release, and then the key must carry its one accepted value.
+                self.assertIs(evidence_published(doc), doc.get('evidence_assets') != 'dev-release')
                 seen += 1
         self.assertGreaterEqual(seen, 3)
 
